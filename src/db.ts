@@ -1,4 +1,6 @@
 import { Sequelize, DataTypes, Model } from 'sequelize';
+// @ts-ignore
+import pg from 'pg';
 
 // Use DATABASE_URL from environment for PostgreSQL
 const databaseUrl = process.env.DATABASE_URL || '';
@@ -6,6 +8,7 @@ export const sequelize = new Sequelize(databaseUrl, {
   dialect: 'postgres',
   protocol: 'postgres',
   logging: false,
+  dialectModule: pg,
   dialectOptions: {
     ssl: databaseUrl.includes('sslmode=require') ? { require: true, rejectUnauthorized: false } : false,
   },
