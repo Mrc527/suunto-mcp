@@ -1,8 +1,8 @@
 import { NextApiRequest, NextApiResponse } from 'next';
-import { User, syncDb } from '../../src/db';
+import { User, initDb } from '../../src/db';
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  await syncDb();
+  await initDb();
   const { mcpToken } = req.query;
   if (!mcpToken || typeof mcpToken !== 'string') return res.status(400).json({ error: 'Missing MCP token' });
   const user = await User.findOne({ where: { mcpToken } });

@@ -1,11 +1,11 @@
 import { z } from 'zod';
-import { User, syncDb } from '../db';
+import { User, initDb } from '../db';
 
 export const getDailyActivitySamples247Tool = (server: any, toolRegistry?: Record<string, Function>) => {
   const handler = async ({ from, to }: any, context: any) => {
     const mcpToken = context?.authorization?.replace('Bearer ', '');
     if (!mcpToken) return { content: [{ type: 'text', text: 'Missing MCP token' }] };
-    await syncDb();
+    await initDb();
     const user = await User.findOne({ where: { mcpToken } });
     if (!user) return { content: [{ type: 'text', text: 'Invalid MCP token' }] };
     const url = `https://cloudapi.suunto.com/247samples/activity?from=${from}&to=${to}`;
