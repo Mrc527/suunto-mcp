@@ -24,6 +24,7 @@ This project is a Next.js application and MCP server for enabling AI to interact
 ## MCP Server
 - The MCP server is implemented as an API route in Next.js.
 - Configure your MCP client (Claude, VSCode, etc.) to connect to your Vercel deployment and use the issued MCP token for authentication.
+- **Production MCP server URL:** `https://suunto-mcp.vercel.app/api/mcp`
 
 ## Project Structure
 - `pages/` - Next.js pages (UI, API endpoints)
