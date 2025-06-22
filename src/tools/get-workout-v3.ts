@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { User, syncDb } from '../db';
+import { User, initDb } from '../db';
 
 const SUBSCRIPTION_KEY = process.env.SUUNTO_SUBSCRIPTION_KEY!;
 
@@ -7,7 +7,7 @@ export const getWorkoutV3Tool = (server: any, toolRegistry?: Record<string, Func
   const handler = async ({ workoutKey, extensions }: any, context: any) => {
     const mcpToken = context?.authorization?.replace('Bearer ', '');
     if (!mcpToken) return { content: [{ type: 'text', text: 'Missing MCP token' }] };
-    await syncDb();
+    await initDb();
     const user = await User.findOne({ where: { mcpToken } });
     if (!user) return { content: [{ type: 'text', text: 'Invalid MCP token' }] };
     let url = `https://cloudapi.suunto.com/v3/workouts/${encodeURIComponent(workoutKey)}`;

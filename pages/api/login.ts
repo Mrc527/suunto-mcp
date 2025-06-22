@@ -1,5 +1,5 @@
 import { NextApiRequest, NextApiResponse } from 'next';
-import { User, syncDb } from '../../src/db';
+import { User, initDb } from '../../src/db';
 import { randomBytes } from 'crypto';
 
 // This is a mock. Replace with real Suunto API call.
@@ -11,7 +11,7 @@ async function fetchSuuntoToken(username: string, password: string): Promise<str
 
 // This endpoint is now deprecated. Use /api/oauth-login for Suunto OAuth2 login.
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  await syncDb();
+  await initDb();
   if (req.method !== 'POST') return res.status(405).end();
   const { username, password } = req.body;
   if (!username || !password) return res.status(400).json({ error: 'Missing credentials' });

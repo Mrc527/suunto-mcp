@@ -1,5 +1,5 @@
 import { NextApiRequest, NextApiResponse } from 'next';
-import { User, syncDb } from '../../src/db';
+import { User, initDb } from '../../src/db';
 import fetch from 'node-fetch';
 
 const clientId = process.env.SUUNTO_CLIENT_ID!;
@@ -38,7 +38,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   const payload = JSON.parse(Buffer.from(jwt, 'base64').toString());
   const suuntoUsername = payload.user;
 
-  await syncDb();
+  await initDb();
   let user = await User.findOne({ where: { suuntoUsername } });
   if (!user) {
     const mcpToken = Buffer.from(suuntoUsername + Date.now()).toString('hex');
