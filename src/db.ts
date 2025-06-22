@@ -1,7 +1,15 @@
 import { Sequelize, DataTypes, Model } from 'sequelize';
 
-// In-memory SQLite DB
-export const sequelize = new Sequelize('sqlite::memory:', { logging: false });
+// Use DATABASE_URL from environment for PostgreSQL
+const databaseUrl = process.env.DATABASE_URL || '';
+export const sequelize = new Sequelize(databaseUrl, {
+  dialect: 'postgres',
+  protocol: 'postgres',
+  logging: false,
+  dialectOptions: {
+    ssl: databaseUrl.includes('sslmode=require') ? { require: true, rejectUnauthorized: false } : false,
+  },
+});
 
 export class User extends Model {
   public id!: number;
@@ -24,6 +32,20 @@ User.init(
   { sequelize, modelName: 'User' }
 );
 
-export async function syncDb() {
-  await sequelize.sync();
+// Initialize DB connection and run migrations if needed
+export async function initDb() {
+  try {
+    await sequelize.authenticate();
+    if (process.env.NODE_ENV !== 'production') {
+      // Safe to use sync in development only
+      await sequelize.sync();
+      console.log('Database connected and models synchronized (development mode).');
+    } else {
+      // In production, use migrations only
+      console.log('Database connected (production mode). Run migrations separately.');
+    }
+  } catch (error) {
+    console.error('Unable to connect to the database:', error);
+    throw error;
+  }
 }
