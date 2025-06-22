@@ -6,6 +6,13 @@ const clientId = process.env.SUUNTO_CLIENT_ID!;
 const clientSecret = process.env.SUUNTO_CLIENT_SECRET!;
 const redirectUri = process.env.SUUNTO_REDIRECT_URI!;
 
+interface TokenResponse {
+  access_token: string;
+  refresh_token: string;
+  expires_in: number;
+  [key: string]: any;
+}
+
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   const code = req.query.code as string;
   if (!code) return res.status(400).send('Missing code');
@@ -23,7 +30,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       code,
     }),
   });
-  const tokenData = await tokenRes.json();
+  const tokenData = await tokenRes.json() as TokenResponse;
   if (!tokenData.access_token) return res.status(401).json(tokenData);
 
   // Parse JWT to get username
