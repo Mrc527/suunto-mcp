@@ -24,7 +24,7 @@ beforeAll(async () => {
     host: "127.0.0.1",
     port: 0,
     dataDir: ":memory:",
-    operator: { PADI_COGNITO_URL: "http://127.0.0.1:1/", PADI_AUTH_URL: "http://127.0.0.1:1/auth/api", PADI_LOGBOOK_URL: "http://127.0.0.1:1/api/Logbook" },
+    operator: { SUUNTO_OAUTH_URL: "http://127.0.0.1:1", SUUNTO_API_URL: "http://127.0.0.1:1" },
     log: () => {},
   });
   server.on("request", web.app);

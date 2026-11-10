@@ -5,6 +5,7 @@ import { createServer, type Server } from "node:http";
 import { connect, type AddressInfo, type Socket } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createWebApp, type WebApp } from "../../src/web/server.js";
+import { fakeJwt } from "../helpers/mock-suunto.js";
 import { Browser, connectMcp, setBase, TestOAuthClient } from "../helpers/web-client.js";
 
 let web: WebApp;
@@ -25,20 +26,23 @@ beforeAll(async () => {
     port: 0,
     dataDir: ":memory:",
     liveHeartbeatMs: 200,
-    operator: { PADI_COGNITO_URL: "http://127.0.0.1:1/", PADI_AUTH_URL: "http://127.0.0.1:1/auth/api", PADI_LOGBOOK_URL: "http://127.0.0.1:1/api/Logbook" },
+    // Closed local ports and invented app keys: nothing is ever sent to Suunto.
+    operator: { SUUNTO_OAUTH_URL: "http://127.0.0.1:1", SUUNTO_API_URL: "http://127.0.0.1:1" },
+    suuntoKeys: { clientId: "invented-client", clientSecret: "invented-secret-value", subscriptionKey: "0123456789abcdef0123456789abcdef" },
     log: () => {},
   });
   server.on("request", web.app);
   expect((await user.signup("live@example.com", PASSWORD)).status).toBe(303);
-  // Tool calls are only logged once the user has a PADI connection (invented test data).
+  // Tool calls are only logged once the user has a Suunto connection (invented test data). The
+  // access token is valid for a day, so suunto_account_info needs no request.
   const id = web.ctx.store.getUserByEmail("live@example.com")!.id;
-  web.ctx.store.savePadiSettings(id, {
-    email: "live.diver@example.com",
+  web.ctx.store.saveSuuntoSettings(id, {
+    username: "live-runner",
     refreshToken: "rt-invented",
-    loginMethod: "cognito",
-    clientId: "test-client",
-    affiliateId: "10000003",
-    units: "auto",
+    accessToken: fakeJwt({ claims: { user: "live-runner" } }),
+    accessTokenExpiresAt: Date.now() + 86_400_000,
+    clientId: "invented-client",
+    units: "metric",
     readOnly: false,
     connectedAt: Date.now(),
   });
@@ -106,12 +110,13 @@ describe("live activity", () => {
 
     const oauth = new TestOAuthClient(user);
     const client = await connectMcp(oauth);
-    await client.callTool({ name: "padi_account_info", arguments: {} });
+    const info = await client.callTool({ name: "suunto_account_info", arguments: {} });
+    expect(info.isError, JSON.stringify(info.content)).toBeFalsy();
     await client.close();
 
     const { text } = await reading;
     const [ev] = events(text);
-    expect(ev).toMatchObject({ tool: "padi_account_info" });
+    expect(ev).toMatchObject({ tool: "suunto_account_info", ok: true });
     expect(text).toContain(`id: ${ev!.id}\n`);
     expect(text).toContain("retry: 10000");
   });
@@ -119,15 +124,15 @@ describe("live activity", () => {
   it("sends what a reconnecting page missed", async () => {
     const userId = web.ctx.store.getUserByEmail("live@example.com")!.id;
     const before = web.ctx.store.recentActivity(userId, 1)[0]!.id;
-    web.ctx.store.logActivity(userId, "logbook_list_dives", true, 12);
-    web.ctx.store.logActivity(userId, "logbook_get_dive", false, 30);
+    web.ctx.store.logActivity(userId, "suunto_list_workouts", true, 12);
+    web.ctx.store.logActivity(userId, "suunto_get_workout", false, 30);
     const res = await user.fetch(`/account/activity/stream?after=${before}`);
     const { text } = await readUntil(res, (t) => events(t).length >= 2);
-    expect(events(text).map((e) => e.tool)).toEqual(["logbook_list_dives", "logbook_get_dive"]);
+    expect(events(text).map((e) => e.tool)).toEqual(["suunto_list_workouts", "suunto_get_workout"]);
     // The Last-Event-ID header (sent by browsers when they reconnect) works the same way.
     const again = await user.fetch("/account/activity/stream", { headers: { "last-event-id": String(before + 1) } });
     const second = await readUntil(again, (t) => events(t).length >= 1);
-    expect(events(second.text).map((e) => e.tool)).toEqual(["logbook_get_dive"]);
+    expect(events(second.text).map((e) => e.tool)).toEqual(["suunto_get_workout"]);
   });
 
   it("limits open streams per user", async () => {

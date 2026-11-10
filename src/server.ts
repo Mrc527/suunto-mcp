@@ -359,6 +359,17 @@ export async function runLogin(config: AppConfig, opts: LoginOptions): Promise<L
       return;
     }
     finished = true;
+    try {
+      await handleCallback(q, res);
+    } catch (failure) {
+      // Whatever went wrong with the one callback that counts ends the login.
+      finish({ error: failure });
+      throw failure;
+    }
+  };
+
+  /** The callback with the right state: an error, or a code to exchange. */
+  const handleCallback = async (q: URLSearchParams, res: ServerResponse): Promise<void> => {
     const error = q.get("error");
     if (error) {
       const failure = callbackError(error);
@@ -394,8 +405,7 @@ export async function runLogin(config: AppConfig, opts: LoginOptions): Promise<L
     handle(req, res).catch((error: unknown) => {
       if (!res.headersSent) res.writeHead(500, { "content-type": "text/plain; charset=utf-8" });
       res.end("Internal error");
-      // Only a failure of the one callback that counts ends the login.
-      if (finished) finish({ error });
+      opts.print(`A callback failed: ${redact(describeError(error), config.secrets)}`);
     });
   };
 

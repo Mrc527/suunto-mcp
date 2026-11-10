@@ -185,6 +185,11 @@ function buildConfig(env: Env, cli: CliOverrides, warn: (message: string) => voi
     );
   }
 
+  if (mode === "serve" && refreshToken && !tokenCache) {
+    // Suunto may hand out a new refresh token on a refresh; without a cache it lives in memory only.
+    warn("SUUNTO_REFRESH_TOKEN is set without SUUNTO_TOKEN_CACHE. Suunto may replace the refresh token while the server runs, and the next start would then fail. Set SUUNTO_TOKEN_CACHE to a file path to keep the newest one.");
+  }
+
   const units = choice(env, "SUUNTO_UNITS", ["metric", "imperial"] as const, "metric");
   const endpoints = endpointsFromEnv(env);
   const custom = customEndpoints(endpoints);

@@ -86,7 +86,8 @@ describe("consent page", () => {
       host: "127.0.0.1",
       port: 0,
       dataDir: ":memory:",
-      operator: { PADI_COGNITO_URL: "http://127.0.0.1:1/", PADI_AUTH_URL: "http://127.0.0.1:1/auth/api", PADI_LOGBOOK_URL: "http://127.0.0.1:1/api/Logbook" },
+      // Closed local ports: nothing is ever sent to Suunto.
+      operator: { SUUNTO_OAUTH_URL: "http://127.0.0.1:1", SUUNTO_API_URL: "http://127.0.0.1:1" },
       log: () => {},
     });
     server.on("request", web.app);
@@ -123,38 +124,38 @@ describe("consent page", () => {
     expect(html).not.toContain("We don&#39;t recognize this app");
   });
 
-  it("says what the app may do with the logbook: everything, or only read", async () => {
+  it("says what the app may do with the Suunto data: read everything, and add routes unless read-only", async () => {
     const owner = web.ctx.store.getUserByEmail("owner@example.com")!;
-    // No PADI connection yet: a link to connect it that comes back here.
+    const ADD = "See your routes and points of interest, and add new ones to your Suunto App";
+    const READ = "See your routes and points of interest, without changing anything";
+    // No Suunto connection yet: a link to connect it that comes back here.
     let page = await consentFor("https://claude.ai/api/mcp/auth_callback", "Claude");
-    expect(page.html).toContain("Allow access to your PADI logbook?");
-    expect(page.html).toContain("svc-icon svc-logbook svc-sm");
-    expect(page.html).toContain("svc-icon svc-cards svc-sm");
-    expect(page.html).toContain("log new dives, change and delete dives, and send a dive to a PADI Pro for verification");
-    expect(page.html).toContain("See your PADI certification cards");
-    expect(page.html).toContain(`You have not connected your PADI account yet. <a href="/account?next=${encodeURIComponent(`/oauth/consent?request=${page.request}`)}">Connect it now</a>`);
+    expect(page.html).toContain("Allow access to your Suunto data?");
+    for (const service of ["workouts", "health", "routes"]) expect(page.html).toContain(`svc-icon svc-${service} svc-sm`);
+    expect(page.html).toContain("See your workouts with laps, heart rate zones and statistics, and export them as FIT files");
+    expect(page.html).toContain("See your daily steps and energy, 24/7 heart rate, sleep and recovery");
+    expect(page.html).toContain(ADD);
+    expect(page.html).toContain(`You have not connected your Suunto account yet. <a href="/account?next=${encodeURIComponent(`/oauth/consent?request=${page.request}`)}">Connect it now</a>`);
     // Connected and read-only: only the reading line, and no notice.
-    web.ctx.store.savePadiSettings(owner.id, {
-      email: "owner.diver@example.com",
+    web.ctx.store.saveSuuntoSettings(owner.id, {
+      username: "owner-runner",
       refreshToken: "rt-invented-owner",
-      loginMethod: "cognito",
       clientId: "test-client",
-      affiliateId: "10000006",
-      units: "auto",
+      units: "metric",
       readOnly: true,
       connectedAt: Date.now(),
     });
     page = await consentFor("https://claude.ai/api/mcp/auth_callback", "Claude");
-    expect(page.html).toContain("See your dives and statistics, without changing anything");
-    expect(page.html).not.toContain("change and delete dives");
-    expect(page.html).not.toContain("You have not connected your PADI account yet.");
+    expect(page.html).toContain(READ);
+    expect(page.html).not.toContain(ADD);
+    expect(page.html).not.toContain("You have not connected your Suunto account yet.");
     // The administrator's read-only switch wins.
-    web.ctx.store.savePadiPreferences(owner.id, { units: "auto", readOnly: false });
-    expect((await consentFor("https://claude.ai/api/mcp/auth_callback", "Claude")).html).toContain("change and delete dives");
+    web.ctx.store.saveSuuntoPreferences(owner.id, { units: "metric", readOnly: false });
+    expect((await consentFor("https://claude.ai/api/mcp/auth_callback", "Claude")).html).toContain(ADD);
     web.ctx.store.saveSettings({ ...web.ctx.store.getSettings(), forceReadOnly: true });
-    expect((await consentFor("https://claude.ai/api/mcp/auth_callback", "Claude")).html).toContain("without changing anything");
+    expect((await consentFor("https://claude.ai/api/mcp/auth_callback", "Claude")).html).toContain(READ);
     web.ctx.store.saveSettings({ ...web.ctx.store.getSettings(), forceReadOnly: false });
-    web.ctx.store.savePadiSettings(owner.id, undefined);
+    web.ctx.store.saveSuuntoSettings(owner.id, undefined);
   });
 
   it("says an answer to localhost stays on this device, and allows it without the box", async () => {
@@ -169,7 +170,7 @@ describe("consent page", () => {
   it("warns about an unknown app, and only allows it once the box is ticked", async () => {
     const page = await consentFor("https://app.example.org/cb", "Helper");
     expect(page.html).toContain("We don&#39;t recognize this app");
-    expect(page.html).toContain("If you allow it, <code>app.example.org</code> gets access to your PADI logbook.");
+    expect(page.html).toContain("If you allow it, <code>app.example.org</code> gets access to your Suunto data.");
     expect(page.html).toContain('<input type="checkbox" name="trust" value="1" required>');
     expect(page.html).toMatch(/<button type="submit" name="decision" value="deny" class="secondary block" formnovalidate>/);
     expect(page.html).not.toContain("never sends you to");
@@ -228,7 +229,8 @@ describe("consent page", () => {
     expect(again.headers.get("location")).toBeNull();
     expect(await again.text()).not.toContain("code=");
     // Nor turn it into a refusal.
-    expect((await sender.post("/oauth/consent", { _csrf: csrf, request, decision: "deny" })).headers.get("location")).toBe("/account?m=denied");
+    expect((await sender.post("/oauth/consent", { _csrf: csrf, request, decision: "deny" })).headers.get("location")).toBe("/account?m=appdenied");
+    expect((await sender.page("/account?m=appdenied")).html).toContain("Access was denied.");
 
     // The owner reopening it gets the same answer (a double submit).
     const mine = await user.fetch(link);

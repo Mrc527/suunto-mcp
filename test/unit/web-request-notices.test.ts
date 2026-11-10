@@ -48,7 +48,7 @@ beforeAll(async () => {
     host: "127.0.0.1",
     port: 0,
     dataDir: ":memory:",
-    operator: { PADI_COGNITO_URL: "http://127.0.0.1:1/", PADI_AUTH_URL: "http://127.0.0.1:1/auth/api", PADI_LOGBOOK_URL: "http://127.0.0.1:1/api/Logbook" },
+    operator: { SUUNTO_OAUTH_URL: "http://127.0.0.1:1", SUUNTO_API_URL: "http://127.0.0.1:1" },
     log: (m) => logs.push(m),
     sendNotice: fake,
     notifyFrom: "notify@example.com",
@@ -150,7 +150,7 @@ describe("e-mails about access requests", () => {
     await vi.waitFor(() => expect(sent).toHaveLength(1), { timeout: 3000 });
     const { mail } = sent[0]!;
     expect(mail.to).toBe("admin@example.com");
-    expect(mail.subject).toBe("New access request for MCP for PADI");
+    expect(mail.subject).toBe("New access request for MCP for Suunto");
     expect(mail.text).toContain(`Someone asked for an account on ${new URL(base).host}:`);
     const asked = store().getUserByEmail("asker@example.com")!.createdAt;
     expect(mail.text).toContain(`\nasker@example.com (${when(asked, "en", "UTC")})\n`);
@@ -170,7 +170,7 @@ describe("e-mails about access requests", () => {
     await web.ctx.notices.flush();
     expect(sent).toHaveLength(1);
     const { mail } = sent[0]!;
-    expect(mail.subject).toBe(`${MAX_LISTED + 2} new access requests for MCP for PADI`);
+    expect(mail.subject).toBe(`${MAX_LISTED + 2} new access requests for MCP for Suunto`);
     expect(mail.text).toContain(`${MAX_LISTED + 2} people asked for an account`);
     expect(mail.text).toContain(`person${MAX_LISTED}@example.com`);
     expect(mail.text).not.toContain(`person${MAX_LISTED + 1}@example.com`);
@@ -226,7 +226,7 @@ describe("e-mails about access requests", () => {
     sent.length = 0;
     request("subject-test@example.com", "Subject: fake\nBcc: victim@example.com");
     await web.ctx.notices.flush();
-    expect(sent[0]!.mail.subject).toBe("New access request for MCP for PADI");
+    expect(sent[0]!.mail.subject).toBe("New access request for MCP for Suunto");
     expect(sent[0]!.mail.text).toContain("> Bcc: victim@example[.]com");
     expect(logs.filter((m) => /@/.test(m))).toEqual([]);
     store().rejectAllAccessRequests();
@@ -306,7 +306,7 @@ describe("e-mails about access requests", () => {
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("Test e-mail sent to admin@example.com.");
     expect(sent).toHaveLength(1);
-    expect(sent[0]!.mail.subject).toBe("Test e-mail from MCP for PADI");
+    expect(sent[0]!.mail.subject).toBe("Test e-mail from MCP for Suunto");
     expect(sent[0]!.mail.to).toBe("admin@example.com");
 
     failWith = smtpError("ECONNECTION");
@@ -415,11 +415,11 @@ describe("the operator's SMTP settings", () => {
     const bad = smtpUrlProblem("not a url with secret-pass");
     expect(bad).toBeTruthy();
     expect(bad).not.toContain("secret-pass");
-    const env = (extra: Record<string, string>) => ({ PUBLIC_URL: "https://padi.example.com", ...extra });
+    const env = (extra: Record<string, string>) => ({ PUBLIC_URL: "https://suunto.example.com", ...extra });
     expect(() => webOptionsFromEnv(env({ SMTP_URL: "ftp://u:secret-pass@x" }), {}, () => {})).toThrow(/smtp/);
     expect(() => webOptionsFromEnv(env({ NOTIFY_FROM: "not an address" }), {}, () => {})).toThrow(/NOTIFY_FROM/);
-    const ok = webOptionsFromEnv(env({ SMTP_URL: "smtp://u:p@mail.example.com:587", NOTIFY_FROM: "MCP for PADI <noreply@example.com>" }), {}, () => {});
-    expect(ok).toMatchObject({ smtpUrl: "smtp://u:p@mail.example.com:587", notifyFrom: "MCP for PADI <noreply@example.com>" });
+    const ok = webOptionsFromEnv(env({ SMTP_URL: "smtp://u:p@mail.example.com:587", NOTIFY_FROM: "MCP for Suunto <noreply@example.com>" }), {}, () => {});
+    expect(ok).toMatchObject({ smtpUrl: "smtp://u:p@mail.example.com:587", notifyFrom: "MCP for Suunto <noreply@example.com>" });
     expect(webOptionsFromEnv(env({}), {}, () => {}).smtpUrl).toBeUndefined();
     // A sender is needed: the SMTP user name when it is an address, or NOTIFY_FROM.
     expect(webOptionsFromEnv(env({ SMTP_URL: "smtps://notify%40example.com:p@mail.example.com:465" }), {}, () => {}).notifyFrom).toBeUndefined();
@@ -496,11 +496,11 @@ describe("sending through the operator's SMTP server", () => {
       expect(received).toEqual([]);
 
       // The operator can allow clear text on purpose (a mail server on the same machine).
-      await smtpSender(`smtp://notify:smtp-test-password@127.0.0.1:${port}?requireTLS=false`)({ to: "admin@example.com", from: "notify@example.com", subject: "New access request for MCP for PADI", text: "Someone asked.\n> hi" });
+      await smtpSender(`smtp://notify:smtp-test-password@127.0.0.1:${port}?requireTLS=false`)({ to: "admin@example.com", from: "notify@example.com", subject: "New access request for MCP for Suunto", text: "Someone asked.\n> hi" });
       expect(received).toHaveLength(1);
       expect(received[0]!.from).toBe("notify@example.com");
       expect(received[0]!.to).toEqual(["admin@example.com"]);
-      expect(received[0]!.raw).toContain("Subject: New access request for MCP for PADI");
+      expect(received[0]!.raw).toContain("Subject: New access request for MCP for Suunto");
       expect(received[0]!.raw).toMatch(/Auto-Submitted: auto-generated/i);
       expect(received[0]!.raw).toContain("Content-Type: text/plain");
 

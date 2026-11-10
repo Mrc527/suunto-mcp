@@ -30,6 +30,15 @@ describe("loadConfig", () => {
     expect(c.secrets.sort()).toEqual(["rt-invented-value", "secret-invented-value", "subkey-invented-value"]);
   });
 
+  it("warns when a refresh token has no token cache to keep its newer versions", () => {
+    const warnings: string[] = [];
+    loadConfig(base, {}, (w) => warnings.push(w));
+    expect(warnings).toEqual([expect.stringMatching(/SUUNTO_REFRESH_TOKEN is set without SUUNTO_TOKEN_CACHE/)]);
+    const quiet: string[] = [];
+    loadConfig({ ...base, SUUNTO_TOKEN_CACHE: join(tmpdir(), "suunto-mcp-unused.json") }, {}, (w) => quiet.push(w));
+    expect(quiet).toEqual([]);
+  });
+
   it("reads units, read-only and the HTTP settings", () => {
     const c = loadConfig({ ...base, SUUNTO_UNITS: "Imperial", SUUNTO_READ_ONLY: "yes", MCP_HTTP_PORT: "4100", MCP_HTTP_ALLOWED_HOSTS: "a.example.com, b.example.com" });
     expect(c.units).toBe("imperial");
