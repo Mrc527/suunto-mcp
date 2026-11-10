@@ -180,6 +180,25 @@ check_suunto_keys() {
   done
 }
 
+# The Suunto app keys the service will start with: the pipeline's when it sent them, else the ones
+# in .env. Checked before any version is switched: the service refuses to start with only some of
+# the three (or with a space in one), and then neither the new nor the previous version would run.
+check_env_suunto_keys() {
+  local name value set=0
+  for name in SUUNTO_CLIENT_ID SUUNTO_CLIENT_SECRET SUUNTO_SUBSCRIPTION_KEY; do
+    if [ -n "$NEW_CLIENT_ID" ]; then value=$(suunto_key "$name"); else value=$(env_get "$name"); fi
+    if [ -n "$value" ]; then
+      set=$((set + 1))
+      if [[ ! $value =~ ^[[:graph:]]+$ ]]; then
+        die "$name in .env contains a space or another character that is not allowed. Fix .env, then deploy again. Nothing was changed."
+      fi
+    fi
+  done
+  if [ "$set" -ne 0 ] && [ "$set" -ne 3 ]; then
+    die "only some of the Suunto app keys are set in .env (SUUNTO_CLIENT_ID, SUUNTO_CLIENT_SECRET, SUUNTO_SUBSCRIPTION_KEY). Set all three or none, then deploy again. Nothing was changed."
+  fi
+}
+
 suunto_key() {
   case $1 in
     SUUNTO_CLIENT_ID) printf '%s' "$NEW_CLIENT_ID" ;;
@@ -402,6 +421,7 @@ cmd_deploy() {
   read_credentials
   preflight
   check_suunto_keys
+  check_env_suunto_keys
   check_config "$image"
   lock "deploy $image $revision"
   apply_suunto_keys
@@ -446,6 +466,7 @@ cmd_rollback() {
   [[ $previous =~ $IMAGE_RE ]] || die "the recorded previous image is not valid: $previous"
   [ "$previous" != "$current" ] || die "the previous version is already running. To go further back or forward, deploy that version again."
   check_config "$previous"
+  check_env_suunto_keys
   lock "rollback $previous"
   if ! docker image inspect "$previous" >/dev/null 2>&1; then
     log "pulling $previous"

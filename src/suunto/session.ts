@@ -8,11 +8,18 @@
  * Rules:
  * - after each refresh, sink.save() gets the new tokens (access token, expiry, newest refresh
  *   token): Suunto may rotate the refresh token, and the next start must not use a dead one;
+ * - another process or session may have refreshed with the same refresh token and stored a new
+ *   one (Suunto may end a refresh token after its first use). So right before a refresh, and
+ *   after an invalid_grant, the session asks sink.load() for the stored tokens. When they hold
+ *   another refresh token of the same app, the session takes them over (with their access token
+ *   while it is still valid) instead of using its old refresh token. After an invalid_grant it
+ *   tries the stored refresh token once before it gives up;
  * - when Suunto refuses the refresh token (invalid_grant), sink.invalid() is called and every call
  *   fails with "Your Suunto connection expired. Connect Suunto again." without a request. Suunto
  *   has sent false invalid_grant answers during outages, so after a cool-down (10 minutes) the
  *   next call tries the same refresh token once more; when that works, sink.save() gets the
- *   tokens as after any refresh (the sink can clear its "needs reconnect" mark there);
+ *   tokens as after any refresh (the sink can clear its "needs reconnect" mark there). New tokens
+ *   in the sink (the user connected again) end the cool-down at once;
  * - network problems and a busy Suunto are not final: the next call tries again. While the old
  *   access token has not expired yet, accessToken() keeps using it;
  * - deauthorize() is best effort and never throws.
@@ -20,9 +27,9 @@
 
 import type { SuuntoEndpoints } from "./endpoints.js";
 import { decodeJwt, jwtExpiresAt, jwtUsername } from "./jwt.js";
-import { deauthorize, refreshTokens, SuuntoAuthError, type OAuthOptions, type StoredSuuntoTokens, type SuuntoAppKeys, type TokenResult } from "./oauth.js";
+import { deauthorize, refreshTokens, SuuntoAuthError, type OAuthOptions, type RefreshResult, type StoredSuuntoTokens, type SuuntoAppKeys } from "./oauth.js";
 
-export { SuuntoAuthError, type StoredSuuntoTokens, type SuuntoAppKeys, type SuuntoAuthErrorCode, type TokenResult } from "./oauth.js";
+export { SuuntoAuthError, type RefreshResult, type StoredSuuntoTokens, type SuuntoAppKeys, type SuuntoAuthErrorCode, type TokenResult } from "./oauth.js";
 
 /** Where a session reports token changes (the web store, a cache file, or nothing). */
 export interface TokenSink {
@@ -30,6 +37,12 @@ export interface TokenSink {
   save(tokens: StoredSuuntoTokens): void;
   /** The stored refresh token no longer works: the user must connect Suunto again. */
   invalid(reason: string): void;
+  /**
+   * The tokens stored now (they may be newer than the session's: another process or session
+   * refreshed, or the user connected again), or undefined. Called right before a refresh and
+   * after an invalid_grant, so it must be cheap and must not throw.
+   */
+  load?(): StoredSuuntoTokens | undefined;
 }
 
 export interface SuuntoSessionOptions {
@@ -68,9 +81,21 @@ interface CurrentToken {
   username: string | undefined;
 }
 
+/** The current token of stored tokens, when they hold an access token with a known expiry. */
+function storedCurrent(tokens: StoredSuuntoTokens): CurrentToken | undefined {
+  const access = tokens.accessToken;
+  if (!access) return undefined;
+  const payload = decodeJwt(access);
+  const expiresAt = tokens.accessTokenExpiresAt ?? (payload ? jwtExpiresAt(payload) : undefined);
+  if (!expiresAt) return undefined;
+  return { accessToken: access, expiresAt, renewedAt: 0, username: payload ? jwtUsername(payload) : undefined };
+}
+
 export class SuuntoSession {
   private tokens: StoredSuuntoTokens;
   private current: CurrentToken | undefined;
+  /** The Suunto username, once known (a refresh answer may not carry it). */
+  private knownUsername: string | undefined;
   private inflight: Promise<string> | undefined;
   /** Set when Suunto refused the refresh token: the user must connect again (or wait for the cool-down). */
   private refused: { error: SuuntoAuthError; at: number } | undefined;
@@ -83,24 +108,19 @@ export class SuuntoSession {
     this.connectAgain = opts.connectAgain?.trim() || "Connect Suunto again.";
     this.tokens = { ...opts.tokens };
     // Stored tokens may still hold a valid access token (for example right after connecting).
-    const access = opts.tokens.accessToken;
-    if (access) {
-      const payload = decodeJwt(access);
-      const expiresAt = opts.tokens.accessTokenExpiresAt ?? (payload ? jwtExpiresAt(payload) : undefined);
-      if (expiresAt) this.current = { accessToken: access, expiresAt, renewedAt: 0, username: payload ? jwtUsername(payload) : undefined };
-    }
+    this.current = storedCurrent(this.tokens);
+    this.knownUsername = this.current?.username;
   }
 
   /** A valid access token (refreshes first when needed). */
   async accessToken(): Promise<string> {
     this.throwIfRefused();
     if (this.isFresh()) return this.current!.accessToken;
-    const old = this.isUsable() ? this.current!.accessToken : undefined;
     try {
       return await this.renew();
     } catch (error) {
-      // Suunto's sign-in service is down or busy, but the old token still works for a few minutes.
-      if (old && !this.refused && this.current?.accessToken === old && this.isUsable()) return old;
+      // Suunto's sign-in service is down or busy, but the current token still works for a few minutes.
+      if (!this.refused && this.isUsable()) return this.current!.accessToken;
       throw error;
     }
   }
@@ -114,7 +134,7 @@ export class SuuntoSession {
     this.throwIfRefused();
     if (this.inflight) return this.inflight;
     if (staleToken && this.current && this.current.accessToken !== staleToken && this.isUsable()) return this.current.accessToken;
-    return this.renew();
+    return this.renew(staleToken);
   }
 
   /** The Suunto username (the access token's "user" claim); refreshes first when it is not known. */
@@ -122,7 +142,7 @@ export class SuuntoSession {
     this.throwIfRefused();
     if (this.current?.username && this.isUsable()) return this.current.username;
     await this.renew();
-    const name = this.current?.username;
+    const name = this.current?.username ?? this.knownUsername;
     if (!name) throw new SuuntoAuthError("unknown", "The Suunto sign-in has no Suunto username.");
     return name;
   }
@@ -157,10 +177,57 @@ export class SuuntoSession {
     }
   }
 
-  /** During the cool-down after an invalid_grant, fail at once without a request. */
+  /**
+   * During the cool-down after an invalid_grant, fail at once without a request. New tokens in
+   * the sink (the user connected again, or another process refreshed) end the cool-down.
+   */
   private throwIfRefused(): void {
     const r = this.refused;
-    if (r && this.now() - r.at < (this.opts.invalidGrantCooldownMs ?? INVALID_GRANT_COOLDOWN_MS)) throw r.error;
+    if (!r || this.now() - r.at >= (this.opts.invalidGrantCooldownMs ?? INVALID_GRANT_COOLDOWN_MS)) return;
+    if (this.newerStored()) return;
+    throw r.error;
+  }
+
+  /**
+   * The sink's stored tokens when they hold another refresh token of the same app. Tokens that are
+   * older than the session's own (their access token expires earlier, for example because saving
+   * the last refresh failed) are not taken.
+   */
+  private newerStored(): StoredSuuntoTokens | undefined {
+    let stored: StoredSuuntoTokens | undefined;
+    try {
+      stored = this.opts.sink?.load?.();
+    } catch {
+      // A sink that cannot read must not hide the real state; the session goes on with its own tokens.
+      return undefined;
+    }
+    const refreshToken = stored?.refreshToken?.trim();
+    if (!stored || !refreshToken || stored.clientId !== this.tokens.clientId || refreshToken === this.tokens.refreshToken) return undefined;
+    const theirs = storedCurrent(stored)?.expiresAt;
+    const ours = storedCurrent(this.tokens)?.expiresAt;
+    if (theirs !== undefined && ours !== undefined && theirs < ours) return undefined;
+    return { ...stored, refreshToken };
+  }
+
+  /**
+   * Take over newer stored tokens (see newerStored), with their access token while it is valid.
+   * Returns true when it did. The tokens came from the sink, so they are not saved again.
+   */
+  private adoptStored(): boolean {
+    const stored = this.newerStored();
+    if (!stored) return false;
+    this.tokens = stored;
+    // Without a stored access token, the session's own one stays usable until it expires.
+    this.current = storedCurrent(stored) ?? this.current;
+    if (this.current?.username) this.knownUsername = this.current.username;
+    this.refused = undefined;
+    return true;
+  }
+
+  /** The adopted (stored) access token, when it is fresh and not the one Suunto just refused. */
+  private adoptedToken(staleToken: string | undefined): string | undefined {
+    const c = this.current;
+    return c && c.accessToken === this.tokens.accessToken && this.isFresh() && c.accessToken !== staleToken ? c.accessToken : undefined;
   }
 
   /** Fresh: more than the margin left, or received a moment ago and not expired yet. */
@@ -189,38 +256,49 @@ export class SuuntoSession {
   }
 
   /** One refresh at a time; concurrent callers share it. */
-  private renew(): Promise<string> {
+  private renew(staleToken?: string): Promise<string> {
     if (this.inflight) return this.inflight;
-    const run = this.doRenew().finally(() => {
+    const run = this.doRenew(staleToken).finally(() => {
       if (this.inflight === run) this.inflight = undefined;
     });
     this.inflight = run;
     return run;
   }
 
-  private apply(result: TokenResult): string {
+  private apply(result: RefreshResult): string {
+    // A refresh answer may not carry the username: the one known from before stays.
+    const username = result.username ?? this.current?.username ?? this.knownUsername;
     this.tokens = { ...result.tokens };
-    this.current = { accessToken: result.tokens.accessToken, expiresAt: result.tokens.accessTokenExpiresAt, renewedAt: this.now(), username: result.username };
+    this.current = { accessToken: result.tokens.accessToken, expiresAt: result.tokens.accessTokenExpiresAt, renewedAt: this.now(), username };
+    if (username) this.knownUsername = username;
     return result.tokens.accessToken;
   }
 
-  private async doRenew(): Promise<string> {
-    let result: TokenResult;
+  private isInvalidGrant(error: unknown): error is SuuntoAuthError {
+    return error instanceof SuuntoAuthError && error.code === "invalid_grant";
+  }
+
+  private async doRenew(staleToken?: string): Promise<string> {
+    // Another process or session may have refreshed already: its stored tokens are newer.
+    if (this.adoptStored()) {
+      const adopted = this.adoptedToken(staleToken);
+      if (adopted) return adopted;
+    }
+    let result: RefreshResult;
     try {
       result = await refreshTokens(this.tokens.refreshToken, this.oauthOptions());
     } catch (error) {
-      if (error instanceof SuuntoAuthError && error.code === "invalid_grant") {
-        this.current = undefined;
-        const expired = new SuuntoAuthError("invalid_grant", `Your Suunto connection expired. ${this.connectAgain}`, { cause: error, ...(error.status !== undefined ? { status: error.status } : {}) });
-        this.refused = { error: expired, at: this.now() };
-        try {
-          this.opts.sink?.invalid("Suunto refused the refresh token");
-        } catch {
-          // A sink that cannot record it must not hide the real error.
-        }
-        throw expired;
+      if (!this.isInvalidGrant(error)) throw error;
+      // The refresh token may have been used up by another process that stored a new one.
+      if (!this.adoptStored()) throw this.refuse(error);
+      const adopted = this.adoptedToken(staleToken);
+      if (adopted) return adopted;
+      try {
+        result = await refreshTokens(this.tokens.refreshToken, this.oauthOptions());
+      } catch (again) {
+        if (this.isInvalidGrant(again)) throw this.refuse(again);
+        throw again;
       }
-      throw error;
     }
     this.refused = undefined;
     const token = this.apply(result);
@@ -230,5 +308,18 @@ export class SuuntoSession {
       // A sink that cannot save must not break the request; the token still works in memory.
     }
     return token;
+  }
+
+  /** Suunto refused the refresh token: tell the sink and start the cool-down. */
+  private refuse(error: SuuntoAuthError): SuuntoAuthError {
+    this.current = undefined;
+    const expired = new SuuntoAuthError("invalid_grant", `Your Suunto connection expired. ${this.connectAgain}`, { cause: error, ...(error.status !== undefined ? { status: error.status } : {}) });
+    this.refused = { error: expired, at: this.now() };
+    try {
+      this.opts.sink?.invalid("Suunto refused the refresh token");
+    } catch {
+      // A sink that cannot record it must not hide the real error.
+    }
+    return expired;
   }
 }

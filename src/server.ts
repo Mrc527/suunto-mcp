@@ -1,5 +1,5 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { dirname } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -9,11 +9,12 @@ import { CachedBackend } from "./activity/cache.js";
 import { ActivityService } from "./activity/service.js";
 import { registerActivityTools } from "./activity/tools.js";
 import type { ActivityBackend, SuuntoAccount } from "./activity/types.js";
-import { describeConfig, type AppConfig } from "./config.js";
+import { describeConfig, inspectTokenCache, type AppConfig } from "./config.js";
 import { DemoActivityBackend, type DemoActivityStore } from "./demo/activity.js";
 import { SuuntoApi } from "./suunto/api.js";
 import { tokenUsername } from "./suunto/jwt.js";
-import { authorizeUrl, callbackError, exchangeCode, type StoredSuuntoTokens } from "./suunto/oauth.js";
+import { CallLimiter, DEFAULT_LIMITS, type CallLimits } from "./suunto/limiter.js";
+import { authorizeUrl, callbackError, exchangeCode, SuuntoAuthError, type StoredSuuntoTokens } from "./suunto/oauth.js";
 import { SuuntoSession, type TokenSink } from "./suunto/session.js";
 import { registerTool, type ToolContext } from "./tooling.js";
 import { addDays, parseDateOnly, todayInZone } from "./util/dates.js";
@@ -30,6 +31,11 @@ export interface Services {
   backend?: ActivityBackend;
   /** The Suunto token manager (absent for a demo account). */
   session?: SuuntoSession;
+  /**
+   * True when the session and the backend came from CreateServicesOptions.reuse: the caller (the
+   * web pool) owns them, and closeServices leaves the backend open.
+   */
+  reused: boolean;
 }
 
 export interface CreateServicesOptions {
@@ -49,18 +55,41 @@ export interface CreateServicesOptions {
   /** fetch for every Suunto request (tests pass a mock). */
   fetch?: typeof fetch;
   log?: (m: string) => void;
+  /**
+   * Spaces the data requests to Suunto (DESIGN.md section 4, call limiter). The web service
+   * passes its one limiter. Without one, single-user mode uses one limiter per process, built
+   * from the config's call limits.
+   */
+  limiter?: CallLimiter;
+  /** Whose requests these are, for the daily limit per user (the web service passes the user id). */
+  limiterKey?: string;
+  /**
+   * Keep the session and the backend of an earlier build (the web pool, when a user's settings
+   * change): only a new ActivityService is built on them. closeServices then does not close the
+   * backend; the caller owns it.
+   */
+  reuse?: { session: SuuntoSession; backend: ActivityBackend };
 }
 
 /** Timeout of every Suunto request (the FIT export gets 60 s in api.ts). */
 const SUUNTO_TIMEOUT_MS = 20_000;
 
-/** What a single user does when the sign-in stops working. */
-const LOCAL_CONNECT_AGAIN = "Run suunto-mcp --login again to connect Suunto (or set a new SUUNTO_REFRESH_TOKEN).";
+/**
+ * What a single user does when the sign-in stops working. With a token cache, --login writes a
+ * new sign-in that the running server reads before its next refresh. Without one, only a new
+ * SUUNTO_REFRESH_TOKEN and a restart help.
+ */
+export function localConnectAgain(tokenCache: string | undefined): string {
+  return tokenCache
+    ? `Run suunto-mcp --login again to connect Suunto (or delete ${tokenCache} and restart with a new SUUNTO_REFRESH_TOKEN).`
+    : "Set a new SUUNTO_REFRESH_TOKEN and restart the server, or set SUUNTO_TOKEN_CACHE and run suunto-mcp --login.";
+}
 
 // ---------------------------------------------------------------------------------------------
 // Token cache (single-user mode, SUUNTO_TOKEN_CACHE)
 // ---------------------------------------------------------------------------------------------
 
+/** The JSON of a token cache file (inspectTokenCache in config.ts reads it). */
 interface TokenCacheFile {
   refreshToken: string;
   accessToken?: string;
@@ -75,24 +104,11 @@ interface TokenCacheFile {
 /**
  * The tokens in a cache file, or undefined when there is no usable one. A cache written for
  * another app (client id) is not used: Suunto would refuse its refresh token. Never throws.
+ * inspectTokenCache (config.ts) also says why a file cannot be used.
  */
 export function readTokenCache(file: string, clientId?: string): StoredSuuntoTokens | undefined {
-  try {
-    const data = JSON.parse(readFileSync(file, "utf8")) as Partial<TokenCacheFile>;
-    if (typeof data.refreshToken !== "string" || !data.refreshToken.trim()) return undefined;
-    if (typeof data.clientId !== "string" || !data.clientId.trim()) return undefined;
-    if (clientId && data.clientId !== clientId) return undefined;
-    const access = typeof data.accessToken === "string" && data.accessToken.trim() ? data.accessToken : undefined;
-    const expires = typeof data.accessTokenExpiresAt === "number" && Number.isFinite(data.accessTokenExpiresAt) ? data.accessTokenExpiresAt : undefined;
-    return {
-      refreshToken: data.refreshToken,
-      clientId: data.clientId,
-      ...(access ? { accessToken: access } : {}),
-      ...(access && expires !== undefined ? { accessTokenExpiresAt: expires } : {}),
-    };
-  } catch {
-    return undefined;
-  }
+  const cache = inspectTokenCache(file, clientId);
+  return "tokens" in cache ? cache.tokens : undefined;
 }
 
 /**
@@ -133,8 +149,13 @@ export function writeTokenCache(file: string, tokens: StoredSuuntoTokens, userna
   }
 }
 
-/** Saves every new token set to SUUNTO_TOKEN_CACHE (a failed write is logged, not thrown). */
-export function fileTokenSink(file: string, log: (m: string) => void): TokenSink {
+/**
+ * Saves every new token set to SUUNTO_TOKEN_CACHE (a failed write is logged, not thrown), and
+ * reads the file again on load(): another process that shares the cache (a second AI app,
+ * --check) may have rotated the refresh token, and --login may have written a new sign-in while
+ * the server runs. With `clientId`, load() ignores a cache of another app.
+ */
+export function fileTokenSink(file: string, log: (m: string) => void, clientId?: string): TokenSink {
   return {
     save(tokens) {
       try {
@@ -144,22 +165,42 @@ export function fileTokenSink(file: string, log: (m: string) => void): TokenSink
       }
     },
     invalid(reason) {
-      log(`The saved Suunto sign-in no longer works (${reason}). Run suunto-mcp --login again.`);
+      log(`The saved Suunto sign-in no longer works (${reason}). ${localConnectAgain(file)}`);
+    },
+    load() {
+      return readTokenCache(file, clientId);
     },
   };
 }
 
-/** A sink that only logs (no token cache). */
+/** A sink that only logs (no token cache, so nothing to read again). */
 function logOnlySink(log: (m: string) => void): TokenSink {
   return {
     save() {
       // Memory only.
     },
     invalid(reason) {
-      log(`The Suunto sign-in no longer works (${reason}). Run suunto-mcp --login again, or set a new SUUNTO_REFRESH_TOKEN.`);
+      log(`The Suunto sign-in no longer works (${reason}). ${localConnectAgain(undefined)}`);
     },
   };
 }
+
+/** One limiter per process and limits (single-user mode); undefined when both limits are off. */
+const processLimiters = new Map<string, CallLimiter>();
+
+function processLimiter(limits: CallLimits): CallLimiter | undefined {
+  if (limits.perMinute <= 0 && limits.perUserPerDay <= 0) return undefined;
+  const key = `${limits.perMinute}/${limits.perUserPerDay}`;
+  let limiter = processLimiters.get(key);
+  if (!limiter) {
+    limiter = new CallLimiter({ perMinute: limits.perMinute, ...(limits.perUserPerDay > 0 ? { perKeyPerDay: limits.perUserPerDay } : {}) });
+    processLimiters.set(key, limiter);
+  }
+  return limiter;
+}
+
+/** The limiter key of the single user (the daily limit then counts all of this process's calls). */
+const LOCAL_LIMITER_KEY = "local";
 
 // ---------------------------------------------------------------------------------------------
 // Services
@@ -176,21 +217,30 @@ export function createServices(config: AppConfig, opts: CreateServicesOptions = 
   if (opts.demo) {
     // The demo is never cached: it is in memory already, and its writes must show at once.
     const backend = new DemoActivityBackend(opts.demo);
-    return { backend, activity: new ActivityService(backend, serviceOpts) };
+    return { backend, activity: new ActivityService(backend, serviceOpts), reused: false };
+  }
+  if (opts.reuse) {
+    // Same connection, new settings: one session (one refresh at a time) and one cache stay.
+    const { session, backend } = opts.reuse;
+    return { backend, session, activity: new ActivityService(backend, serviceOpts), reused: true };
   }
 
   const s = config.suunto;
   const keys = s.keys;
-  if (!keys) return {};
+  if (!keys) return { reused: false };
   // The web store's tokens win. Else the token cache, which holds the newest refresh token (a
   // refresh may hand out a new one), wins over SUUNTO_REFRESH_TOKEN, unless it was written for
   // another app. Delete the file to start again from the environment.
   const cached = !opts.tokens && s.tokenCache ? readTokenCache(s.tokenCache, keys.clientId) : undefined;
   const tokens: StoredSuuntoTokens | undefined = opts.tokens ?? cached ?? (s.refreshToken ? { refreshToken: s.refreshToken, clientId: keys.clientId } : undefined);
-  if (!tokens) return {};
+  if (!tokens) return { reused: false };
 
-  const sink = opts.tokenSink ?? (s.tokenCache ? fileTokenSink(s.tokenCache, log) : logOnlySink(log));
-  const connectAgain = opts.connectAgain ?? (opts.tokens ? undefined : LOCAL_CONNECT_AGAIN);
+  const local = !opts.tokens;
+  const sink = opts.tokenSink ?? (s.tokenCache ? fileTokenSink(s.tokenCache, log, keys.clientId) : logOnlySink(log));
+  const connectAgain = opts.connectAgain ?? (local ? localConnectAgain(s.tokenCache) : undefined);
+  // The web service passes its limiter; a single user gets the one of this process.
+  const limiter = opts.limiter ?? (local ? processLimiter(config.callLimits ?? DEFAULT_LIMITS) : undefined);
+  const limiterKey = opts.limiterKey ?? (local ? LOCAL_LIMITER_KEY : undefined);
   const session = new SuuntoSession({
     tokens,
     keys,
@@ -207,12 +257,16 @@ export function createServices(config: AppConfig, opts: CreateServicesOptions = 
     ...(opts.fetch ? { fetch: opts.fetch } : {}),
     log,
     timeoutMs: SUUNTO_TIMEOUT_MS,
+    ...(limiter ? { limiter } : {}),
+    ...(limiter && limiterKey !== undefined ? { limiterKey } : {}),
   });
   const backend: ActivityBackend = opts.cache === false ? api : new CachedBackend(api);
-  return { backend, session, activity: new ActivityService(backend, serviceOpts) };
+  return { backend, session, activity: new ActivityService(backend, serviceOpts), reused: false };
 }
 
+/** Close what createServices built. A reused backend stays open: its owner closes it. */
 export async function closeServices(services: Services): Promise<void> {
+  if (services.reused) return;
   await Promise.allSettled([services.backend?.close()]);
 }
 
@@ -271,19 +325,12 @@ function sameText(a: string, b: string): boolean {
   return x.length === y.length && timingSafeEqual(x, y);
 }
 
-/** Listen on one address; a busy port gets a message with the way out. */
+/** Listen on one address. Rejects with the system error (see listenError). */
 function listen(server: Server, host: string, port: number): Promise<void> {
   return new Promise((resolve, reject) => {
     const onError = (error: NodeJS.ErrnoException) => {
       server.off("listening", onListening);
-      const where = `${host.includes(":") ? `[${host}]` : host}:${port}`;
-      if (error.code === "EADDRINUSE") {
-        reject(new ConfigError(`Port ${port} on ${where} is in use. Stop the program that uses it, or set SUUNTO_REDIRECT_URI to another port (and register that address in your Suunto app settings).`));
-      } else if (error.code === "EACCES") {
-        reject(new ConfigError(`Not allowed to listen on ${where}. Use a port above 1024 in SUUNTO_REDIRECT_URI (and register that address in your Suunto app settings).`));
-      } else {
-        reject(new ConfigError(`Could not listen on ${where} (${error.code ?? error.message}).`));
-      }
+      reject(error);
     };
     const onListening = () => {
       server.off("error", onError);
@@ -293,6 +340,63 @@ function listen(server: Server, host: string, port: number): Promise<void> {
     server.once("listening", onListening);
     server.listen(port, host);
   });
+}
+
+/** The error of a failed listen, with the way out (a busy port, a port that needs root). */
+function listenError(error: unknown, host: string, port: number): ConfigError {
+  const code = (error as NodeJS.ErrnoException).code;
+  const where = `${host.includes(":") ? `[${host}]` : host}:${port}`;
+  if (code === "EADDRINUSE") {
+    return new ConfigError(`Port ${port} on ${where} is in use. Stop the program that uses it, or set SUUNTO_REDIRECT_URI to another port (and register that address in your Suunto app settings).`);
+  }
+  if (code === "EACCES") {
+    return new ConfigError(`Not allowed to listen on ${where}. Use a port above 1024 in SUUNTO_REDIRECT_URI (and register that address in your Suunto app settings).`);
+  }
+  return new ConfigError(`Could not listen on ${where} (${code ?? (error as Error).message}).`);
+}
+
+/**
+ * True when a listen failed only because this machine has no IPv6: then --login can do without
+ * [::1]. Any other error (the port is in use, not allowed) must stop it, or the browser may send
+ * Suunto's answer, with the code, to another program on [::1].
+ */
+export function isNoIpv6Error(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code === "EADDRNOTAVAIL" || code === "EAFNOSUPPORT";
+}
+
+/**
+ * The text of a failed sign-in for a --login user: the web texts say "Connect Suunto", a button
+ * that the command line does not have. `from`: the callback's ?error=.. or the code exchange.
+ * Keeps the error code (SuuntoAuthError).
+ */
+function loginError(error: unknown, redirectUri: string, from: "callback" | "exchange"): unknown {
+  if (!(error instanceof SuuntoAuthError)) return error;
+  const again = "Run suunto-mcp --login again";
+  let text: string;
+  switch (error.code) {
+    case "invalid_grant":
+      text = `Suunto did not accept the sign-in (the code is expired or was used already). ${again}. If it keeps happening, check that the redirect URI in your app's OAuth settings in the Suunto API Zone is exactly ${redirectUri} (SUUNTO_REDIRECT_URI).`;
+      break;
+    case "bad_client":
+      text = `Suunto refused the app keys (client id or client secret). Check SUUNTO_CLIENT_ID and SUUNTO_CLIENT_SECRET against your app's OAuth settings in the Suunto API Zone, then run suunto-mcp --login again.`;
+      break;
+    case "denied":
+      text =
+        from === "callback"
+          ? `You did not allow access on the Suunto page, so Suunto is not connected. ${again} and allow access.`
+          : `Suunto refused access. ${again} and allow access on the Suunto page.`;
+      break;
+    case "unknown":
+      // The exchange's own texts ("... Try again later.") fit the command line.
+      if (from === "exchange") return error;
+      text = `The Suunto sign-in did not finish. ${again}.`;
+      break;
+    default:
+      // "network": "Try again later" fits the command line too.
+      return error;
+  }
+  return new SuuntoAuthError(error.code, text, { cause: error, ...(error.status !== undefined ? { status: error.status } : {}) });
 }
 
 async function closeServer(server: Server): Promise<void> {
@@ -372,7 +476,7 @@ export async function runLogin(config: AppConfig, opts: LoginOptions): Promise<L
   const handleCallback = async (q: URLSearchParams, res: ServerResponse): Promise<void> => {
     const error = q.get("error");
     if (error) {
-      const failure = callbackError(error);
+      const failure = loginError(callbackError(error), redirectUri, "callback") as SuuntoAuthError;
       await loginPage(res, 400, "Suunto is not connected", failure.message);
       finish({ error: failure });
       return;
@@ -394,7 +498,8 @@ export async function runLogin(config: AppConfig, opts: LoginOptions): Promise<L
       writeTokenCache(tokenCache, tokens.tokens, tokens.username);
       await loginPage(res, 200, "Suunto is connected", `Signed in to Suunto as ${tokens.username}. You can close this window and go back to the terminal.`);
       finish({ ok: { username: tokens.username, tokenCache, accessTokenExpiresAt: tokens.tokens.accessTokenExpiresAt } });
-    } catch (failure) {
+    } catch (caught) {
+      const failure = loginError(caught, redirectUri, "exchange");
       const text = failure instanceof UserFacingError ? failure.message : `Error: ${describeError(failure)}`;
       await loginPage(res, 502, "Suunto is not connected", redact(text, config.secrets));
       finish({ error: failure });
@@ -419,8 +524,10 @@ export async function runLogin(config: AppConfig, opts: LoginOptions): Promise<L
         await listen(server, address, port);
         servers.push(server);
       } catch (error) {
-        // The first address must work; the second one (::1) is a bonus on machines without IPv6.
-        if (i === 0) throw error;
+        // The first address must work. The second one (::1) may be missing only on a machine
+        // without IPv6; a busy [::1] port stops the login like a busy 127.0.0.1 port.
+        if (i > 0 && isNoIpv6Error(error)) continue;
+        throw listenError(error, address, port);
       }
     }
   } catch (error) {
@@ -507,6 +614,15 @@ function errorText(error: unknown, secrets: readonly string[]): string {
 /** What a single user is told when there is no sign-in to use. */
 const NO_SIGN_IN = "No Suunto sign-in is configured: run suunto-mcp --login (with SUUNTO_TOKEN_CACHE set), or set SUUNTO_REFRESH_TOKEN.";
 
+/** Why there is no sign-in: a token cache that cannot be used is named, with the reason. */
+function noSignInText(config: AppConfig): string {
+  const file = config.suunto.tokenCache;
+  if (!file) return NO_SIGN_IN;
+  const cache = inspectTokenCache(file, config.suunto.keys?.clientId);
+  if ("problem" in cache) return `No Suunto sign-in: the token cache ${file} (SUUNTO_TOKEN_CACHE) ${cache.problem}. Run suunto-mcp --login again.`;
+  return NO_SIGN_IN;
+}
+
 /**
  * The suunto_account_info answer (also printed by --check). When the Suunto sign-in fails,
  * check=true still answers (connected false, the error in check); without check the call fails
@@ -526,9 +642,10 @@ export async function accountInfo(config: AppConfig, services: Services, check: 
     }
   }
 
+  const noSignIn = activity ? undefined : noSignInText(config);
   let checkResult: Record<string, unknown> | undefined;
   if (check) {
-    if (!activity) checkResult = { ok: false, error: NO_SIGN_IN };
+    if (!activity) checkResult = { ok: false, error: noSignIn };
     else if (signInError !== undefined) checkResult = { ok: false, error: signInError };
     else {
       const result = await activity.check().catch((error: unknown) => ({ ok: false, error: describeError(error) }));
@@ -543,7 +660,7 @@ export async function accountInfo(config: AppConfig, services: Services, check: 
   return {
     ...(account ? { username: account.username } : {}),
     connected,
-    ...(activity ? {} : { note: NO_SIGN_IN }),
+    ...(noSignIn !== undefined ? { note: noSignIn } : {}),
     units: activity?.units ?? config.units,
     read_only: config.readOnly,
     demo: services.backend?.kind === "demo",
@@ -569,8 +686,12 @@ export function createMcpServer(config: AppConfig, services: Services, log: (m: 
       ...(hooks.websiteUrl ? { websiteUrl: hooks.websiteUrl } : {}),
     },
     {
-      instructions: buildInstructions(config) + (hooks.extraInstructions ? `\n${hooks.extraInstructions}` : ""),
-      capabilities: { tools: {}, prompts: {} },
+      instructions:
+        buildInstructions(config) +
+        (services.activity ? "" : `\n${NOT_CONNECTED_INSTRUCTION}`) +
+        (hooks.extraInstructions ? `\n${hooks.extraInstructions}` : ""),
+      // Without a Suunto sign-in the prompts could not use their tools: there are none then.
+      capabilities: { tools: {}, ...(services.activity ? { prompts: {} } : {}) },
       maxToolInputElements: 10_000,
     },
   );
@@ -590,17 +711,23 @@ export function createMcpServer(config: AppConfig, services: Services, log: (m: 
       description:
         "Show the connected Suunto account: username (the Suunto App username), connected, units (metric or imperial), read_only, demo (true for a demo account with invented sample data), " +
         "the server's date (today, in time_zone; the user's own date can differ by a day), server_version and token_expires_at (when the current Suunto access token expires; it renews by itself). " +
-        "With check=true it also tests the connection by reading the workouts of the last 30 days (check.ok, check.workouts_last_30_days); it then answers even when the Suunto sign-in fails (connected false, the error in check.error).",
+        "With check=true it also tests the connection by reading the workouts of the last 30 days (check.ok, check.workouts_last_30_days: at most one page of 100 is counted, and check says so when the count is capped); it then answers even when the Suunto sign-in fails (connected false, the error in check.error).",
       inputSchema: { check: z.boolean().optional().describe("Also test the connection to Suunto by reading the workouts of the last 30 days (default false)") },
       kind: "read",
     },
     async (args) => accountInfo(config, services, args.check === true, hooks.accountInfo),
   );
 
-  if (services.activity) registerActivityTools(ctx, services.activity);
-  registerPrompts(server, config);
+  if (services.activity) {
+    registerActivityTools(ctx, services.activity);
+    registerPrompts(server, config);
+  }
   return server;
 }
+
+/** Added to the instructions when there is no Suunto sign-in (only suunto_account_info then). */
+const NOT_CONNECTED_INSTRUCTION =
+  "Suunto is not connected yet, so only suunto_account_info is available now. Its note says how to connect; the other tools named here appear after that.";
 
 // ---------------------------------------------------------------------------------------------
 // Prompts
@@ -632,8 +759,9 @@ function lastDayOf(year: number, month: number): string {
 /**
  * The period of the training_review prompt, from the user's words and the server's today:
  * "this week" (Monday to today), "last week" (Monday to Sunday), "this month", "last month",
- * "this year", "last year", "last N days" or "last N weeks", or a year ("2025 season" is 2025).
- * Nothing means the last 4 weeks. Other text is passed on as the user wrote it.
+ * "this year", "last year", "last N days" or "last N weeks", or text that is only a year ("2025",
+ * "the 2025 season"). Nothing means the last 4 weeks. Other text ("May 2025", "2024 and 2025")
+ * is passed on as the user wrote it, so the AI works out the dates or asks.
  */
 export function reviewPeriod(input: string | undefined, today: string): ReviewPeriod {
   const t = (input ?? "").trim().replace(/\s+/g, " ").toLowerCase();
@@ -658,19 +786,36 @@ export function reviewPeriod(input: string | undefined, today: string): ReviewPe
     const days = span[2]!.startsWith("week") ? n * 7 : n;
     if (days >= 1 && days <= 366) return { from: addDays(today, -(days - 1)), to: today, label: `the last ${n} ${span[2]}` };
   }
-  const year = t.match(/\b(?:19|20)\d{2}\b/);
+  // Only a year, maybe as a season: "2025", "the 2025 season", "season 2025", "year 2025".
+  const year = t.match(/^(?:the )?(?:(?:season|year) )?((?:19|20)\d{2})(?: (?:season|year))?$/);
   if (year) {
-    const y = Number(year[0]);
+    const y = Number(year[1]);
     if (y <= d.year) return { from: `${y}-01-01`, to: y === d.year ? today : `${y}-12-31`, label: String(y) };
   }
   return { text: (input ?? "").trim().replace(/\s+/g, " ").slice(0, 100) };
 }
 
-/** The days of the sleep_and_recovery prompt: a number from 1 to 28 in the text, default 7. */
+/** Small numbers in words, for "two weeks" and "a week". */
+const NUMBER_WORDS: Record<string, number> = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+
+/**
+ * The days of the sleep_and_recovery prompt, from 1 to 28 (default 7): a number of days ("10",
+ * "10 days") or of weeks ("3 weeks" is 21 days, "two weeks" 14), "a fortnight", or "a month" (28).
+ */
 export function recoveryDays(input: string | undefined): number {
-  const match = (input ?? "").match(/\d{1,3}/);
-  if (!match) return 7;
-  return Math.min(28, Math.max(1, Number(match[0])));
+  const t = (input ?? "").trim().toLowerCase();
+  const clamp = (days: number) => Math.min(28, Math.max(1, days));
+  const digits = t.match(/(\d{1,3})\s*(days?|weeks?|wks?|months?|d|w)?\b/);
+  const words = digits ? undefined : t.match(/\b(an?|one|two|three|four|five|six|seven|eight|nine|ten)\s+(days?|weeks?|months?)\b/);
+  const match = digits ?? words;
+  if (match) {
+    const n = /^\d/.test(match[1]!) ? Number(match[1]) : NUMBER_WORDS[match[1]!]!;
+    const unit = match[2] ?? "day";
+    return clamp(unit.startsWith("w") ? n * 7 : unit.startsWith("m") ? n * 28 : n);
+  }
+  if (/\bfortnight\b/.test(t)) return 14;
+  if (/\bmonth\b/.test(t)) return 28;
+  return 7;
 }
 
 function registerPrompts(server: McpServer, config: AppConfig): void {
@@ -717,7 +862,7 @@ function registerPrompts(server: McpServer, config: AppConfig): void {
     {
       title: "Sleep and recovery",
       description: "How I slept and recovered in the last days, with my daily activity, from the Suunto data",
-      argsSchema: { days: z.string().optional().describe("How many days to look back, 1 to 28 (default 7)") },
+      argsSchema: { days: z.string().optional().describe('How many days to look back, 1 to 28, for example "10" or "3 weeks" (default 7)') },
     },
     ({ days }) => {
       const today = todayInZone(config.timeZone);

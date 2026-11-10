@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.Mrc527/mcp-for-suunto",
   "title": "MCP for Suunto",
-  "description": "Read your Suunto workouts, sleep and recovery; add routes. Needs an account at suunto.mcp.visin.ch.",
+  "description": "Independent, not by Suunto: read your Suunto workouts, sleep and recovery, and add routes.",
   "version": "0.1.0",
   "websiteUrl": "https://suunto.mcp.visin.ch",
   "icons": [

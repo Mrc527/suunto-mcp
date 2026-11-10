@@ -52,7 +52,10 @@ valid_key() { [[ ${#1} -le 512 && $1 =~ ^[[:graph:]]+$ && $1 != *"'"* ]]; }
 ask_secret() { # ask_secret VAR "question": hidden input, asked again until it is valid
   local answer
   while :; do
-    read -r -s -p "$2: " answer || true
+    if ! read -r -s -p "$2: " answer; then
+      echo
+      die "no input: run this script in a terminal"
+    fi
     echo
     if valid_key "$answer"; then
       echo "(${#answer} characters)"
@@ -157,9 +160,15 @@ if [ ! -f "$app/.env" ]; then
   ask ADMIN_EMAIL "Administrator e-mail (to sign in to the service)"
   [[ $ADMIN_EMAIL =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]] || die "not an e-mail address: $ADMIN_EMAIL"
   while :; do
-    read -r -s -p "Administrator password (at least 10 characters, no ' character): " ADMIN_PASSWORD || true
+    if ! read -r -s -p "Administrator password (at least 10 characters, no ' character): " ADMIN_PASSWORD; then
+      echo
+      die "no input: run this script in a terminal"
+    fi
     echo
-    read -r -s -p "Repeat the password: " again || true
+    if ! read -r -s -p "Repeat the password: " again; then
+      echo
+      die "no input: run this script in a terminal"
+    fi
     echo
     if [ "$ADMIN_PASSWORD" != "$again" ]; then
       echo "The passwords do not match. Try again."

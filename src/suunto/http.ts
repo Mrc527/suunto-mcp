@@ -8,11 +8,17 @@
  * - HTTP 401: refresh the access token once and send the request once more (Suunto did not handle
  *   it). A 401 that is about the subscription key (an operator problem) or a rate limit is not a
  *   sign-in problem: no refresh;
- * - rate limits (429, 403 with a quota text, 401 with "RateLimitExceeded") become one error kind,
- *   "rate_limit", with the wait from Retry-After or the quota text when there is one;
- * - reads (GET) are tried again on HTTP 429, 500, 502, 503 and 504, a timeout or a broken
- *   connection, at most 3 tries, with backoff. Retry-After is honoured up to 30 s; a longer wait
- *   is not worth it, so the error comes at once;
+ * - rate limits (429, 403 with a quota text or a Retry-After header, 401 with "RateLimitExceeded")
+ *   become one error kind, "rate_limit", with the wait from Retry-After or the quota text when
+ *   there is one;
+ * - reads (GET) are tried again on HTTP 429, 502, 503 and 504 and on a broken connection (also
+ *   while the answer is read), at most 3 tries, with backoff. Never on HTTP 500: Suunto answers a
+ *   wrong workout key with 500, and every try counts against the call limit. Retry-After is
+ *   honoured up to 30 s; a longer wait is not worth it, so the error comes at once. A 429 without
+ *   Retry-After is not tried again either: a per-minute limit does not clear in a second;
+ * - a read that timed out is tried again at most once (the request reached Suunto and counted),
+ *   and never when the request says so (the FIT export: its timeout is long already);
+ * - the optional CallLimiter is asked before every data request that is sent, retries included;
  * - writes are never sent again once they may have reached Suunto (a route would be added twice).
  *   A write without a clear answer fails with UnconfirmedWriteError ("check before you try
  *   again"). Only a connection that never opened is tried again;
@@ -22,6 +28,7 @@
 import { NotFoundError, redact, UnconfirmedWriteError, UserFacingError } from "../util/errors.js";
 import { VERSION } from "../version.js";
 import type { SuuntoEndpoints } from "./endpoints.js";
+import type { CallLimiter } from "./limiter.js";
 
 export const DEFAULT_TIMEOUT_MS = 20_000;
 export const DEFAULT_TRIES = 3;
@@ -35,8 +42,11 @@ export const MAX_TEXT_BYTES = 5 * 1024 * 1024;
 /** How much of an error answer is read (enough for any error text). */
 const MAX_ERROR_BYTES = 64 * 1024;
 
-/** Statuses a read is tried again on: Suunto (or its gateway) did not handle the request. */
-const RETRY_STATUSES: ReadonlySet<number> = new Set([429, 500, 502, 503, 504]);
+/**
+ * Statuses a read is tried again on: Suunto (or its gateway) did not handle the request. Not 500:
+ * Suunto answers a wrong workout key with 500, so a retry would only spend calls.
+ */
+const RETRY_STATUSES: ReadonlySet<number> = new Set([429, 502, 503, 504]);
 
 // ---------------------------------------------------------------------------------------------
 // Errors
@@ -282,6 +292,10 @@ export interface SuuntoHttpOptions {
   sleep?: (ms: number) => Promise<void>;
   log?: (m: string) => void;
   now?: () => number;
+  /** Asked before every data request that is sent (retries included). */
+  limiter?: CallLimiter;
+  /** The key of the limiter's daily limit (the user id). */
+  limiterKey?: string;
 }
 
 export type ResponseType = "json" | "text" | "binary";
@@ -311,7 +325,17 @@ export interface SuuntoRequest {
   notFound?: string;
   /** A sentence added to the message of an HTTP 500 (for example: a wrong workout key gives 500). */
   serverErrorHint?: string;
+  /** False: a read that timed out is not sent again (default: once). */
+  retryOnTimeout?: boolean;
 }
+
+/** What send() returns: the answer, and the body of a 2xx read (read inside the retry rules). */
+interface Answer {
+  res: Response;
+  bytes?: Buffer;
+}
+
+const isSuccess = (status: number): boolean => status >= 200 && status < 300;
 
 export interface SuuntoResponse {
   status: number;
@@ -390,23 +414,23 @@ export class SuuntoHttp {
   async request(req: SuuntoRequest): Promise<SuuntoResponse> {
     const session = this.opts.session;
     const first = await session.accessToken();
-    let res = await this.send(req, first);
-    if (res.status === 401) {
-      const body = await readText(res);
+    let answer = await this.send(req, first);
+    if (answer.res.status === 401) {
+      const body = await readText(answer.res);
       if (KEY_PROBLEM.test(body)) throw this.keyRefused();
       // The gateway sometimes answers a rate limit with 401: a new token would not help.
-      if (RATE_LIMIT_TEXT.test(body)) throw this.rateLimited(res, body);
+      if (RATE_LIMIT_TEXT.test(body)) throw this.rateLimited(answer.res, body);
       // The token may have expired early or been revoked: refresh once and try once more.
       const fresh = await session.refreshNow(first);
-      res = await this.send(req, fresh);
-      if (res.status === 401) {
-        const again = await readText(res);
+      answer = await this.send(req, fresh);
+      if (answer.res.status === 401) {
+        const again = await readText(answer.res);
         if (KEY_PROBLEM.test(again)) throw this.keyRefused();
-        if (RATE_LIMIT_TEXT.test(again)) throw this.rateLimited(res, again);
+        if (RATE_LIMIT_TEXT.test(again)) throw this.rateLimited(answer.res, again);
         throw new SuuntoHttpError("http", `Suunto refused the sign-in. ${session.connectAgain ?? "Connect Suunto again."}`, { status: 401 });
       }
     }
-    return this.finish(req, res);
+    return this.finish(req, answer);
   }
 
   /**
@@ -455,13 +479,22 @@ export class SuuntoHttp {
     return JSON.stringify(req.body);
   }
 
-  /** One request with the retry rules. Returns the last answer, whatever its status. */
-  private async send(req: SuuntoRequest, token: string): Promise<Response> {
+  private tooLarge(req: SuuntoRequest, max: number, status: number): SuuntoHttpError {
+    return new SuuntoHttpError("too_large", `The answer from Suunto (${req.what ?? "data"}) is larger than ${megabytes(max)}, more than this server reads.`, { status });
+  }
+
+  /**
+   * One request with the retry rules. Returns the last answer, whatever its status. The body of a
+   * 2xx read is read here, so a connection that breaks while the answer downloads is tried again
+   * like any other broken connection.
+   */
+  private async send(req: SuuntoRequest, token: string): Promise<Answer> {
     const method = req.method ?? "GET";
     const read = method === "GET";
     const tries = read ? Math.max(1, this.opts.tries ?? DEFAULT_TRIES) : 1;
     const timeoutMs = req.timeoutMs ?? this.opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const base = this.opts.backoffMs ?? 500;
+    const max = req.maxBytes ?? defaultMax(req.responseType ?? "json");
     const url = this.url(req);
     const what = req.what ?? "Suunto";
     const init: RequestInit = { method, headers: this.headers(req, token) };
@@ -470,15 +503,25 @@ export class SuuntoHttp {
 
     // A connection that never opened may be tried again for any request: nothing was sent.
     const maxTries = Math.max(tries, DEFAULT_TRIES);
+    let timeouts = 0;
     for (let attempt = 1; ; attempt++) {
-      let res: Response;
+      // Every request that is sent counts against Suunto's call limit, retries too.
+      await this.opts.limiter?.acquire(this.opts.limiterKey ?? "");
+      let res: Response | undefined;
       try {
         res = await this.doFetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+        if (read && isSuccess(res.status)) return { res, bytes: await readBytes(res, max, false) };
       } catch (error) {
-        const notSent = failedBeforeSending(error);
-        const canRetry = notSent ? attempt < maxTries : read && attempt < tries;
-        if (canRetry) {
-          this.opts.log?.(`Suunto ${method} ${req.path}: ${isTimeout(error) ? "timeout" : "network error"}, trying again`);
+        if (error instanceof TooLarge) throw this.tooLarge(req, max, res?.status ?? 200);
+        // With an answer, the connection broke (or timed out) while its body was read.
+        const answered = res !== undefined;
+        const notSent = !answered && failedBeforeSending(error);
+        const timedOut = isTimeout(error);
+        if (timedOut) timeouts++;
+        // A timed-out read reached Suunto and counted: it is tried again at most once.
+        const retryRead = read && attempt < tries && (!timedOut || (req.retryOnTimeout !== false && timeouts <= 1));
+        if (notSent ? attempt < maxTries : retryRead) {
+          this.opts.log?.(`Suunto ${method} ${req.path}: ${timedOut ? "timeout" : "network error"}, trying again`);
           await this.sleep(backoff(base, attempt));
           continue;
         }
@@ -488,15 +531,20 @@ export class SuuntoHttp {
             { cause: error },
           );
         }
-        if (isTimeout(error)) {
+        if (answered) {
+          if (timedOut) throw new SuuntoHttpError("timeout", `Suunto stopped answering (${what}). Try again later.`, { cause: error });
+          throw new SuuntoHttpError("network", `The connection to Suunto broke (${what}). Try again later.`, { cause: error });
+        }
+        if (timedOut) {
           throw new SuuntoHttpError("timeout", `Suunto did not answer within ${Math.round(timeoutMs / 1000)} s (${what}). Try again later.`, { sent: true, cause: error });
         }
         throw new SuuntoHttpError("network", `Could not reach Suunto (${what}). Check the network and try again later.`, { sent: !notSent, cause: error });
       }
-      if (!read || !RETRY_STATUSES.has(res.status) || attempt >= tries) return res;
+      if (!read || !RETRY_STATUSES.has(res.status) || attempt >= tries) return { res };
       const after = retryAfterMs(res, this.now());
-      // A long Retry-After is not worth waiting for: the caller gets the "busy" error at once.
-      if (after !== undefined && after > MAX_RETRY_AFTER_MS) return res;
+      // A long Retry-After is not worth waiting for, and a 429 without one would only fail again
+      // (the per-minute limit does not clear within the backoff): the caller gets the error at once.
+      if (after === undefined ? res.status === 429 : after > MAX_RETRY_AFTER_MS) return { res };
       await discard(res);
       const wait = after ?? backoff(base, attempt);
       this.opts.log?.(`Suunto ${method} ${req.path}: HTTP ${res.status}, trying again in ${Math.round(wait / 100) / 10} s`);
@@ -504,24 +552,19 @@ export class SuuntoHttp {
     }
   }
 
-  /** Read a 2xx answer, or turn any other status into a safe error. */
-  private async finish(req: SuuntoRequest, res: Response): Promise<SuuntoResponse> {
-    const method = req.method ?? "GET";
-    const type = req.responseType ?? "json";
+  /** Return a 2xx answer, or turn any other status into a safe error. */
+  private async finish(req: SuuntoRequest, answer: Answer): Promise<SuuntoResponse> {
+    const { res } = answer;
     const contentType = (res.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
-    if (res.status >= 200 && res.status < 300) {
-      const max = req.maxBytes ?? defaultMax(type);
+    if (isSuccess(res.status)) {
+      if (answer.bytes !== undefined) return { status: res.status, headers: res.headers, contentType, bytes: answer.bytes };
+      // A write: it was saved (2xx). When only its answer is lost, it is reported as saved without details.
+      const max = req.maxBytes ?? defaultMax(req.responseType ?? "json");
       try {
-        const bytes = await readBytes(res, max, false);
-        return { status: res.status, headers: res.headers, contentType, bytes };
+        return { status: res.status, headers: res.headers, contentType, bytes: await readBytes(res, max, false) };
       } catch (error) {
-        if (error instanceof TooLarge) {
-          throw new SuuntoHttpError("too_large", `The answer from Suunto (${req.what ?? "data"}) is larger than ${megabytes(max)}, more than this server reads.`, { status: res.status });
-        }
-        // A write was saved (2xx); only its answer was lost. Report it as saved without details.
-        if (method !== "GET") return { status: res.status, headers: res.headers, contentType, bytes: Buffer.alloc(0) };
-        if (isTimeout(error)) throw new SuuntoHttpError("timeout", `Suunto stopped answering (${req.what ?? "data"}). Try again later.`, { cause: error });
-        throw new SuuntoHttpError("network", `The connection to Suunto broke (${req.what ?? "data"}). Try again later.`, { cause: error });
+        if (error instanceof TooLarge) throw this.tooLarge(req, max, res.status);
+        return { status: res.status, headers: res.headers, contentType, bytes: Buffer.alloc(0) };
       }
     }
     const body = await readText(res);
@@ -542,11 +585,12 @@ export class SuuntoHttp {
       return new SuuntoHttpError("http", `Suunto says the request is not valid (${what}, HTTP ${status}).${said}`, { status });
     }
     if (status === 403) {
-      // The weekly quota of the gateway also answers 403, with a text such as "Out of call volume quota".
-      if (RATE_LIMIT_TEXT.test(raw ?? body)) return this.rateLimited(res, body);
+      // The weekly quota of the gateway also answers 403, with Retry-After and a text such as
+      // "Out of call volume quota". The whole body is checked: the text can be in any field.
+      if (res.headers.has("retry-after") || RATE_LIMIT_TEXT.test(body)) return this.rateLimited(res, body);
       return new SuuntoHttpError(
         "http",
-        `Suunto refused ${what} (HTTP 403). Either this server's Suunto API subscription does not cover this data, or you did not allow it when you connected Suunto. Connecting Suunto again can help with the second case.`,
+        `Suunto refused ${what} (HTTP 403). This server's Suunto API subscription may not cover this data, or Suunto does not allow it for this account.`,
         { status },
       );
     }
@@ -559,9 +603,12 @@ export class SuuntoHttp {
         `Suunto answered HTTP ${status}, so it is not clear whether the change was saved. Check in the Suunto App (or list the routes or points of interest) before you try again.`,
       );
     }
+    if (status === 500 && req.serverErrorHint) {
+      // Most likely a wrong key: the hint says what to check, not to repeat the same call.
+      return new SuuntoHttpError("http", `Suunto could not answer (HTTP 500, ${what}). ${req.serverErrorHint}`, { status });
+    }
     if (status >= 500) {
-      const hint = status === 500 && req.serverErrorHint ? ` ${req.serverErrorHint}` : "";
-      return new SuuntoHttpError("http", `Suunto has a problem right now (HTTP ${status}, ${what}).${hint} Try again later.`, { status });
+      return new SuuntoHttpError("http", `Suunto has a problem right now (HTTP ${status}, ${what}). Try again later.`, { status });
     }
     return new SuuntoHttpError("http", `Suunto answered HTTP ${status} (${what}).${said}`, { status });
   }

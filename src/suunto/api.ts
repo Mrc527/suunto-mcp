@@ -21,9 +21,10 @@ import type {
   WireWorkout,
   WireWorkoutList,
 } from "../activity/types.js";
-import { redact, UserFacingError } from "../util/errors.js";
+import { redact, UnconfirmedWriteError, UserFacingError } from "../util/errors.js";
 import type { SuuntoEndpoints } from "./endpoints.js";
 import { snippet, SuuntoHttp, SuuntoHttpError, SuuntoNotFoundError, type SuuntoRequest } from "./http.js";
+import type { CallLimiter } from "./limiter.js";
 import type { SuuntoAppKeys } from "./oauth.js";
 import type { SuuntoSession } from "./session.js";
 
@@ -39,6 +40,10 @@ export interface SuuntoApiOptions {
   backoffMs?: number;
   /** For tests: how the HTTP layer waits between tries. */
   sleep?: (ms: number) => Promise<void>;
+  /** Asked before every data request (retries included); one per process. */
+  limiter?: CallLimiter;
+  /** The key of the limiter's daily limit (the user id). */
+  limiterKey?: string;
 }
 
 /** The FIT export can be large and slow: at least this timeout. */
@@ -106,6 +111,21 @@ function asPoiEnvelope(value: unknown): WirePoiEnvelope | undefined {
   return { pointOfInterest: inner as unknown as WirePoi };
 }
 
+/**
+ * The errorCode of a PointOfInterestResult: undefined for none or 0, else the code as text when it
+ * is safe to show ("" when it is not).
+ */
+function poiErrorCode(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === false) return undefined;
+  if (typeof value === "number") return value === 0 ? undefined : String(value);
+  if (typeof value === "string") {
+    const v = value.trim();
+    if (!v || v === "0") return undefined;
+    return /^[A-Za-z0-9_.-]{1,40}$/.test(v) ? v : "";
+  }
+  return "";
+}
+
 /** Samples of a 247 answer: entries with a timestamp and an entryData object. */
 function samplesFrom<T>(json: unknown): WireSample<T>[] {
   return listFrom(json, ["samples"]).filter(
@@ -127,6 +147,8 @@ export class SuuntoApi implements ActivityBackend {
       ...(opts.backoffMs !== undefined ? { backoffMs: opts.backoffMs } : {}),
       ...(opts.sleep ? { sleep: opts.sleep } : {}),
       ...(opts.log ? { log: opts.log } : {}),
+      ...(opts.limiter ? { limiter: opts.limiter } : {}),
+      ...(opts.limiterKey !== undefined ? { limiterKey: opts.limiterKey } : {}),
     });
   }
 
@@ -192,6 +214,8 @@ export class SuuntoApi implements ActivityBackend {
       path: `/v3/workouts/${pathSegment(key)}/fit`,
       accept: "application/octet-stream",
       timeoutMs: Math.max(this.opts.timeoutMs ?? 0, FIT_TIMEOUT_MS),
+      // One try of 60 s is already as long as an AI app waits for a tool: no second one.
+      retryOnTimeout: false,
       what: "the FIT file of the workout",
       notFound: `Suunto has no FIT file for the workout ${key.trim()}.`,
       serverErrorHint: WRONG_KEY_HINT,
@@ -303,9 +327,24 @@ export class SuuntoApi implements ActivityBackend {
 
   async createPoi(poi: WirePoiInput): Promise<WirePoiEnvelope> {
     const res = await this.http.json({ method: "POST", path: "/v2/poi/create", body: poi, contentType: "application/json", what: "the new point of interest" });
-    const envelope = asPoiEnvelope(res.json);
+    // The answer is a PointOfInterestResult: { pointOfInterest, errorCode }. The meaning of the
+    // error codes is not documented, so a non-zero one (or an empty pointOfInterest) is not
+    // reported as saved: the user checks in the Suunto App first.
+    const json = res.json;
+    const code = isObject(json) ? poiErrorCode(json.errorCode) : undefined;
+    if (code !== undefined) {
+      throw new UnconfirmedWriteError(
+        `Suunto answered the new point of interest with an error${code ? ` (code ${code})` : ""}, so it is not clear whether it was saved. Check in the Suunto App (or list the points of interest) before you try again.`,
+      );
+    }
+    const envelope = asPoiEnvelope(json);
     if (envelope) return envelope;
-    // Saved (2xx), but the answer did not hold the point: give back what was sent.
+    if (isObject(json) && "pointOfInterest" in json) {
+      throw new UnconfirmedWriteError(
+        "Suunto answered the new point of interest without the point, so it is not clear whether it was saved. Check in the Suunto App (or list the points of interest) before you try again.",
+      );
+    }
+    // Saved (2xx), but the answer was lost or has another shape: give back what was sent.
     return { pointOfInterest: { ...poi, point: { ...poi.point } } as WirePoi };
   }
 

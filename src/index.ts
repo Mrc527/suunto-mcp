@@ -44,8 +44,9 @@ Suunto app keys (your app in the Suunto API Zone, https://apizone.suunto.com):
                            (or SUUNTO_SUBSCRIPTION_KEY_FILE)
 
 Single-user settings (one Suunto account):
-  SUUNTO_TOKEN_CACHE       File that keeps the current Suunto tokens between runs (mode 0600).
-                           --login writes it. Default: none (memory only)
+  SUUNTO_TOKEN_CACHE       File that keeps the current Suunto tokens between runs (mode 0600),
+                           for example ~/.config/suunto-mcp/tokens.json. --login writes it.
+                           Default: none (memory only)
   SUUNTO_REFRESH_TOKEN     Instead of the token cache: a Suunto refresh token
                            (or SUUNTO_REFRESH_TOKEN_FILE)
   SUUNTO_REDIRECT_URI      Address Suunto sends the browser back to after --login
@@ -54,6 +55,11 @@ Single-user settings (one Suunto account):
   SUUNTO_UNITS             metric (default) | imperial
   SUUNTO_READ_ONLY         true to disable adding routes and points of interest
   SUUNTO_TIMEZONE          IANA time zone of your dates (default: TZ, else the system time zone)
+  SUUNTO_CALLS_PER_MINUTE  Suunto requests per minute for this process (default 10, Suunto's
+                           Developer limit; 0 = no limit)
+  SUUNTO_CALLS_PER_USER_PER_DAY
+                           Suunto requests per user per day (default: no limit here, 100 with
+                           --web; 0 = no limit)
 
 HTTP mode (--http):
   MCP_HTTP_TOKEN           Bearer token required on every request (or MCP_HTTP_TOKEN_FILE)
@@ -124,6 +130,8 @@ function parseArgs(argv: string[]): ParsedArgs {
     }
   }
   if (login && (check || web || cli.transport)) throw new Error("--login cannot be combined with --check, --web, --http or --stdio.");
+  // --check tests the single-user settings and exits; --web would start the web service instead.
+  if (web && (check || cli.transport)) throw new Error("--web cannot be combined with --check, --http or --stdio.");
   return { cli, check, login, web };
 }
 

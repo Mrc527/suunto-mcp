@@ -13,9 +13,12 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import type { UnitChoice } from "./activity/types.js";
 import { customEndpoints, endpointsFromEnv, type SuuntoEndpoints } from "./suunto/endpoints.js";
-import type { SuuntoAppKeys } from "./suunto/oauth.js";
+import { DEFAULT_LIMITS, type CallLimits } from "./suunto/limiter.js";
+import type { StoredSuuntoTokens, SuuntoAppKeys } from "./suunto/oauth.js";
 import { ConfigError } from "./util/errors.js";
 import { isValidTimeZone, systemTimeZone } from "./util/dates.js";
 import { parseBool, parseList } from "./util/text.js";
@@ -25,7 +28,10 @@ export interface SuuntoSettings {
   keys?: SuuntoAppKeys;
   /** SUUNTO_REFRESH_TOKEN: a refresh token from an earlier sign-in. */
   refreshToken?: string;
-  /** File with the current tokens (mode 0600), written by --login and after every refresh. Unset: memory only. */
+  /**
+   * File with the current tokens (mode 0600), written by --login and after every refresh. Unset:
+   * memory only. An absolute path: a leading "~/" is the home folder.
+   */
   tokenCache?: string;
   /** Where Suunto sends the browser back after the sign-in. Only used by --login. */
   redirectUri: string;
@@ -54,6 +60,11 @@ export interface AppConfig {
   http: HttpSettings;
   /** Secrets that must never appear in output (client secret, subscription key, refresh token, HTTP token). */
   secrets: string[];
+  /**
+   * The Suunto call limits of this process (SUUNTO_CALLS_PER_MINUTE, SUUNTO_CALLS_PER_USER_PER_DAY).
+   * Set by loadConfig; single-user mode builds its limiter from them (default DEFAULT_LIMITS).
+   */
+  callLimits?: CallLimits;
 }
 
 type Env = Record<string, string | undefined>;
@@ -119,6 +130,90 @@ function parsePort(value: string | undefined, fallback: number, name: string): n
   return n;
 }
 
+/** A whole number of 0 or more from NAME, or the fallback when it is unset. */
+function limitValue(env: Env, name: string, fallback: number): number {
+  const raw = envValue(env, name);
+  if (raw === undefined) return fallback;
+  const n = Number(raw);
+  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(n)) {
+    throw new ConfigError(`${name} must be a whole number of 0 or more (0 means no limit), got "${raw}"`);
+  }
+  return n;
+}
+
+/**
+ * The Suunto call limits (DESIGN.md section 4, call limiter): SUUNTO_CALLS_PER_MINUTE (default
+ * 10, Suunto's Developer limit) for the whole process, and SUUNTO_CALLS_PER_USER_PER_DAY (default
+ * 0). 0 means no limit, an empty value means unset. The web service passes its own defaults (it
+ * caps each user at 100 calls a day unless the variable is set).
+ */
+export function callLimitsFromEnv(env: Env, defaults: Partial<CallLimits> = {}): CallLimits {
+  return {
+    perMinute: limitValue(env, "SUUNTO_CALLS_PER_MINUTE", defaults.perMinute ?? DEFAULT_LIMITS.perMinute),
+    perUserPerDay: limitValue(env, "SUUNTO_CALLS_PER_USER_PER_DAY", defaults.perUserPerDay ?? DEFAULT_LIMITS.perUserPerDay),
+  };
+}
+
+/** A path with a leading "~" or "~/" in the home folder, made absolute (MCP apps do not expand "~"). */
+export function expandPath(path: string): string {
+  if (path === "~") return homedir();
+  if (path.startsWith("~/") || path.startsWith("~\\")) return join(homedir(), path.slice(2));
+  return resolve(path);
+}
+
+/** The JSON of a token cache file (src/server.ts writes it). */
+interface TokenCacheFile {
+  refreshToken: string;
+  accessToken?: string;
+  /** Epoch milliseconds. */
+  accessTokenExpiresAt?: number;
+  /** The app the tokens were issued to: a refresh needs the same app. */
+  clientId: string;
+  /** The Suunto App username, when known (for people who read the file). */
+  username?: string;
+}
+
+/**
+ * What a token cache file holds: the tokens, or why they cannot be used ("missing" when there is
+ * no file). The reason fits after "The token cache <file> ..." and never holds a token or a
+ * client id. A cache written for another app (client id) is not used: Suunto would refuse its
+ * refresh token. Never throws.
+ */
+export function inspectTokenCache(file: string, clientId?: string): { tokens: StoredSuuntoTokens } | { problem: string; missing: boolean } {
+  let text: string;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return { problem: "does not exist", missing: true };
+    return { problem: `cannot be read (${code ?? "error"})`, missing: false };
+  }
+  let data: Partial<TokenCacheFile>;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
+    data = parsed as Partial<TokenCacheFile>;
+  } catch {
+    return { problem: "is not a valid token cache (not JSON; it may be damaged)", missing: false };
+  }
+  if (typeof data.refreshToken !== "string" || !data.refreshToken.trim() || typeof data.clientId !== "string" || !data.clientId.trim()) {
+    return { problem: "holds no Suunto sign-in", missing: false };
+  }
+  if (clientId && data.clientId !== clientId) {
+    return { problem: "was written for another Suunto app (another SUUNTO_CLIENT_ID)", missing: false };
+  }
+  const access = typeof data.accessToken === "string" && data.accessToken.trim() ? data.accessToken : undefined;
+  const expires = typeof data.accessTokenExpiresAt === "number" && Number.isFinite(data.accessTokenExpiresAt) ? data.accessTokenExpiresAt : undefined;
+  return {
+    tokens: {
+      refreshToken: data.refreshToken,
+      clientId: data.clientId,
+      ...(access ? { accessToken: access } : {}),
+      ...(access && expires !== undefined ? { accessTokenExpiresAt: expires } : {}),
+    },
+  };
+}
+
 function bool(env: Env, name: string, fallback: boolean): boolean {
   try {
     return parseBool(env[name], fallback);
@@ -166,7 +261,8 @@ function buildConfig(env: Env, cli: CliOverrides, warn: (message: string) => voi
     throw new ConfigError(`SUUNTO_CLIENT_ID, SUUNTO_CLIENT_SECRET and SUUNTO_SUBSCRIPTION_KEY are not set. ${KEYS_HELP}`);
   }
   const refreshToken = readSecret(env, "SUUNTO_REFRESH_TOKEN");
-  const tokenCache = envValue(env, "SUUNTO_TOKEN_CACHE");
+  const tokenCacheRaw = envValue(env, "SUUNTO_TOKEN_CACHE");
+  const tokenCache = tokenCacheRaw ? expandPath(tokenCacheRaw) : undefined;
   const redirectRaw = envValue(env, "SUUNTO_REDIRECT_URI");
 
   let redirectUri = redirectRaw ?? DEFAULT_REDIRECT_URI;
@@ -183,6 +279,14 @@ function buildConfig(env: Env, cli: CliOverrides, warn: (message: string) => voi
         ? `The token cache ${tokenCache} (SUUNTO_TOKEN_CACHE) does not exist yet. Run suunto-mcp --login once to sign in to Suunto and create it, or set SUUNTO_REFRESH_TOKEN.`
         : "No Suunto sign-in is set. Set SUUNTO_TOKEN_CACHE to a file path and run suunto-mcp --login once to sign in to Suunto, or set SUUNTO_REFRESH_TOKEN (or SUUNTO_REFRESH_TOKEN_FILE).",
     );
+  } else if (tokenCache) {
+    // A cache that is there but cannot be used is never skipped in silence.
+    const cache = inspectTokenCache(tokenCache, keys.clientId);
+    if ("problem" in cache && !cache.missing) {
+      const text = `The token cache ${tokenCache} (SUUNTO_TOKEN_CACHE) ${cache.problem}.`;
+      if (!refreshToken) throw new ConfigError(`${text} Run suunto-mcp --login again to sign in to Suunto and replace it.`);
+      warn(`${text} Using SUUNTO_REFRESH_TOKEN instead; the next refresh replaces the file.`);
+    }
   }
 
   if (mode === "serve" && refreshToken && !tokenCache) {
@@ -223,6 +327,7 @@ function buildConfig(env: Env, cli: CliOverrides, warn: (message: string) => voi
       allowedOrigins: parseList(env.MCP_HTTP_ALLOWED_ORIGINS),
     },
     secrets: [keys.clientSecret, keys.subscriptionKey, refreshToken, httpToken].filter((s): s is string => !!s),
+    callLimits: callLimitsFromEnv(env),
   };
 
   if (config.transport === "http" && !isLoopback(config.http.host) && !config.http.token) {

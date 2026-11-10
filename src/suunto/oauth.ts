@@ -79,6 +79,12 @@ export interface TokenResult {
   scope?: string;
 }
 
+/**
+ * The result of a refresh. The username may be missing: a refresh answer may not carry it, and
+ * the caller knows it from the earlier token. The new tokens are never thrown away for that.
+ */
+export type RefreshResult = Omit<TokenResult, "username"> & { username?: string };
+
 /** Access token lifetime when Suunto says nothing at all (no "exp", no expires_in): be careful. */
 const FALLBACK_LIFETIME_S = 3600;
 
@@ -87,6 +93,9 @@ export const AUTH_MESSAGES = {
     "Suunto did not accept the sign-in (the code is expired or was used already). Start again with Connect Suunto. If it keeps happening, the redirect URI registered in the Suunto app settings may not match this server.",
   expired: "Your Suunto connection expired. Connect Suunto again.",
   badClient: "Suunto refused this server's app keys (client id or client secret). The operator must check SUUNTO_CLIENT_ID and SUUNTO_CLIENT_SECRET.",
+  /** Suunto answers a sign-in with Movescount credentials like wrong app keys (FAQ): name both causes. */
+  badClientSignIn:
+    "Suunto refused the sign-in. Sign in on the Suunto page with your Suunto App account (not an old Movescount account) and start again with Connect Suunto. If that does not help, the operator must check SUUNTO_CLIENT_ID and SUUNTO_CLIENT_SECRET.",
   denied: "Suunto refused access. Connect Suunto again and allow access on the Suunto page.",
   network: "Could not reach Suunto to sign in. Try again later.",
   busy: "Suunto's sign-in service is busy or has a problem right now. Try again later.",
@@ -188,11 +197,14 @@ function tokenError(answer: TokenAnswer, flow: "code" | "refresh"): SuuntoAuthEr
   const description = oauthDescription(json);
   const empty = answer.body.trim() === "";
   const refused = flow === "refresh" ? AUTH_MESSAGES.expired : AUTH_MESSAGES.codeRefused;
+  // Wrong app keys answer 401 {"error":"invalid_client"}. The FAQ says a sign-in with Movescount
+  // credentials gets the same "bad client credentials" answer, so after a sign-in both causes are named.
+  const badClient = flow === "code" ? AUTH_MESSAGES.badClientSignIn : AUTH_MESSAGES.badClient;
 
-  if (error === "invalid_client" || error === "unauthorized_client") return new SuuntoAuthError("bad_client", AUTH_MESSAGES.badClient, { status });
+  if (error === "invalid_client" || error === "unauthorized_client") return new SuuntoAuthError("bad_client", badClient, { status });
   // Spring Security answers a wrong Basic auth with 401 "unauthorized" / "Bad credentials".
   if (status === 401 && (empty || error === "unauthorized" || /bad (client )?credentials|full authentication/i.test(description))) {
-    return new SuuntoAuthError("bad_client", AUTH_MESSAGES.badClient, { status });
+    return new SuuntoAuthError("bad_client", badClient, { status });
   }
   if (error === "invalid_grant" || error === "invalid_token") return new SuuntoAuthError("invalid_grant", refused, { status });
   if (error === "access_denied" || status === 403) return new SuuntoAuthError("denied", AUTH_MESSAGES.denied, { status });
@@ -206,8 +218,8 @@ function tokenError(answer: TokenAnswer, flow: "code" | "refresh"): SuuntoAuthEr
   return new SuuntoAuthError("unknown", `The Suunto sign-in failed (HTTP ${status}).`, { status });
 }
 
-/** Build the result of a 2xx token answer. */
-function tokenResult(answer: TokenAnswer, opts: OAuthOptions, previousRefreshToken: string | undefined): TokenResult {
+/** Build the result of a 2xx token answer (the username is left out when it cannot be read). */
+function tokenResult(answer: TokenAnswer, opts: OAuthOptions, previousRefreshToken: string | undefined): RefreshResult {
   const json = answer.json;
   const accessToken = typeof json?.access_token === "string" ? json.access_token.trim() : "";
   if (!accessToken) throw new SuuntoAuthError("unknown", "Suunto answered the sign-in without an access token. Try again later.", { status: answer.status });
@@ -225,12 +237,11 @@ function tokenResult(answer: TokenAnswer, opts: OAuthOptions, previousRefreshTok
   // The username is the "user" claim; the token answer may carry it as a field too.
   const bodyUser = typeof json?.user === "string" ? json.user.trim() : "";
   const username = (payload ? jwtUsername(payload) : undefined) ?? (bodyUser || undefined);
-  if (!username) throw new SuuntoAuthError("unknown", "Suunto answered the sign-in without a Suunto username, so this connection cannot be used. Try again later.", { status: answer.status });
 
   const scope = typeof json?.scope === "string" && json.scope.trim() ? json.scope.trim() : Array.isArray(json?.scope) ? (json.scope as unknown[]).filter((s) => typeof s === "string").join(" ") || undefined : undefined;
   return {
     tokens: { refreshToken, accessToken, accessTokenExpiresAt, clientId: opts.keys.clientId },
-    username,
+    ...(username ? { username } : {}),
     ...(scope ? { scope } : {}),
   };
 }
@@ -243,15 +254,19 @@ export async function exchangeCode(code: string, redirectUri: string, opts: OAut
   if (!code.trim()) throw new SuuntoAuthError("invalid_grant", AUTH_MESSAGES.codeRefused);
   const answer = await tokenCall({ grant_type: "authorization_code", code: code.trim(), redirect_uri: redirectUri }, opts, false);
   if (answer.status < 200 || answer.status >= 300) throw tokenError(answer, "code");
-  return tokenResult(answer, opts, undefined);
+  const result = tokenResult(answer, opts, undefined);
+  // A new connection needs the username (it identifies the Suunto account).
+  if (!result.username) throw new SuuntoAuthError("unknown", "Suunto answered the sign-in without a Suunto username, so this connection cannot be used. Try again later.", { status: answer.status });
+  return { ...result, username: result.username };
 }
 
 /**
  * Get a new access token with a refresh token. The result holds the newest refresh token (the
- * new one when Suunto rotated it, else the one given). Throws SuuntoAuthError; code
- * "invalid_grant" means the refresh token no longer works (the user must connect again).
+ * new one when Suunto rotated it, else the one given), and the username when the answer has one.
+ * Throws SuuntoAuthError; code "invalid_grant" means the refresh token no longer works (the user
+ * must connect again).
  */
-export async function refreshTokens(refreshToken: string, opts: OAuthOptions): Promise<TokenResult> {
+export async function refreshTokens(refreshToken: string, opts: OAuthOptions): Promise<RefreshResult> {
   if (!refreshToken.trim()) throw new SuuntoAuthError("invalid_grant", AUTH_MESSAGES.expired);
   const answer = await tokenCall({ grant_type: "refresh_token", refresh_token: refreshToken.trim() }, opts, true);
   if (answer.status < 200 || answer.status >= 300) throw tokenError(answer, "refresh");

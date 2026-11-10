@@ -113,8 +113,10 @@ export function describeError(error: unknown): string {
       response?: string;
       code?: string;
       status?: number;
+      kind?: string;
     };
-    if (anyErr.status === 401 && !/connect suunto again|subscription key|app keys/i.test(error.message)) {
+    // A rate limit can come as HTTP 401, but it is never a sign-in problem: reconnecting does not help.
+    if (anyErr.status === 401 && anyErr.kind !== "rate_limit" && !/connect suunto again|subscription key|app keys|call limit/i.test(error.message)) {
       parts.push("(Suunto refused the sign-in: connect Suunto again)");
     }
     if (anyErr.responseText && !error.message.includes(anyErr.responseText)) {
