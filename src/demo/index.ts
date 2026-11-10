@@ -1,36 +1,36 @@
 /**
  * The demo accounts of the web service, for app reviewers (for example the Claude Connectors
- * Directory) who must not test with a real PADI account.
+ * Directory) who must not test with a real Suunto account.
  *
- * A demo account has no PADI account behind it: its logbook is the in-memory store of logbook.ts,
- * filled with invented sample dives (logbook-data.ts: diver "Alex Demo", time zone
- * Europe/Zurich). The registry keeps one store per demo user for the life of the process. Nothing
- * is written to disk and nothing is sent to PADI, so a restart starts from fresh sample data, and
- * every store is reset to fresh sample data every day at 04:00 in Europe/Zurich: one timer for all
- * accounts, plus a check on every use in case the timer was late (for example after the machine
- * was suspended).
+ * A demo account has no Suunto account behind it: its data is the in-memory store of activity.ts,
+ * filled with invented sample data (activity-data.ts: "Alex Demo", Suunto username alexdemo, time
+ * zone Europe/Zurich). The registry keeps one store per demo user for the life of the process.
+ * Nothing is written to disk and nothing is sent to Suunto, so a restart starts from fresh sample
+ * data, and every store is reset to fresh sample data every day at 04:00 in Europe/Zurich: one
+ * timer for all accounts, plus a check on every use in case the timer was late (for example after
+ * the machine was suspended).
  */
 
 import { addDays, parseDateOnly, todayInZone, wallTimeToDate } from "../util/dates.js";
-import { DemoLogbookStore, type DemoSeed } from "./logbook.js";
-import { DEMO_INSTRUCTOR_NUMBER } from "./logbook-data.js";
+import { DemoActivityStore } from "./activity.js";
+import { DEMO_TIME_ZONE } from "./activity-data.js";
 
-export { DEMO_ADDRESS, DEMO_AFFILIATE_ID, DEMO_INSTRUCTOR_NUMBER, DEMO_NAME } from "./logbook-data.js";
+export { DEMO_ADDRESS, DEMO_NAME, DEMO_TIME_ZONE, DEMO_USERNAME } from "./activity-data.js";
+export { DemoActivityBackend, DemoActivityStore } from "./activity.js";
 
-export const DEMO_TIME_ZONE = "Europe/Zurich";
 /** Hour of the daily reset, in DEMO_TIME_ZONE. */
 export const DEMO_RESET_HOUR = 4;
 
-/** What the AI app is told about a demo account (server instructions and padi_account_info). */
+/** What the AI app is told about a demo account (server instructions and suunto_account_info). */
 export const DEMO_NOTICE =
-  "This is a demo account: its logbook is invented sample data built into this server, not a real PADI account. " +
-  "Adding, changing and deleting dives works, but nothing is sent to PADI or to any PADI Pro. " +
-  `PADI Pro number ${DEMO_INSTRUCTOR_NUMBER} is an invented instructor for trying the verification request. ` +
+  "This is a demo account: its workouts, sleep, recovery, routes and points of interest are invented sample data built into this server, not a real Suunto account. " +
+  "Adding routes and points of interest works, but nothing is sent to Suunto. " +
   `Changes are kept in memory only and reset to fresh sample data every day at ${String(DEMO_RESET_HOUR).padStart(2, "0")}:00 (${DEMO_TIME_ZONE}).`;
 
 export interface DemoAccount {
   readonly userId: string;
-  readonly logbook: DemoLogbookStore;
+  /** The demo user's Suunto data. */
+  readonly activity: DemoActivityStore;
   /** Grows with every reset, so services built on the old data are rebuilt. */
   readonly generation: number;
   /** When the current sample data was generated. */
@@ -39,7 +39,7 @@ export interface DemoAccount {
 
 interface Entry {
   userId: string;
-  logbook: DemoLogbookStore;
+  activity: DemoActivityStore;
   generation: number;
   resetAt: Date;
 }
@@ -68,8 +68,6 @@ export interface DemoRegistryOptions {
   clock?: () => Date;
   timeZone?: string;
   resetHour?: number;
-  /** The sample dives (default: those of logbook.ts). */
-  seed?: DemoSeed;
 }
 
 /** The demo store of every demo user, and their daily reset. */
@@ -77,7 +75,6 @@ export class DemoRegistry {
   readonly timeZone: string;
   readonly resetHour: number;
   private readonly clock: () => Date;
-  private readonly seed: DemoSeed | undefined;
   private readonly entries = new Map<string, Entry>();
   private timer: NodeJS.Timeout | undefined;
 
@@ -85,7 +82,6 @@ export class DemoRegistry {
     this.clock = opts.clock ?? (() => new Date());
     this.timeZone = opts.timeZone ?? DEMO_TIME_ZONE;
     this.resetHour = opts.resetHour ?? DEMO_RESET_HOUR;
-    this.seed = opts.seed;
   }
 
   /** Number of demo accounts with stores in memory. */
@@ -104,8 +100,8 @@ export class DemoRegistry {
       this.resetIfDue(existing, now);
       return existing;
     }
-    const logbook = new DemoLogbookStore({ now, clock: this.clock, timeZone: this.timeZone, ...(this.seed ? { seed: this.seed } : {}) });
-    const entry: Entry = { userId, logbook, generation: 1, resetAt: now };
+    const activity = new DemoActivityStore({ now: () => this.clock().getTime(), timeZone: this.timeZone });
+    const entry: Entry = { userId, activity, generation: 1, resetAt: now };
     this.entries.set(userId, entry);
     this.schedule();
     return entry;
@@ -158,7 +154,7 @@ export class DemoRegistry {
   }
 
   private resetEntry(entry: Entry, now: Date): void {
-    entry.logbook.reset(now);
+    entry.activity.reset(now.getTime());
     entry.generation++;
     entry.resetAt = now;
   }

@@ -124,8 +124,9 @@ export function categoryOf(name: string): Category | undefined {
   if (/heart_?rate|(^|_)hr($|_)|bpm/.test(name)) return "heart_rate";
   if (/depth/.test(name)) return "depth";
   if (/pool_?length/.test(name)) return "length";
-  if (/altitude|ascent|descent|elevation/.test(name)) return "elevation";
+  // "descent_distance" (skiing) is a distance; "total_descent" an elevation.
   if (/distance/.test(name)) return "distance";
+  if (/altitude|ascent|descent|elevation/.test(name)) return "elevation";
   return undefined;
 }
 
@@ -517,8 +518,10 @@ function zoneList(value: unknown): Zone[] {
 export function intensityOf(ext: Obj, units: UnitChoice): Obj {
   const out: Obj = {};
   const { zones, type: _type, ...rest } = ext;
-  if (isObject(zones)) {
-    for (const [kind, value] of Object.entries(zones)) {
+  // Zones keyed zone1..zone5 directly (no kind): heart rate zones.
+  const byKind = isObject(zones) && Object.keys(zones).length && Object.keys(zones).every((k) => /^zone\d+$/i.test(k)) ? { heartRate: zones } : zones;
+  if (isObject(byKind)) {
+    for (const [kind, value] of Object.entries(byKind)) {
       const name = snakeCase(kind);
       const category = categoryOf(name);
       const list = zoneList(value).map((z) => {
@@ -1244,6 +1247,12 @@ export function dateOfDailySample(time: string, starts: readonly DayStart[], tz:
  */
 export function toDaySummaries(stats: readonly WireDailyStatistic[], days: readonly DayStart[], tz: string): DaySummary[] {
   const wanted = new Set(days.map((d) => d.date));
+  // The days just before and after the range catch Suunto's samples near their midnights, so
+  // those are not taken for a day of the range (and are then left out).
+  const first = days[0];
+  const last = days[days.length - 1];
+  const guard = (date: string): DayStart => ({ date, ms: startOfDay(date, tz).getTime() });
+  const starts = first && last ? [guard(addDays(first.date, -1)), ...days, guard(addDays(last.date, 1))] : [...days];
   const values = { steps: new Map<string, Map<string, number>>(), energy: new Map<string, Map<string, number>>() };
   for (const stat of stats) {
     if (!isObject(stat) || typeof stat.Name !== "string") continue;
@@ -1257,7 +1266,7 @@ export function toDaySummaries(stats: readonly WireDailyStatistic[], days: reado
         if (!isObject(sample) || typeof sample.TimeISO8601 !== "string") continue;
         const value = U.num(sample.Value);
         if (value === undefined) continue;
-        const date = dateOfDailySample(sample.TimeISO8601, days, tz);
+        const date = dateOfDailySample(sample.TimeISO8601, starts, tz);
         if (!date || !wanted.has(date)) continue;
         const perSource = values[metric].get(date) ?? new Map<string, number>();
         perSource.set(sourceName, Math.max(perSource.get(sourceName) ?? -Infinity, value));

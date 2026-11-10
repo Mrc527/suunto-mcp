@@ -719,12 +719,16 @@ export class ActivityService {
     return r;
   }
 
-  /** Calls a 247 endpoint in windows of at most 28 days, one after another; never the future. */
+  /**
+   * Calls a 247 endpoint for [fromMs, toMs) in windows shorter than 28 days, one after another,
+   * never for the future. Each window ends 1 ms before the next starts: the docs do not say
+   * whether `to` is included, and the span stays below the 28-day limit.
+   */
   private async windowed<T>(fromMs: number, toMs: number, call: (from: number, to: number) => Promise<WireSample<T>[]>): Promise<WireSample<T>[]> {
     const end = Math.min(toMs, this.now());
     const out: WireSample<T>[] = [];
     for (let start = fromMs; start < end; start += WINDOW_MS) {
-      out.push(...(await call(start, Math.min(start + WINDOW_MS, end))));
+      out.push(...(await call(start, Math.min(start + WINDOW_MS, end) - 1)));
     }
     return out;
   }
@@ -779,9 +783,10 @@ export class ActivityService {
   /**
    * suunto_list_workouts. The order of Suunto's list is not documented. Without a sport filter
    * one page is read (one more workout than asked, to know whether there is a next page): when
-   * that page is newest first it is used as it is. When it is oldest first (or the order cannot
-   * be told), the whole range is read (at most 1000 workouts) and sorted here, newest first. With
-   * a sport filter the whole range is always read, filtered and sorted here.
+   * that page is newest first it is used as it is. A short last page tells the total, so one more
+   * request finds the oldest workouts when the list is oldest first. A full page that is oldest
+   * first (or of unknown order) means the whole range is read (at most 1000 workouts) and sorted
+   * here, newest first. With a sport filter the whole range is always read, filtered and sorted.
    */
   async listWorkouts(args: ListWorkoutsArgs = {}): Promise<ListWorkoutsResult> {
     const a = parse(schemas.listWorkouts, args);
@@ -813,14 +818,21 @@ export class ActivityService {
       const want = Math.min(limit + 1, WORKOUT_PAGE);
       const raw = (await this.backend.listWorkouts({ since: r.fromMs, until: r.toMs, limit: want, offset, byModificationTime: false })).payload ?? [];
       const page = this.inRange(dedupeWorkouts(raw), r.fromMs, r.toMs);
+      const order = orderOf(raw);
       if (raw.length < want) {
-        // The last page: everything from `offset` on is here.
-        const shown = newestFirst(page).slice(0, limit);
-        return finish(shown, { total_in_range: offset + raw.length });
+        // The last page: the range holds offset + raw.length workouts, whatever the order.
+        const total = offset + raw.length;
+        if (offset === 0 || order === "desc" || !raw.length) {
+          return finish(newestFirst(page).slice(0, limit), raw.length ? { total_in_range: total } : {});
+        }
+        // Oldest first (or unknown): the wanted workouts are the oldest raw.length of the range.
+        // In either order they are in this page or in the first raw.length of the list.
+        const start = (await this.backend.listWorkouts({ since: r.fromMs, until: r.toMs, limit: raw.length, offset: 0, byModificationTime: false })).payload ?? [];
+        const oldest = newestFirst(this.inRange(dedupeWorkouts([...raw, ...start]), r.fromMs, r.toMs)).slice(-raw.length);
+        return finish(oldest.slice(0, limit), { total_in_range: total });
       }
-      if (orderOf(raw) === "desc") {
-        const shown = newestFirst(page).slice(0, limit);
-        return finish(shown, { next_offset: offset + limit });
+      if (order === "desc") {
+        return finish(newestFirst(page).slice(0, limit), { next_offset: offset + limit });
       }
     }
 
