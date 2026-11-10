@@ -252,3 +252,35 @@ export function isoWeek(date: string): string {
   const week = Math.ceil(((d.getTime() - Date.UTC(weekYear, 0, 1)) / DAY_MS + 1) / 7);
   return `${weekYear}-W${pad(week)}`;
 }
+
+/**
+ * A timestamp from Suunto as epoch milliseconds. ISO 8601 with "Z" or an offset is read as it is;
+ * without a zone it is UTC (Suunto stores and answers in UTC, and Date.parse would otherwise use
+ * the server's own zone). undefined for anything that is not an ISO date-time.
+ */
+export function parseUtcTimestamp(value: string): number | undefined {
+  const v = value.trim().replace(" ", "T");
+  if (!/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?)?(Z|[+-]\d{2}:?\d{2})?$/i.test(v)) return undefined;
+  const full = v.includes("T") ? v : `${v}T00:00:00`;
+  const ms = Date.parse(HAS_ZONE.test(full) ? full : `${full}Z`);
+  return Number.isNaN(ms) ? undefined : ms;
+}
+
+/** True when an ISO 8601 date-time names a local offset other than "Z" (for example "+02:00"). */
+export function hasLocalOffset(value: string): boolean {
+  return /T\d{2}:\d{2}.*[+-]\d{2}:?\d{2}$/.test(value.trim());
+}
+
+/** The instant the local clock in `tz` showed the start of the hour that holds `ms` (DST safe). */
+export function localHourStart(ms: number, tz: string): number {
+  const w = toWallTime(new Date(ms), tz);
+  return Math.floor(ms / 1000) * 1000 - (w.minute * 60 + w.second) * 1000;
+}
+
+/** Every YYYY-MM-DD date from `from` to `to`, both included ([] when `to` is before `from`). */
+export function datesBetween(from: string, to: string): string[] {
+  const out: string[] = [];
+  const n = daysBetween(from, to);
+  for (let i = 0; i <= n; i++) out.push(addDays(from, i));
+  return out;
+}

@@ -1,12 +1,12 @@
 # Production stack used by the CI/CD pipeline (.github/workflows/ci.yml).
 #
 # The pipeline copies this folder (compose.yml, deploy.sh, .env.example) to the server and runs
-# deploy.sh, which pulls the new image, sets PADI_MCP_IMAGE in .env and restarts the service.
+# deploy.sh, which pulls the new image, sets SUUNTO_MCP_IMAGE in .env and restarts the service.
 # Your own settings live in .env next to this file; the pipeline only changes its
-# PADI_MCP_IMAGE line.
+# SUUNTO_MCP_IMAGE line (and the Suunto app keys, when they are set as GitHub secrets).
 #
 # Manual commands, run in this folder on the server as the user that owns it
-# (for example: sudo -iu deploy, then cd padi-mcp). Do not run them as root.
+# (for example: sudo -iu deploy, then cd suunto-mcp). Do not run them as root.
 #   ./deploy.sh status          what runs now and the recent deploys
 #   ./deploy.sh rollback        go back to the version that ran before
 #   ./deploy.sh backup          save a consistent copy of the database
@@ -15,11 +15,11 @@
 # Your own settings (how the reverse proxy reaches the service, see below) go in
 # compose.override.yml here. Docker Compose loads it automatically and the pipeline never
 # touches it.
-name: padi-mcp
+name: suunto-mcp
 
 services:
-  padi-mcp:
-    image: ${PADI_MCP_IMAGE:?PADI_MCP_IMAGE is set by deploy.sh}
+  suunto-mcp:
+    image: ${SUUNTO_MCP_IMAGE:?SUUNTO_MCP_IMAGE is set by deploy.sh}
     restart: unless-stopped
     environment:
       PUBLIC_URL: https://${DOMAIN:?set DOMAIN in .env}
@@ -28,14 +28,19 @@ services:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       # Optional. If empty, a key is generated once in the data volume (back it up).
       MASTER_KEY: ${MASTER_KEY:-}
+      # The keys of the app in the Suunto API Zone. Without them the service starts, demo
+      # accounts work, and real accounts cannot connect Suunto yet.
+      SUUNTO_CLIENT_ID: ${SUUNTO_CLIENT_ID:-}
+      SUUNTO_CLIENT_SECRET: ${SUUNTO_CLIENT_SECRET:-}
+      SUUNTO_SUBSCRIPTION_KEY: ${SUUNTO_SUBSCRIPTION_KEY:-}
+      # Optional. Default: https://DOMAIN/suunto/callback (register it in the API Zone).
+      SUUNTO_REDIRECT_URI: ${SUUNTO_REDIRECT_URI:-}
       # Optional: SMTP server for e-mails to administrators about access requests.
       SMTP_URL: ${SMTP_URL:-}
       NOTIFY_FROM: ${NOTIFY_FROM:-}
-      # Optional: PADI logbook API for every user: proxy (default), direct or auto.
-      PADI_API_MODE: ${PADI_API_MODE:-}
     # No port is published on this machine. Your reverse proxy reaches the service in one of
     # these ways (setup-server.sh writes the matching compose.override.yml):
-    #   - a proxy in Docker (Traefik, ...): on a Docker network shared with it, at padi-mcp:3000;
+    #   - a proxy in Docker (Traefik, ...): on a Docker network shared with it, at suunto-mcp:3000;
     #   - a proxy installed on this machine (nginx, Caddy): compose.override.yml publishes
     #     127.0.0.1:HOST_PORT;
     #   - the bundled Caddy below (COMPOSE_PROFILES=caddy): on the default network.
@@ -59,11 +64,11 @@ services:
     image: caddy:2
     profiles: [caddy]
     restart: unless-stopped
-    depends_on: [padi-mcp]
+    depends_on: [suunto-mcp]
     ports:
       - "80:80"
       - "443:443"
-    command: caddy reverse-proxy --from ${DOMAIN} --to padi-mcp:3000
+    command: caddy reverse-proxy --from ${DOMAIN} --to suunto-mcp:3000
     volumes:
       - caddy-data:/data
 

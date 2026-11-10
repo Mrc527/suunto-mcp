@@ -129,7 +129,7 @@ export function layout(opts: LayoutOptions, body: SafeHtml): string {
 <body data-i18n="${escapeHtml(JSON.stringify(clientMessages()))}">
 <header class="topbar">
   <div class="topbar-inner">
-    <a href="/" class="brand">${render(brandMark("sm"))}<span class="brand-name"><b>MCP</b> for PADI</span></a>
+    <a href="/" class="brand">${render(brandMark("sm"))}<span class="brand-name"><b>MCP</b> for Suunto</span></a>
     ${render(bar)}
   </div>
 </header>

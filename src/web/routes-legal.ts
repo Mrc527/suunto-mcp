@@ -13,8 +13,8 @@ import { HTML_LANG, locale, t, th, tn, type MessageKey } from "./i18n/index.js";
 import { CONTACT_EMAIL, LEGAL_UPDATED, OPERATOR_NAME } from "./operator.js";
 import { LANGUAGE_COOKIE_DAYS, PRE_CSRF_HOURS } from "./session.js";
 
-/** PADI's website (the terms of use point to it). */
-const PADI_URL = "https://www.padi.com";
+/** Suunto's website (the terms of use point to it). */
+const SUUNTO_URL = "https://www.suunto.com";
 
 interface Section {
   id: string;
@@ -38,7 +38,7 @@ export function legalRoutes(ctx: WebContext): Router {
     operator: OPERATOR_NAME,
     site: ctx.publicUrl.host,
     email: html`<a href="mailto:${CONTACT_EMAIL}">${CONTACT_EMAIL}</a>`,
-    url: PADI_URL,
+    url: SUUNTO_URL,
   });
 
   const render = (req: express.Request, res: express.Response, title: MessageKey, intro: MessageKey, sections: Section[], end: SafeHtml) => {
@@ -88,7 +88,7 @@ export function legalRoutes(ctx: WebContext): Router {
           "legal.privacy.data.account",
           "legal.privacy.data.request",
           "legal.privacy.data.invite",
-          "legal.privacy.data.padi",
+          "legal.privacy.data.suunto",
           "legal.privacy.data.apps",
           "legal.privacy.data.activity",
           "legal.privacy.data.sessions",
@@ -100,14 +100,14 @@ export function legalRoutes(ctx: WebContext): Router {
       {
         id: "legal-bases",
         title: "legal.privacy.bases.title",
-        body: html`${p("legal.privacy.bases.lead")}${ul("legal.privacy.bases.contract", "legal.privacy.bases.interest", "legal.privacy.bases.law")}`,
+        body: html`${p("legal.privacy.bases.lead")}${ul("legal.privacy.bases.contract", "legal.privacy.bases.health", "legal.privacy.bases.interest", "legal.privacy.bases.law")}`,
       },
       {
         id: "retention",
         title: "legal.privacy.retention.title",
         body: ul(
           "legal.privacy.retention.account",
-          "legal.privacy.retention.padi",
+          "legal.privacy.retention.suunto",
           "legal.privacy.retention.request",
           ["legal.privacy.retention.sessions", { lifetime: tn("legal.duration.days", settings.sessionTtlDays) }],
           [
@@ -125,7 +125,7 @@ export function legalRoutes(ctx: WebContext): Router {
         id: "recipients",
         title: "legal.privacy.recipients.title",
         body: html`${p("legal.privacy.recipients.lead")}${ul(
-          "legal.privacy.recipients.padi",
+          "legal.privacy.recipients.suunto",
           "legal.privacy.recipients.apps",
           "legal.privacy.recipients.hosting",
           "legal.privacy.recipients.admin",
@@ -146,7 +146,7 @@ export function legalRoutes(ctx: WebContext): Router {
       {
         id: "rights",
         title: "legal.privacy.rights.title",
-        body: html`${p("legal.privacy.rights.lead")}${ul("legal.privacy.rights.padi", "legal.privacy.rights.apps", "legal.privacy.rights.delete")}${p(
+        body: html`${p("legal.privacy.rights.lead")}${ul("legal.privacy.rights.suunto", "legal.privacy.rights.apps", "legal.privacy.rights.delete")}${p(
           "legal.privacy.rights.email",
         )}${p("legal.privacy.rights.complaint")}`,
       },
@@ -174,12 +174,14 @@ export function legalRoutes(ctx: WebContext): Router {
       { id: "service", title: "legal.terms.service.title", body: p("legal.terms.service.text") },
       { id: "affiliation", title: "legal.terms.affiliation.title", body: p("legal.terms.affiliation.text") },
       { id: "account", title: "legal.terms.account.title", body: ul("legal.terms.account.age", "legal.terms.account.secret", "legal.terms.account.approval") },
-      { id: "padi", title: "legal.terms.padi.title", body: p("legal.terms.padi.text") },
+      { id: "suunto", title: "legal.terms.suunto.title", body: p("legal.terms.suunto.text") },
+      { id: "health", title: "legal.terms.health.title", body: p("legal.terms.health.text") },
+      { id: "safety", title: "legal.terms.safety.title", body: p("legal.terms.safety.text") },
       { id: "ai-apps", title: "legal.terms.ai.title", body: html`${p("legal.terms.ai.access")}${p("legal.terms.ai.responsible")}` },
       {
         id: "use",
         title: "legal.terms.use.title",
-        body: html`${p("legal.terms.use.lead")}${ul("legal.terms.use.spam", "legal.terms.use.law", "legal.terms.use.others", "legal.terms.use.harm")}${p("legal.terms.use.report")}`,
+        body: html`${p("legal.terms.use.lead")}${ul("legal.terms.use.content", "legal.terms.use.law", "legal.terms.use.others", "legal.terms.use.harm")}${p("legal.terms.use.report")}`,
       },
       { id: "availability", title: "legal.terms.availability.title", body: p("legal.terms.availability.text") },
       { id: "administrator", title: "legal.terms.admin.title", body: p("legal.terms.admin.text") },

@@ -111,6 +111,15 @@ export function formatPace(seconds: number): string {
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
 }
 
+/**
+ * Swimming pace per 100 m or per 100 yd from m/s, with its unit in the text ("1:55 /100 m"),
+ * because units.pace (min/km or min/mi) does not fit swimming.
+ */
+export function swimPaceFromSpeed(metresPerSecond: number, units: UnitChoice): string | undefined {
+  const s = swimPaceSecondsFromSpeed(metresPerSecond, units);
+  return s === undefined || s > 3600 ? undefined : `${formatPace(s)} /100 ${units === "imperial" ? "yd" : "m"}`;
+}
+
 /** Pace "m:ss" per km or mi from m/s. */
 export function paceFromSpeed(metresPerSecond: number, units: UnitChoice): string | undefined {
   const s = paceSecondsFromSpeed(metresPerSecond, units);
@@ -140,9 +149,9 @@ export function temperatureFromKelvin(kelvin: number, units: UnitChoice): number
   return temperatureFromCelsius(kelvin > KELVIN_THRESHOLD ? kelvin - 273.15 : kelvin, units);
 }
 
-/** Joules as kcal, whole numbers. */
-export function kcalFromJoules(joules: number): number {
-  return round(joules / J_PER_KCAL);
+/** Joules as kcal, whole numbers unless `decimals` says otherwise. */
+export function kcalFromJoules(joules: number, decimals = 0): number {
+  return round(joules / J_PER_KCAL, decimals);
 }
 
 /** Hz (per second) as per minute (bpm or rpm), whole numbers. */

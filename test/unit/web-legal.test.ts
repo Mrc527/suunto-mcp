@@ -23,8 +23,20 @@ let base = "";
 const PASSWORD = "correct horse battery";
 const admin = new Browser();
 const DAY = 86_400_000;
-/** Never reach real PADI from tests: closed local ports. */
-const CLOSED = { PADI_COGNITO_URL: "http://127.0.0.1:1/", PADI_AUTH_URL: "http://127.0.0.1:1/auth/api", PADI_LOGBOOK_URL: "http://127.0.0.1:1/api/Logbook" };
+/** Never reach real Suunto from tests: closed local ports. */
+const CLOSED = { SUUNTO_OAUTH_URL: "http://127.0.0.1:1", SUUNTO_API_URL: "http://127.0.0.1:1" };
+/** An invented Suunto connection (the fields of SuuntoAccountSettings in store.ts). */
+const suuntoSettings = (username: string, refreshToken: string) => ({
+  username,
+  refreshToken,
+  accessToken: "at-invented-access",
+  accessTokenExpiresAt: Date.now() + 3_600_000,
+  clientId: "test-client",
+  units: "metric" as const,
+  readOnly: false,
+  timeZone: "Europe/Zurich",
+  connectedAt: Date.now(),
+});
 
 beforeAll(async () => {
   server = createServer();
@@ -62,7 +74,7 @@ describe("privacy policy and terms of use", () => {
       const { res, html } = await get(path);
       expect(res.status, path).toBe(200);
       expect(res.headers.get("content-type"), path).toContain("text/html");
-      expect(html, path).toContain(`<title>${title} · MCP for PADI</title>`);
+      expect(html, path).toContain(`<title>${title} · MCP for Suunto</title>`);
       expect(html, path).toContain(`<h1>${title}</h1>`);
       expect(html, path).toContain(`<p>Last updated: ${UPDATED_EN}</p>`);
       // Every entry of the table of contents leads to a section of the page, in the same order.
@@ -85,7 +97,7 @@ describe("privacy policy and terms of use", () => {
 
   it("say who is responsible and how to reach them", async () => {
     const privacy = (await get("/privacy")).html;
-    expect(privacy).toContain(`MCP for PADI at 127.0.0.1:${new URL(base).port} is run by ${OPERATOR_NAME}, Lugano, Switzerland.`);
+    expect(privacy).toContain(`MCP for Suunto at 127.0.0.1:${new URL(base).port} is run by ${OPERATOR_NAME}, Lugano, Switzerland.`);
     // Controller, security reports and rights.
     expect(count(privacy, MAILTO)).toBe(3);
     expect(privacy).toContain(`If you find a security problem, please report it to ${MAILTO}.`);
@@ -94,9 +106,24 @@ describe("privacy policy and terms of use", () => {
     expect(terms).toContain(`independent open-source project run by ${OPERATOR_NAME}, Lugano, Switzerland.`);
     expect(terms).toContain(`please report it to ${MAILTO} instead of using it.`);
     expect(terms).toContain("governed by Swiss law");
-    expect(terms).toContain("not made by, affiliated with, or endorsed by PADI (Professional Association of Diving Instructors), Anthropic, OpenAI, Google or any other AI provider");
-    expect(terms).toContain("PADI is a registered trademark of PADI Worldwide Corp.");
-    expect(terms).toContain("uses no PADI artwork or logos");
+    expect(terms).toContain("It uses the official Suunto Cloud API, but it is not made by, affiliated with, or endorsed by Suunto, Anthropic, OpenAI, Google or any other AI provider");
+    expect(terms).toContain("Suunto is a registered trademark of Suunto Oy.");
+    expect(terms).toContain("uses no Suunto artwork or logos");
+    // Both pages also carry the trademark line in the footer.
+    for (const html of [privacy, terms]) {
+      expect(html).toContain("It uses the official Suunto Cloud API, but it is not made by, affiliated with, or endorsed by Suunto. Suunto is a registered trademark of Suunto Oy.");
+    }
+  });
+
+  it("say that the values are not medical advice and not for navigation or safety decisions", async () => {
+    const terms = (await get("/terms")).html;
+    expect(terms).toContain('<h2 id="health-title">Not medical advice</h2>');
+    expect(terms).toContain("They are not medical advice and do not replace a doctor.");
+    expect(terms).toContain('<h2 id="safety-title">Not for navigation or safety decisions</h2>');
+    expect(terms).toContain("Do not rely on MCP for Suunto or your AI apps for navigation or safety decisions.");
+    // Routes and points of interest that AI apps add are the user's responsibility.
+    expect(terms).toContain("Routes and points of interest that your AI apps add to the Suunto App are your responsibility");
+    expect(terms).toContain("is an independent open-source project");
   });
 
   it("work in every language and never use an em dash", async () => {
@@ -118,8 +145,8 @@ describe("privacy policy and terms of use", () => {
       expect(html, path).not.toMatch(/<script(?![^>]*\ssrc=)/);
       expect(html, path).not.toMatch(/(src|poster)="https?:/);
       const body = html.slice(html.indexOf("<main"), html.indexOf("</main>"));
-      // The only outside link in the text is PADI's website, in the terms.
-      expect([...new Set([...body.matchAll(/href="(https?:[^"]+)"/g)].map((m) => m[1]))], path).toEqual(path === "/terms" ? ["https://www.padi.com"] : []);
+      // The only outside link in the text is Suunto's website, in the terms.
+      expect([...new Set([...body.matchAll(/href="(https?:[^"]+)"/g)].map((m) => m[1]))], path).toEqual(path === "/terms" ? ["https://www.suunto.com"] : []);
     }
   });
 });
@@ -184,24 +211,24 @@ describe("what the privacy policy states matches the code", () => {
       expect(c, name).toContain("HttpOnly");
       expect(c, name).toContain("SameSite=Lax");
     }
-    expect([...cookies.keys()].sort()).toEqual(["pdm_lang", "pdm_pre", "pdm_session"]);
+    expect([...cookies.keys()].sort()).toEqual(["sum_lang", "sum_pre", "sum_session"]);
     const { html } = await get("/privacy");
     const section = html.slice(html.indexOf('id="cookies"'), html.indexOf('id="children"'));
     expect(count(section, "<code>")).toBe(3);
-    expect(section).toContain(`<code>pdm_session</code> keeps you signed in. It is deleted when you sign out and lasts at most ${cookies.get("pdm_session")! / 86_400} days.`);
-    expect(section).toContain(`<code>pdm_pre</code> protects the sign-in and sign-up forms against forged requests. It lasts ${cookies.get("pdm_pre")! / 3600} hours.`);
-    expect(section).toContain(`<code>pdm_lang</code> remembers the language you chose in the language menu. It lasts ${cookies.get("pdm_lang")! / 86_400} days.`);
+    expect(section).toContain(`<code>sum_session</code> keeps you signed in. It is deleted when you sign out and lasts at most ${cookies.get("sum_session")! / 86_400} days.`);
+    expect(section).toContain(`<code>sum_pre</code> protects the sign-in and sign-up forms against forged requests. It lasts ${cookies.get("sum_pre")! / 3600} hours.`);
+    expect(section).toContain(`<code>sum_lang</code> remembers the language you chose in the language menu. It lasts ${cookies.get("sum_lang")! / 86_400} days.`);
   });
 
   it("uses the __Host- cookie names on an HTTPS server", async () => {
-    const secure = await createWebApp({ publicUrl: new URL("https://padi.example.com"), host: "127.0.0.1", port: 0, dataDir: ":memory:", operator: CLOSED, log: () => {} });
+    const secure = await createWebApp({ publicUrl: new URL("https://suunto.example.com"), host: "127.0.0.1", port: 0, dataDir: ":memory:", operator: CLOSED, log: () => {} });
     try {
       const s = createServer(secure.app);
       await new Promise<void>((r) => s.listen(0, "127.0.0.1", r));
       const html = await (await fetch(`http://127.0.0.1:${(s.address() as AddressInfo).port}/privacy`, { headers: { accept: "text/html" } })).text();
       await new Promise<void>((r) => s.close(() => r()));
-      for (const name of ["__Host-pdm_session", "__Host-pdm_pre", "__Host-pdm_lang"]) expect(html).toContain(`<code>${name}</code>`);
-      expect(html).toContain("MCP for PADI at padi.example.com is run by");
+      for (const name of ["__Host-sum_session", "__Host-sum_pre", "__Host-sum_lang"]) expect(html).toContain(`<code>${name}</code>`);
+      expect(html).toContain("MCP for Suunto at suunto.example.com is run by");
     } finally {
       await secure.close();
     }
@@ -214,7 +241,7 @@ describe("what the privacy policy states matches the code", () => {
       const { html } = await get("/privacy");
       expect(html).toContain("<strong>Browser sessions:</strong> until you sign out, at most 1 day.");
       expect(html).toContain("an access token is valid for 30 minutes. A connection ends when you revoke it, or after 90 days without use.");
-      expect(html).toContain("<code>pdm_session</code> keeps you signed in. It is deleted when you sign out and lasts at most 1 day.");
+      expect(html).toContain("<code>sum_session</code> keeps you signed in. It is deleted when you sign out and lasts at most 1 day.");
     } finally {
       web.ctx.store.saveSettings(saved);
     }
@@ -228,14 +255,14 @@ describe("what the privacy policy states matches the code", () => {
     const { store } = web.ctx;
     const user = store.createUser("retention@example.com", await hashPassword(PASSWORD), false);
     const insert = store.db.prepare("INSERT INTO activity (user_id, at, tool, ok, duration_ms) VALUES (?, ?, ?, 1, 5)");
-    insert.run(user.id, Date.now() - 91 * DAY, "logbook_list_dives");
-    insert.run(user.id, Date.now() - 89 * DAY, "logbook_get_dive");
+    insert.run(user.id, Date.now() - 91 * DAY, "suunto_list_workouts");
+    insert.run(user.id, Date.now() - 89 * DAY, "suunto_get_workout");
     const old = store.createUser("old-request@example.com", "x", false, { note: "please" });
     const recent = store.createUser("new-request@example.com", "x", false, { note: "please" });
     store.db.prepare("UPDATE users SET created_at = ? WHERE id = ?").run(Date.now() - 31 * DAY, old.id);
     store.db.prepare("UPDATE users SET created_at = ? WHERE id = ?").run(Date.now() - 29 * DAY, recent.id);
     store.cleanup();
-    expect(store.recentActivity(user.id).map((a) => a.tool)).toEqual(["logbook_get_dive"]);
+    expect(store.recentActivity(user.id).map((a) => a.tool)).toEqual(["suunto_get_workout"]);
     expect(store.getUser(old.id)).toBeUndefined();
     expect(store.getUser(recent.id)?.requestNote).toBe("please");
     // Approving the request deletes the message to the administrator.
@@ -249,66 +276,93 @@ describe("what the privacy policy states matches the code", () => {
   it("deletes everything linked to an account when the account is deleted, except a used invite", async () => {
     const { store } = web.ctx;
     const user = store.createUser("leaving@example.com", await hashPassword(PASSWORD), false);
-    store.savePadiSettings(user.id, { email: "leaving.diver@example.com", refreshToken: "rt-invented-leaving", loginMethod: "cognito", clientId: "test-client", affiliateId: "10000005", units: "auto", readOnly: false, connectedAt: Date.now() });
+    store.saveSuuntoSettings(user.id, suuntoSettings("leavingrunner", "rt-invented-leaving"));
     store.createSession(user.id, 14);
-    store.issueTokens({ clientId: "client", userId: user.id, scopes: ["padi"], accessTtlMs: 60_000, refreshTtlMs: DAY });
-    store.logActivity(user.id, "logbook_list_dives", true, 12, "client");
+    store.issueTokens({ clientId: "client", userId: user.id, scopes: ["suunto"], accessTtlMs: 60_000, refreshTtlMs: DAY });
+    store.logActivity(user.id, "suunto_list_workouts", true, 12, "client");
+    store.createOAuthState(user.id);
     const code = store.createInvite(user.id, "", 7);
     expect(store.consumeInvite(code, "leaving@example.com")).toBe(true);
     const rows = (table: string) => Number((store.db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE user_id = ?`).get(user.id) as { n: number }).n);
-    for (const table of ["sessions", "oauth_tokens", "activity"]) expect(rows(table), table).toBeGreaterThan(0);
+    for (const table of ["sessions", "oauth_tokens", "activity", "suunto_oauth_states"]) expect(rows(table), table).toBeGreaterThan(0);
 
     store.deleteUser(user.id);
     expect(store.getUser(user.id)).toBeUndefined();
-    for (const table of ["sessions", "oauth_tokens", "activity"]) expect(rows(table), table).toBe(0);
+    for (const table of ["sessions", "oauth_tokens", "activity", "suunto_oauth_states"]) expect(rows(table), table).toBe(0);
     // The invite keeps the address until the administrator deletes it, as the policy says.
     expect(store.listInvites().some((i) => i.usedBy === "leaving@example.com")).toBe(true);
     expect((await get("/privacy")).html).toContain("Deleting your account does not remove your email address from an invite you used");
   });
 
-  it("removes the PADI connection completely", () => {
+  it("removes the Suunto connection completely", () => {
     const { store } = web.ctx;
     const user = store.createUser("removing@example.com", "x", false);
-    store.savePadiSettings(user.id, { email: "leaving.diver@example.com", refreshToken: "rt-invented-leaving", loginMethod: "cognito", clientId: "test-client", affiliateId: "10000005", units: "auto", readOnly: false, connectedAt: Date.now() });
-    expect(store.getUser(user.id)?.hasPadi).toBe(true);
-    store.savePadiSettings(user.id, undefined);
-    expect(store.getUser(user.id)?.hasPadi).toBe(false);
+    store.saveSuuntoSettings(user.id, suuntoSettings("removingrunner", "rt-invented-removing"));
+    expect(store.getUser(user.id)?.hasSuunto).toBe(true);
+    store.saveSuuntoSettings(user.id, undefined);
+    expect(store.getUser(user.id)?.hasSuunto).toBe(false);
     expect(store.db.prepare("SELECT service_enc FROM users WHERE id = ?").get(user.id)).toEqual({ service_enc: null });
   });
 
-  it("stores the PADI connection encrypted and passwords, sessions and tokens only as hashes", async () => {
+  it("keeps only a hash of the one-time code of a Suunto connection, and uses it once", () => {
+    const { store } = web.ctx;
+    const user = store.createUser("connecting@example.com", "x", false);
+    const state = store.createOAuthState(user.id);
+    const rows = JSON.stringify(store.db.prepare("SELECT * FROM suunto_oauth_states").all());
+    expect(rows).not.toContain(state);
+    expect(store.consumeOAuthState(state, user.id)).toBeDefined();
+    expect(store.consumeOAuthState(state, user.id)).toBeUndefined();
+    store.deleteUser(user.id);
+  });
+
+  it("stores the Suunto connection encrypted and passwords, sessions and tokens only as hashes", async () => {
     const { store } = web.ctx;
     const user = store.createUser("secret@example.com", await hashPassword(PASSWORD), false);
-    store.savePadiSettings(user.id, { email: "secret.diver@example.com", refreshToken: "rt-invented-secret", loginMethod: "cognito", clientId: "test-client", affiliateId: "10000006", units: "auto", readOnly: false, connectedAt: Date.now() });
+    store.saveSuuntoSettings(user.id, suuntoSettings("secretrunner", "rt-invented-secret"));
     const row = store.db.prepare("SELECT password_hash, service_enc FROM users WHERE id = ?").get(user.id) as { password_hash: string; service_enc: string };
     expect(row.password_hash).toMatch(/^scrypt\$/);
     expect(row.service_enc).toMatch(/^v1:/);
     expect(row.service_enc).not.toContain("rt-invented-secret");
-    expect(row.service_enc).not.toContain("secret.diver@example.com");
+    expect(row.service_enc).not.toContain("at-invented-access");
+    expect(row.service_enc).not.toContain("secretrunner");
     const session = store.createSession(user.id, 1);
-    const tokens = store.issueTokens({ clientId: "client", userId: user.id, scopes: ["padi"], accessTtlMs: 60_000, refreshTtlMs: DAY });
+    const tokens = store.issueTokens({ clientId: "client", userId: user.id, scopes: ["suunto"], accessTtlMs: 60_000, refreshTtlMs: DAY });
     const dump = JSON.stringify([...store.db.prepare("SELECT * FROM sessions").all(), ...store.db.prepare("SELECT * FROM oauth_tokens").all()]);
     for (const secret of [session.cookie, tokens.access, tokens.refresh]) expect(dump).not.toContain(secret);
     store.deleteUser(user.id);
   });
 
-  it("says the PADI password is never stored, and names what is kept of the PADI connection", async () => {
+  it("says the Suunto password never reaches the server, and names what is kept of the Suunto connection", async () => {
     const { html } = await get("/privacy");
-    expect(html).toContain("Your PADI password is used once to sign in and is never stored.");
-    // The fields of PadiAccountSettings (store.ts), in words.
-    for (const words of ["PADI e-mail address", "sign-in token (a refresh token)", "PADI account id (the affiliate id)", "your name as PADI has it", "units, read-only mode and time zone", "the time you signed in"]) {
+    expect(html).toContain("You sign in on Suunto's own page, so your Suunto password never reaches this server.");
+    // The fields of SuuntoAccountSettings (store.ts) and the reconnect flag, in words.
+    for (const words of [
+      "Your Suunto username",
+      "the access token and the refresh token",
+      "when the access token expires",
+      "whether the connection must be renewed",
+      "units, read-only mode and time zone",
+      "the time you connected",
+      "a hash of a one-time code that expires after 10 minutes",
+    ]) {
       expect(html).toContain(words);
     }
-    expect(html).toContain("<strong>PADI.</strong> To reach your logbook");
-    expect(html).toContain("Your logbook is not stored");
+    expect(html).toContain("<strong>Suunto.</strong> To reach your data");
+    expect(html).toContain("Suunto Oy is an independent controller of the data in your Suunto account");
+    expect(html).toContain("Your workouts and health data are not stored");
+    expect(html).toContain("<strong>Your explicit consent</strong> (Art. 9(2)(a) GDPR) for health data");
   });
 
-  it("has no place in the database for IP addresses or logbook content", () => {
+  it("has no place in the database for IP addresses, workouts or health data", () => {
     const tables = (web.ctx.store.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all() as { name: string }[]).map((t) => t.name);
-    expect(tables.sort()).toEqual(["activity", "invites", "oauth_clients", "oauth_codes", "oauth_pending", "oauth_tokens", "sessions", "settings", "users"]);
+    expect(tables.sort()).toEqual(["activity", "invites", "oauth_clients", "oauth_codes", "oauth_pending", "oauth_tokens", "sessions", "settings", "suunto_oauth_states", "users"]);
     for (const table of tables) {
       const columns = (web.ctx.store.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name);
-      for (const column of columns) expect(`${table}.${column}`).not.toMatch(/(^|_)(ip|addr|address|subject|body|message|content|attachment|event|dive|dives|site|buddy)(_|$)/i);
+      for (const column of columns) {
+        expect(`${table}.${column}`).not.toMatch(
+          /(^|_)(ip|addr|address|subject|body|message|content|attachment|event|workout|workouts|heart|hr|sleep|recovery|steps|route|routes|poi|pois|gpx|fit|location|lat|lon|latitude|longitude)(_|$)/i,
+        );
+      }
     }
     // The activity log keeps when, which tool, which app, how long and whether it worked.
     const activity = (web.ctx.store.db.prepare("PRAGMA table_info(activity)").all() as { name: string }[]).map((c) => c.name);
@@ -332,7 +386,7 @@ describe("what the privacy policy states matches the code", () => {
 describe("English legal texts", () => {
   it("use the {app} placeholder instead of the product name, so a rename changes one message", () => {
     for (const [key, text] of Object.entries(legalEn)) {
-      expect(text, key).not.toMatch(/iCloud MCP|MCP for PADI/);
+      expect(text, key).not.toMatch(/iCloud MCP|MCP for PADI|MCP for Suunto/);
       expect(text.trim(), key).toBe(text);
     }
     expect(legalEn["legal.privacy.intro"]).toContain("{app}");

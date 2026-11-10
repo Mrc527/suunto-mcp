@@ -41,12 +41,12 @@ export function brandRoutes(): Router {
     "/site.webmanifest",
     "application/manifest+json",
     JSON.stringify({
-      name: "MCP for PADI",
-      short_name: "MCP for PADI",
+      name: "MCP for Suunto",
+      short_name: "MCP for Suunto",
       start_url: "/",
       display: "browser",
       background_color: "#f5f5f7",
-      theme_color: "#0f7fc9",
+      theme_color: "#f2602c",
       icons: [
         { src: "/icon-192.png", sizes: "192x192", type: "image/png" },
         { src: "/icon.svg", sizes: "any", type: "image/svg+xml" },

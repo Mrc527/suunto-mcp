@@ -6,15 +6,18 @@
 #
 # It creates:
 #   - the user "deploy" (member of the docker group) with an SSH key that only GitHub uses,
-#   - the settings file /home/deploy/padi-mcp/.env (it asks for the administrator account),
-#   - /home/deploy/padi-mcp/compose.override.yml, which tells Docker how your reverse proxy
+#   - the settings file /home/deploy/suunto-mcp/.env (it asks for the administrator account and
+#     the keys of your app in the Suunto API Zone),
+#   - /home/deploy/suunto-mcp/compose.override.yml, which tells Docker how your reverse proxy
 #     reaches the service. With Traefik in Docker (it finds the network and the settings of the
-#     containers Traefik already routes) no port is published on this machine; only a proxy
-#     installed on the machine itself (nginx, Caddy) needs a local port,
-#   - /root/padi-mcp-github-secrets.txt with the two GitHub secrets and the encryption key.
+#     containers Traefik already routes, for example MCP for PADI or MCP for iCloud) no port is
+#     published on this machine; only a proxy installed on the machine itself (nginx, Caddy) needs
+#     a local port,
+#   - /root/suunto-mcp-github-secrets.txt with the two GitHub secrets and the encryption key.
 # At the end it prints a few facts about Docker on this server (no secrets) to send to Claude.
 #
 # Running it again is safe: an existing user, key, .env or compose.override.yml is kept as it is.
+# The only exception: if .env has no Suunto app keys yet, it asks for them and adds them.
 
 # Started with "sh"? Run again with bash, which this script needs.
 if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
@@ -23,8 +26,8 @@ umask 077
 
 DEPLOY_USER=${DEPLOY_USER:-deploy}
 HOST_PORT=${HOST_PORT:-3000}
-KEY_COMMENT="github-deploy padi-mcp"
-SECRETS_FILE=${SECRETS_FILE:-/root/padi-mcp-github-secrets.txt}
+KEY_COMMENT="github-deploy suunto-mcp"
+SECRETS_FILE=${SECRETS_FILE:-/root/suunto-mcp-github-secrets.txt}
 
 say() { printf '\n== %s\n' "$*"; }
 die() {
@@ -44,6 +47,43 @@ ask() { # ask VAR "question" [default]
   read -r -p "$2${3:+ [$3]}: " answer || true
   printf -v "$1" '%s' "${answer:-${3:-}}"
 }
+# A Suunto app key as .env holds it in single quotes: visible characters, no ' character.
+valid_key() { [[ ${#1} -le 512 && $1 =~ ^[[:graph:]]+$ && $1 != *"'"* ]]; }
+ask_secret() { # ask_secret VAR "question": hidden input, asked again until it is valid
+  local answer
+  while :; do
+    read -r -s -p "$2: " answer || true
+    echo
+    if valid_key "$answer"; then
+      echo "(${#answer} characters)"
+      break
+    fi
+    echo "Paste the value (1 to 512 characters, no spaces, no ' character). Try again."
+  done
+  printf -v "$1" '%s' "$answer"
+}
+# Value of NAME in an .env file, without surrounding quotes (empty when missing).
+env_value() {
+  local line
+  line=$(grep -E "^$2=" "$1" 2>/dev/null | tail -n 1) || true
+  line=${line#*=}
+  line=${line%$'\r'}
+  line=${line%\"}
+  line=${line#\"}
+  line=${line%\'}
+  line=${line#\'}
+  printf '%s' "$line"
+}
+# Set NAME='VALUE' in an .env file, replacing its old line and keeping every other line. The
+# file itself is rewritten in place, so its owner and mode stay as they are.
+env_put() {
+  local tmp
+  tmp=$(mktemp "$1.XXXXXX")
+  grep -vE "^$2=" "$1" >"$tmp" || true
+  printf "%s='%s'\n" "$2" "$3" >>"$tmp"
+  cat "$tmp" >"$1"
+  rm -f "$tmp"
+}
 
 [ "$(id -u)" = 0 ] || die "run this with sudo: sudo bash $0"
 command -v docker >/dev/null 2>&1 || die "Docker is not installed (https://docs.docker.com/engine/install/ubuntu/)"
@@ -55,20 +95,20 @@ command -v ssh-keygen >/dev/null 2>&1 || die "ssh-keygen is missing (sudo apt-ge
 command -v openssl >/dev/null 2>&1 || die "openssl is missing (sudo apt-get install -y openssl)"
 
 home="/home/$DEPLOY_USER"
-app="$home/padi-mcp"
+app="$home/suunto-mcp"
 override="$app/compose.override.yml"
 
 say "Questions"
 ask SSH_HOST "Host name GitHub uses to reach this server over SSH" "nebula.visin.ch"
-ask DOMAIN "Public host name of the PADI service" "padi.mcp.visin.ch"
+ask DOMAIN "Public host name of the Suunto service" "suunto.mcp.visin.ch"
 [[ $SSH_HOST =~ ^[A-Za-z0-9.-]+$ ]] || die "not a host name: $SSH_HOST"
 [[ $DOMAIN =~ ^[A-Za-z0-9.-]+$ ]] || die "not a host name: $DOMAIN"
 # How the reverse proxy reaches the service. Kept as it is when compose.override.yml exists or
 # .env starts the bundled Caddy.
 PROXY=kept
 if [ ! -f "$override" ] && ! grep -qs '^COMPOSE_PROFILES=.*caddy' "$app/.env"; then
-  # Traefik in Docker, and a container it already routes (for example MCP for iCloud): their
-  # network, entrypoint and certificate resolver are the suggested answers.
+  # Traefik in Docker, and a container it already routes (for example MCP for PADI or MCP for
+  # iCloud): their network, entrypoint and certificate resolver are the suggested answers.
   traefik=$(docker ps --format '{{.ID}} {{.Image}}' | awk '$2 ~ /(^|\/)traefik(:|@|$)/ { print $1; exit }')
   routed=$(docker ps -q --filter label=traefik.enable=true | head -n 1)
   labels=""
@@ -132,6 +172,29 @@ if [ ! -f "$app/.env" ]; then
     fi
   done
 fi
+# The Suunto app keys: asked when .env is new or has no keys yet. All three or none: the service
+# does not start with only some of them.
+SUUNTO_CLIENT_ID=""
+SUUNTO_CLIENT_SECRET=""
+SUUNTO_SUBSCRIPTION_KEY=""
+ASK_SUUNTO=""
+if [ ! -f "$app/.env" ] || [ -z "$(env_value "$app/.env" SUUNTO_CLIENT_ID)" ] ||
+  [ -z "$(env_value "$app/.env" SUUNTO_CLIENT_SECRET)" ] ||
+  [ -z "$(env_value "$app/.env" SUUNTO_SUBSCRIPTION_KEY)" ]; then
+  ASK_SUUNTO=yes
+  echo
+  echo "The keys of your app in the Suunto API Zone (https://apizone.suunto.com): the client id and"
+  echo "the client secret from Profile > OAuth settings, and the subscription key of your API"
+  echo "subscription. The secret and the key are not shown while you paste them."
+  echo "Press Enter to skip: the service then starts without them (demo accounts work), and you add"
+  echo "them to $app/.env later, or as GitHub secrets."
+  ask SUUNTO_CLIENT_ID "Suunto client id"
+  if [ -n "$SUUNTO_CLIENT_ID" ]; then
+    valid_key "$SUUNTO_CLIENT_ID" || die "not a client id (no spaces and no ' character): $SUUNTO_CLIENT_ID"
+    ask_secret SUUNTO_CLIENT_SECRET "Suunto client secret"
+    ask_secret SUUNTO_SUBSCRIPTION_KEY "Suunto subscription key"
+  fi
+fi
 
 say "User $DEPLOY_USER"
 if id "$DEPLOY_USER" >/dev/null 2>&1; then
@@ -165,17 +228,26 @@ fi
 say "Settings in $app/.env"
 install -d -m 750 -o "$DEPLOY_USER" -g "$DEPLOY_USER" "$app"
 master_key=""
-if [ -f "$app/.env" ]; then
+if [ -f "$app/.env" ] && [ -z "$SUUNTO_CLIENT_ID" ]; then
   echo "$app/.env exists already and was not changed."
+elif [ -f "$app/.env" ]; then
+  env_put "$app/.env" SUUNTO_CLIENT_ID "$SUUNTO_CLIENT_ID"
+  env_put "$app/.env" SUUNTO_CLIENT_SECRET "$SUUNTO_CLIENT_SECRET"
+  env_put "$app/.env" SUUNTO_SUBSCRIPTION_KEY "$SUUNTO_SUBSCRIPTION_KEY"
+  echo "$app/.env exists already: added the Suunto app keys and kept everything else."
 else
   master_key=$(openssl rand -hex 32)
   cat >"$app/.env" <<EOF
-# Settings for the MCP for PADI service (see .env.example after the first deploy).
+# Settings for the MCP for Suunto service (see .env.example after the first deploy).
 DOMAIN=$DOMAIN
 TRUST_PROXY=1
 ADMIN_EMAIL=$ADMIN_EMAIL
 ADMIN_PASSWORD='$ADMIN_PASSWORD'
 MASTER_KEY=$master_key
+# The keys of the app in the Suunto API Zone (all three or none).
+SUUNTO_CLIENT_ID='$SUUNTO_CLIENT_ID'
+SUUNTO_CLIENT_SECRET='$SUUNTO_CLIENT_SECRET'
+SUUNTO_SUBSCRIPTION_KEY='$SUUNTO_SUBSCRIPTION_KEY'
 EOF
   if [ "$PROXY" = host ]; then echo "HOST_PORT=$HOST_PORT" >>"$app/.env"; fi
   if [ "$PROXY" = caddy ]; then echo "COMPOSE_PROFILES=caddy" >>"$app/.env"; fi
@@ -195,19 +267,19 @@ elif [ "$PROXY" = traefik ]; then
     echo "# Written by setup-server.sh. Traefik (in Docker) routes https://$DOMAIN to the service"
     echo "# over the Docker network $PROXY_NETWORK. No port is published on this machine."
     echo "services:"
-    echo "  padi-mcp:"
+    echo "  suunto-mcp:"
     echo "    networks: [default, proxy]"
     echo "    labels:"
     echo "      - traefik.enable=true"
     echo "      - traefik.docker.network=$PROXY_NETWORK"
-    echo "      - traefik.http.routers.padi-mcp.rule=Host(\`$DOMAIN\`)"
-    echo "      - traefik.http.routers.padi-mcp.entrypoints=$ENTRYPOINT"
+    echo "      - traefik.http.routers.suunto-mcp.rule=Host(\`$DOMAIN\`)"
+    echo "      - traefik.http.routers.suunto-mcp.entrypoints=$ENTRYPOINT"
     if [ -n "$CERTRESOLVER" ]; then
-      echo "      - traefik.http.routers.padi-mcp.tls.certresolver=$CERTRESOLVER"
+      echo "      - traefik.http.routers.suunto-mcp.tls.certresolver=$CERTRESOLVER"
     else
-      echo "      - traefik.http.routers.padi-mcp.tls=true"
+      echo "      - traefik.http.routers.suunto-mcp.tls=true"
     fi
-    echo "      - traefik.http.services.padi-mcp.loadbalancer.server.port=3000"
+    echo "      - traefik.http.services.suunto-mcp.loadbalancer.server.port=3000"
     echo "networks:"
     echo "  proxy:"
     echo "    external: true"
@@ -219,7 +291,7 @@ elif [ "$PROXY" = host ]; then
 # Written by setup-server.sh. The reverse proxy on this machine forwards https://DOMAIN to
 # 127.0.0.1:HOST_PORT (HOST_PORT and BIND_ADDRESS are set in .env).
 services:
-  padi-mcp:
+  suunto-mcp:
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${HOST_PORT:-3000}:3000"
 EOF
@@ -260,7 +332,7 @@ else
   if [ -n "$master_key" ]; then
     echo
     echo "MASTER_KEY (not for GitHub): save it in your password manager. It decrypts the stored"
-    echo "PADI sign-ins (refresh tokens), so you need it to restore a backup."
+    echo "Suunto connections (tokens), so you need it to restore a backup."
     echo "$master_key"
   fi
   if [ "$port" != 22 ]; then
@@ -298,6 +370,13 @@ echo "--- end of facts"
 say "Next steps"
 echo "1. sudo cat $SECRETS_FILE   and add the secrets in GitHub, then: sudo rm $SECRETS_FILE"
 echo "2. Add a DNS record: A $DOMAIN -> this server's public IP address."
+echo "   In the Suunto API Zone (Profile > OAuth settings), set the redirect URI of your app to"
+echo "   https://$DOMAIN/suunto/callback"
+if [ -n "$ASK_SUUNTO" ] && [ -z "$SUUNTO_CLIENT_ID" ]; then
+  echo "   The Suunto app keys are not set yet: add SUUNTO_CLIENT_ID, SUUNTO_CLIENT_SECRET and"
+  echo "   SUUNTO_SUBSCRIPTION_KEY to $app/.env (values in single quotes) or as GitHub secrets."
+  echo "   Until then only demo accounts work."
+fi
 case $PROXY in
   traefik) echo "3. Nothing to do on the proxy: Traefik routes $DOMAIN as soon as the first deploy starts the service." ;;
   host) echo "3. Point your reverse proxy at http://127.0.0.1:$HOST_PORT for $DOMAIN (see README.md)." ;;

@@ -1,5 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { addDays, formatInZone, parseDateTimeInput, todayInZone, tzOffsetMinutes } from "../../src/util/dates.js";
+import {
+  addDays,
+  datesBetween,
+  daysBetween,
+  formatInZone,
+  formatOffset,
+  formatUtcNoOffset,
+  formatWithOffset,
+  hasLocalOffset,
+  isoWeek,
+  localDateOf,
+  localHourStart,
+  parseDateTimeInput,
+  parseUtcTimestamp,
+  startOfDay,
+  todayInZone,
+  tzOffsetMinutes,
+} from "../../src/util/dates.js";
 
 describe("parseDateTimeInput", () => {
   it("interprets local times in the given zone", () => {
@@ -53,5 +70,61 @@ describe("strict parsing", () => {
     expect(() => parseDateTimeInput("Nov 10 2026 09:00", "Europe/Rome")).toThrow(/Could not parse/);
     expect(() => parseDateTimeInput("2026-02-30T10:00:00Z", "UTC")).toThrow(/Invalid/);
     expect(parseDateTimeInput("2026-11-10 09:00:00+01:00", "UTC").toISOString()).toBe("2026-11-10T08:00:00.000Z");
+  });
+});
+
+describe("helpers for activity data", () => {
+  it("finds local midnight across DST changes (Europe/Zurich)", () => {
+    expect(startOfDay("2026-03-29", "Europe/Zurich").toISOString()).toBe("2026-03-28T23:00:00.000Z");
+    expect(startOfDay("2026-03-30", "Europe/Zurich").toISOString()).toBe("2026-03-29T22:00:00.000Z");
+    expect(startOfDay("2026-10-25", "Europe/Zurich").toISOString()).toBe("2026-10-24T22:00:00.000Z");
+    expect(startOfDay("2026-10-26", "Europe/Zurich").toISOString()).toBe("2026-10-25T23:00:00.000Z");
+    expect(localDateOf(Date.parse("2026-10-25T22:30:00Z"), "Europe/Zurich")).toBe("2026-10-25");
+    expect(localDateOf(Date.parse("2026-10-25T23:30:00Z"), "Europe/Zurich")).toBe("2026-10-26");
+  });
+
+  it("counts and lists days", () => {
+    expect(daysBetween("2026-02-27", "2026-03-02")).toBe(3);
+    expect(daysBetween("2026-03-02", "2026-02-27")).toBe(-3);
+    expect(datesBetween("2026-12-30", "2027-01-02")).toEqual(["2026-12-30", "2026-12-31", "2027-01-01", "2027-01-02"]);
+    expect(datesBetween("2026-01-02", "2026-01-01")).toEqual([]);
+  });
+
+  it("formats fixed offsets and UTC without an offset", () => {
+    expect(formatOffset(120)).toBe("+02:00");
+    expect(formatOffset(-330)).toBe("-05:30");
+    expect(formatOffset(0)).toBe("+00:00");
+    expect(formatWithOffset(Date.parse("2026-05-01T05:30:00.900Z"), 120)).toBe("2026-05-01T07:30:00+02:00");
+    expect(formatWithOffset(Date.parse("2026-05-01T02:00:00Z"), -300)).toBe("2026-04-30T21:00:00-05:00");
+    expect(formatUtcNoOffset(Date.parse("2026-03-28T23:00:00.500Z"))).toBe("2026-03-28T23:00:00");
+  });
+
+  it("reads Suunto timestamps: with Z, with an offset, or UTC without a zone", () => {
+    expect(parseUtcTimestamp("2019-02-11T12:00:00Z")).toBe(Date.parse("2019-02-11T12:00:00Z"));
+    expect(parseUtcTimestamp("2024-12-10T14:50:00.000+02:00")).toBe(Date.parse("2024-12-10T12:50:00Z"));
+    expect(parseUtcTimestamp("2019-02-11T02:00:00.000")).toBe(Date.parse("2019-02-11T02:00:00Z"));
+    expect(parseUtcTimestamp("2021-01-24T21:54:52.217Z")).toBe(Date.parse("2021-01-24T21:54:52.217Z"));
+    expect(parseUtcTimestamp("2026-01-01")).toBe(Date.parse("2026-01-01T00:00:00Z"));
+    expect(parseUtcTimestamp("yesterday")).toBeUndefined();
+    expect(hasLocalOffset("2026-09-27T12:00:00+02:00")).toBe(true);
+    expect(hasLocalOffset("2026-09-27T12:00:00-0500")).toBe(true);
+    expect(hasLocalOffset("2026-09-27T12:00:00Z")).toBe(false);
+    expect(hasLocalOffset("2019-02-11T02:00:00.000")).toBe(false);
+    expect(hasLocalOffset("2026-09-27")).toBe(false);
+  });
+
+  it("finds the start of the local hour, also in the repeated hour of a DST change", () => {
+    const tz = "Europe/Zurich";
+    expect(new Date(localHourStart(Date.parse("2026-10-25T00:40:00Z"), tz)).toISOString()).toBe("2026-10-25T00:00:00.000Z");
+    expect(new Date(localHourStart(Date.parse("2026-10-25T01:40:00Z"), tz)).toISOString()).toBe("2026-10-25T01:00:00.000Z");
+    expect(new Date(localHourStart(Date.parse("2026-11-10T08:15:00Z"), "Asia/Kolkata")).toISOString()).toBe("2026-11-10T07:30:00.000Z");
+  });
+
+  it("names ISO weeks (Monday first)", () => {
+    expect(isoWeek("2026-05-04")).toBe("2026-W19");
+    expect(isoWeek("2026-05-10")).toBe("2026-W19");
+    expect(isoWeek("2026-05-11")).toBe("2026-W20");
+    expect(isoWeek("2027-01-01")).toBe("2026-W53");
+    expect(isoWeek("2024-12-30")).toBe("2025-W01");
   });
 });

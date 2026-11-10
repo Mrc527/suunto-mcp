@@ -41,8 +41,8 @@ beforeAll(async () => {
     host: "127.0.0.1",
     port: 0,
     dataDir: ":memory:",
-    // Never reach real PADI from tests: closed local ports.
-    operator: { PADI_COGNITO_URL: "http://127.0.0.1:1/", PADI_AUTH_URL: "http://127.0.0.1:1/auth/api", PADI_LOGBOOK_URL: "http://127.0.0.1:1/api/Logbook" },
+    // Never reach real Suunto from tests: closed local ports.
+    operator: { SUUNTO_OAUTH_URL: "http://127.0.0.1:1", SUUNTO_API_URL: "http://127.0.0.1:1" },
     log: () => {},
   });
   server.on("request", web.app);
@@ -72,12 +72,13 @@ describe("start page", () => {
   it("explains the product before sign-in", async () => {
     const { res, html } = await home();
     expect(res.status).toBe(200);
-    expect(html).toContain("<title>Your PADI logbook in your AI assistant · MCP for PADI</title>");
-    expect(html).toMatch(/<meta name="description" content="Connect Claude, ChatGPT and other AI apps to your PADI dive logbook[^"]+">/);
+    expect(html).toContain("<title>Your Suunto data in your AI assistant · MCP for Suunto</title>");
+    expect(html).toMatch(/<meta name="description" content="Connect Claude, ChatGPT and other AI apps to your Suunto account[^"]+">/);
     expect(html).toContain('<main class="wide">');
     // Hero
     expect(count(html, /<h1[ >]/g)).toBe(1);
-    expect(html).toContain('<h1 id="home-title">Your PADI logbook, inside your AI assistant.</h1>');
+    expect(html).toContain('<h1 id="home-title">Your Suunto training, inside your AI assistant.</h1>');
+    for (const words of ["workouts", "training load", "sleep", "recovery", "steps", "send it to your watch"]) expect(html).toContain(words);
     expect(html).toContain('class="mark mark-xl"');
     expect(html).toContain("Works with Claude, ChatGPT, Gemini, Codex, Cursor, VS Code and other AI apps");
     expect(count(html, /<a class="button" href="\/login">Sign in<\/a>/g)).toBe(2);
@@ -89,44 +90,54 @@ describe("start page", () => {
       expect(html).toContain(`id="${id}"`);
     }
     expect([...positions].sort((a, b) => a - b)).toEqual(positions);
-    // What you can do: the logbook and the certifications.
+    // What you can do: workouts; sleep, recovery and steps; routes and places.
     expect(count(html, /<div class="tiles home-services">/g)).toBe(1);
-    expect(count(html, /<div class="tile">/g)).toBe(2);
-    for (const service of ["logbook", "cards"]) expect(html).toContain(`svc-icon svc-${service} svc-lg`);
-    expect(html).not.toContain("svc-mail");
-    expect(html).toContain("<h3>Dive logbook</h3>");
-    expect(html).toContain("<h3>Certifications</h3>");
-    expect(html).toContain("Statistics in seconds");
+    expect(count(html, /<div class="tile">/g)).toBe(3);
+    for (const service of ["workouts", "health", "routes"]) expect(html).toContain(`svc-icon svc-${service} svc-lg`);
+    expect(html).not.toMatch(/svc-(mail|logbook|cards)/);
+    expect(html).toContain("<h3>Workouts</h3>");
+    expect(html).toContain("<h3>Sleep, recovery and steps</h3>");
+    expect(html).toContain("<h3>Routes and places</h3>");
+    expect(html).toContain("add it to the Suunto App, ready to sync to your watch");
+    expect(html).toContain("Training load at a glance");
     expect(html).toContain("Works with any AI app");
     expect(html).toContain("You stay in control");
+    expect(html).toContain('<p class="home-note">Heart rate, sleep and recovery values come from your watch. They are not medical advice.</p>');
     // Try asking
     expect(count(html, /<q>[^<]+<\/q>/g)).toBe(6);
-    expect(html).toContain("<q>How many dives did I log this year?</q>");
-    expect(html).toContain("<q>Log yesterday&#39;s dive at the house reef, 18 m, 45 min.</q>");
+    expect(html).toContain("<q>How did I sleep this week, and how is my recovery?</q>");
+    expect(html).toContain("<q>Plan a 12 km running loop around the lake and send it to my watch.</q>");
     // How it works, with the address for AI apps.
     expect(count(html, /<ol class="home-steps" role="list">/g)).toBe(1);
     expect(html).toContain(`<code id="home-mcp-url">${base}/mcp</code>`);
     expect(html).toContain('data-copy="home-mcp-url"');
-    expect(html).toContain("<h3>Connect your PADI account</h3>");
-    expect(html).toContain('<a href="https://account.padi.com">account.padi.com</a>');
+    expect(html).toContain("<h3>Connect your Suunto account</h3>");
+    expect(html).toContain("Suunto&#39;s own sign-in page opens: sign in there and allow access. This site never sees your Suunto password.");
     // Privacy and security
     expect(html).toContain("AES\u2011256\u2011GCM");
-    expect(html).toContain("Your PADI password is not stored");
+    expect(html).toContain("Your Suunto password stays with Suunto");
     expect(html).toContain("are not stored on this server");
     expect(html).toContain("The activity log keeps only which app used which tool, when, how long it took and whether it worked.");
     // Questions and answers
-    expect(count(html, /<details><summary>/g)).toBe(6);
-    expect(html).toContain("<summary>Is this an official PADI service?</summary>");
-    expect(html).toContain("It is not made by, affiliated with, or endorsed by PADI.");
-    expect(html).toContain("<summary>Is my PADI password stored?</summary>");
+    expect(count(html, /<details><summary>/g)).toBe(9);
+    expect(html).toContain("<summary>Is this an official Suunto service?</summary>");
+    expect(html).toContain("It uses the official Suunto Cloud API, but it is not made by, affiliated with, or endorsed by Suunto.");
+    expect(html).toContain("<summary>Why is my latest workout missing?</summary>");
+    expect(html).toContain("Sync your watch with the Suunto App first");
+    expect(html).toContain("<summary>Which watches work?</summary>");
+    expect(html).toContain("Watches that sync with the Suunto App.");
+    expect(html).toContain("<summary>Does this site see my Suunto password?</summary>");
+    expect(html).toContain("You can remove the connection at any time on your account page, and in the Suunto App.");
     expect(html).toContain("<summary>What can the AI app change?</summary>");
-    expect(html).toContain("Dives that are verified or waiting for verification are locked");
-    expect(html).toContain("<summary>What is read-only mode?</summary>");
+    expect(html).toContain("it cannot delete routes or points of interest: do that in the Suunto App");
+    expect(html).toContain("<summary>Is this medical advice?</summary>");
+    expect(html).toContain("<summary>What does this site store about me?</summary>");
+    expect(html).toContain('The details are in the <a href="/privacy">privacy policy</a>.</p></details>');
     expect(html).toContain("<summary>Which AI apps work?</summary>");
     expect(html).toContain("<summary>Who runs this server?</summary>");
-    // No video in this version, and nothing of the template.
+    // No video in this version, and nothing of the templates.
     expect(html).not.toContain("<video");
-    expect(html).not.toMatch(/iCloud|Apple Account|app-specific/);
+    expect(html).not.toMatch(/iCloud|Apple Account|app-specific|PADI|logbook/);
   });
 
   it("follows the registration mode", async () => {
@@ -187,12 +198,12 @@ describe("start page", () => {
     const { html } = await home();
     expect(html).not.toMatch(/\sstyle=/);
     expect(html).not.toMatch(/<script(?![^>]*\ssrc=)/);
-    // The start page itself loads nothing from other servers; its only outside link is where
-    // people with a Google, Apple or Facebook sign-in set a PADI password.
+    // The start page itself loads nothing from other servers and links to none: people connect
+    // Suunto from their account page.
     const body = html.slice(html.indexOf('<div class="home">'), html.indexOf("</main>"));
     expect(body.length).toBeGreaterThan(1000);
     expect(body).not.toMatch(/(src|poster)="https?:/);
-    expect([...body.matchAll(/href="(https?:[^"]+)"/g)].map((m) => m[1])).toEqual(["https://account.padi.com", "https://account.padi.com"]);
+    expect([...body.matchAll(/href="(https?:[^"]+)"/g)].map((m) => m[1])).toEqual([]);
   });
 
   it("keeps list semantics on lists without bullets", async () => {
@@ -222,11 +233,18 @@ describe("start page", () => {
     for (const selector of selectors) expect(selector).toMatch(/^\.home[\s.:[]|^\.home$/);
   });
 
-  it("shows the two services side by side, as wide as the features below", () => {
-    // One column on phones, two equal columns from 640 px (the shared .tiles grid has three).
-    expect(HOME_CSS).toContain(".home .home-services { grid-template-columns: 1fr;");
-    const tablet = HOME_CSS.slice(HOME_CSS.indexOf("@media (min-width: 640px) {"));
-    expect(tablet.slice(0, tablet.indexOf("\n}"))).toContain(".home .home-services { grid-template-columns: repeat(2, 1fr);");
+  it("shows the three services side by side on wide screens, as wide as the features below", () => {
+    // One column on phones (in rows, not the shared .tiles grid's columns), two from 640 px with
+    // the third one under them at full width, three from 900 px.
+    expect(HOME_CSS).toContain(".home .home-services { grid-template-columns: 1fr; grid-auto-flow: row;");
+    const block = (query: string) => {
+      const from = HOME_CSS.slice(HOME_CSS.indexOf(`@media (min-width: ${query}) {`));
+      return from.slice(0, from.indexOf("\n}"));
+    };
+    expect(block("640px")).toContain(".home .home-services { grid-template-columns: repeat(2, 1fr);");
+    expect(block("640px")).toContain(".home .home-services .tile:last-child { grid-column: 1 / -1; }");
+    expect(block("900px")).toMatch(/\.home \.home-services \{ grid-template-columns: repeat\(3, 1fr\); \}|, \.home \.home-services \{ grid-template-columns: repeat\(3, 1fr\); \}/);
+    expect(block("900px")).toContain(".home .home-services .tile:last-child { grid-column: auto; }");
   });
 });
 

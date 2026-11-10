@@ -1,12 +1,12 @@
-# Claude Connectors Directory: submission texts for MCP for PADI
+# Claude Connectors Directory: submission texts for MCP for Suunto
 
-This file holds everything needed to submit **MCP for PADI** to the Claude Connectors Directory: the text to paste into each field of the form, the answers to choose, the instructions for the reviewers, and what to do before you submit.
+This file holds everything needed to submit **MCP for Suunto** to the Claude Connectors Directory: the text to paste into each field of the form, the answers to choose, the instructions for the reviewers, and what to do before you submit.
 
 - Form: https://claude.ai/directory/manage, then **Submit new** and **MCP connector**. You need a paid Claude plan (on Team or Enterprise, an Owner submits).
 - Anthropic's guides: [Submit a connector](https://claude.com/docs/connectors/building/submission), [review criteria](https://claude.com/docs/connectors/building/review-criteria), [Software Directory Policy](https://support.claude.com/en/articles/13145358-anthropic-software-directory-policy).
 - Text inside a code block is meant to be pasted as it is. Character counts include spaces and line breaks.
-- Never write the password of the demo account into this file: it is in the repository. Type it only into the form.
-- **Read [Things a reviewer may question](#things-a-reviewer-may-question) first.** PADI has no public API, so the "First-party API usage" acknowledgment needs a decision before you start.
+- Never write the password of the demo account, or any Suunto key, into this file: it is in a public repository. Type them only into the form.
+- The connector uses Suunto's official, documented API with its own partner keys, so the "First-party API usage" acknowledgment is simple. Two things need care instead: the **Production API** subscription at Suunto (see [Before you submit](#1-check-the-suunto-side)) and the **health data** question (see [Personal health data](#personal-health-data)).
 
 Contents:
 
@@ -29,60 +29,61 @@ Contents:
 
 Do these in order. Tick each one.
 
-### 1. Decide whether to submit at all
+### 1. Check the Suunto side
 
-- [ ] Read PADI's terms of use for its websites and apps. If they forbid access by other software in the way this server works (signing in as the user and calling the same API as the PADI web app), do not submit.
-- [ ] Decide how to answer the "First-party API usage" acknowledgment (see [Things a reviewer may question](#things-a-reviewer-may-question)). If in doubt, ask mcp-review@anthropic.com before you submit.
+- [ ] Suunto accepted the **Production API** subscription in the API Zone (https://apizone.suunto.com), and the server uses the production subscription key (`SUUNTO_SUBSCRIPTION_KEY`). The Developer API allows only 200 calls per week for the whole app: a public listing would use that up in hours, and real users would only see "call limit reached".
+- [ ] The app information in the API Zone profile (the content form) is complete, and the app name there is the one users should see on Suunto's sign-in page.
+- [ ] Suunto's API agreement allows this use (an AI assistant that reads the user's data on request and adds routes and points of interest), and allows the name "MCP for Suunto" for a partner app. If in doubt, ask your contact at Suunto before you submit.
 
 ### 2. Put the live site in order
 
-- [ ] The service runs at https://padi.mcp.visin.ch with the name **MCP for PADI** everywhere: the start page, the footer (with the line that PADI has nothing to do with the project), the sign-in and consent pages, and the name the MCP server reports to Claude. The Tools step of the form reads the live server, so deploy first.
-- [ ] https://padi.mcp.visin.ch/privacy names the controller as "Marco Visin, Lugano, Switzerland" and the contact marco@visin.ch, and says that the PADI password is never stored.
-- [ ] https://padi.mcp.visin.ch/terms opens and says that the service is unofficial and not for dive planning or safety decisions.
-- [ ] https://padi.mcp.visin.ch/.well-known/security.txt opens and shows `Contact: mailto:marco@visin.ch`.
-- [ ] security.txt has no `Policy:` line while the repository is private (its GitHub page would answer 404). If you make the repository public, set `SECURITY_POLICY_URL` in `src/web/security-txt.ts` to the SECURITY.md link.
-- [ ] Decide the documentation link. The start page https://padi.mcp.visin.ch/ is public and explains what the service does, how to connect and the common questions. If you make the GitHub repository public, the README (https://github.com/Mrc527/PADI-MCP#readme) is more complete, with setup, tools, security and troubleshooting. Either works; the policy asks for a page that explains how it works, what it is for and how to fix problems.
+- [ ] The service runs at https://suunto.mcp.visin.ch with the name **MCP for Suunto** everywhere: the start page, the footer (with the line that the project is independent and not made by Suunto), the sign-in and consent pages, and the name the MCP server reports to Claude. The Tools step of the form reads the live server, so deploy first.
+- [ ] The admin page's **Suunto API** card shows that the three Suunto app keys are set, and connecting a real Suunto account works.
+- [ ] https://suunto.mcp.visin.ch/privacy names the controller as "Marco Visin, Lugano, Switzerland" and the contact marco@visin.ch, says that the server never sees the Suunto password, and lists what is stored (e-mail, password hash, Suunto username and encrypted tokens, activity log) and that workout and health data are fetched on demand and never saved to disk (recent answers stay in memory for at most 30 minutes, to save calls to Suunto).
+- [ ] https://suunto.mcp.visin.ch/terms opens and says that the service is unofficial, not medical advice, and not for navigation or safety decisions.
+- [ ] https://suunto.mcp.visin.ch/.well-known/security.txt opens and shows `Contact: mailto:marco@visin.ch`.
+- [ ] The GitHub repository is public, so security.txt can point to the policy: set `SECURITY_POLICY_URL` in `src/web/security-txt.ts` to `https://github.com/Mrc527/suunto-mcp/blob/main/SECURITY.md` once SECURITY.md is on `main`.
+- [ ] Decide the documentation link. The README (https://github.com/Mrc527/suunto-mcp#readme) is public and complete: setup, tools, security and troubleshooting. The start page https://suunto.mcp.visin.ch/ also explains what the service does, how to connect and the common questions. Either works; the policy asks for a page that explains how it works, what it is for and how to fix problems.
 
 ### 3. Create the demo account
 
-The reviewers test with a **demo account** that is built into our server. Its logbook is sample data that the server simulates in memory: no PADI account is needed, no real person's data is involved, and nothing the reviewers do ever reaches PADI or a PADI Pro. The server runs the same code and the same tools as for a real account, only with a simulated PADI backend.
+The reviewers test with a **demo account** that is built into our server. Its Suunto data is sample data that the server simulates in memory: no Suunto account is needed, no real person's data is involved, and nothing the reviewers do ever reaches Suunto or a watch. The server runs the same code and the same tools as for a real account, only with a simulated Suunto backend.
 
-1. [ ] Sign in at https://padi.mcp.visin.ch/admin as administrator.
+1. [ ] Sign in at https://suunto.mcp.visin.ch/admin as administrator.
 2. [ ] Under **Demo account for app reviewers**, type an email address for signing in, for example `claude-review@visin.ch`, and click **Create demo account**. The address is only the sign-in name: the server never sends mail to it.
-3. [ ] Copy the password that is shown: it is shown only once. The account is approved, is not an administrator and needs no PADI account.
-4. [ ] Under **Users**, the account shows the badge "demo" and PADI "sample data". Do not use **Reset password** on it during the review: a reset also disconnects its apps.
+3. [ ] Copy the password that is shown: it is shown only once. The account is approved, is not an administrator and needs no Suunto account.
+4. [ ] Under **Users**, the account shows the badge "demo" and Suunto "sample data". Do not use **Reset password** on it during the review: a reset also disconnects its apps.
 
 What the demo account contains (the example prompts in this file depend on it). The dates are relative to the day of each reset, so they always look current. Every name, number and place is invented:
 
-- **Diver:** "Alex Demo" (alex.demo@example.com), with an invented PADI affiliate id, time zone Europe/Zurich, metric units.
-- **Dives:** 25 dives over about three years. An Open Water course at "Copper Quarry" and "Lake Serein" (training dives 1 to 4), two Advanced adventure dives ("Adventure Dive - Deep" and "Adventure Dive - Navigation"), holidays at invented sites such as "Lantern Reef", "Turtle Terrace", "Old Lighthouse Wall", "Ferry Wreck of Port Ardent", "Pelican Pinnacle" and "Manta Station Rock", and local lake and quarry dives.
-- **Status:** most dives are published, the training dives and a few others are verified by the invented PADI Pro "Robin Example" (member number 900001), "Second dive of the weekend" waits for verification (Pending, so it is locked), and the newest dive, "Lake dive (to finish)", is a Draft.
-- **eCards:** Open Water Diver, Advanced Open Water Diver and Enriched Air Diver.
-- **PADI Pros for the lookup:** 900001 (Robin Example) and 900002 (Kai J. Sample).
-- **Photos:** the demo dives have none, so `logbook_get_photos` answers that there are no photos.
-- **Daily reset:** every change (new, changed and deleted dives, units, verification requests) is kept in memory only. Every day at 04:00 Swiss time, and whenever the server restarts, the account starts again from fresh sample data. The **Reset demo data now** button on the admin page does the same at once.
-- **Nothing reaches anyone:** submitting a dive for verification works in the tools, but no PADI Pro gets a request.
+- **Athlete:** "Alex Demo" (Suunto username `alexdemo`, sign-in alex.demo@example.com), time zone Europe/Zurich, metric units.
+- **Workouts:** about 120 days of training: running, trail running, cycling, hiking, open water and pool swimming, scuba diving, strength training, and cross-country skiing in winter. Workouts have heart rate, and the outdoor ones have altitude, speed and a GPS track.
+- **Every day and night:** daily steps and energy, a sleep entry for every night (deep, light and REM sleep, heart rate, HRV, SpO2, quality), 24/7 samples every 10 minutes (heart rate, steps, energy, SpO2, HRV, altitude) and recovery every 30 minutes.
+- **Routes and places:** 4 routes and 5 points of interest at invented places.
+- **Daily reset:** every change (routes and points of interest added with the tools) is kept in memory only. Every day at 04:00 Swiss time, and whenever the server restarts, the account starts again from fresh sample data. The **Reset demo data now** button on the admin page does the same at once.
+- **Nothing reaches anyone:** adding a route or a point of interest works in the tools, but nothing goes to Suunto, to a Suunto App or to a watch.
 
 ### 4. Check the server settings
 
 The demo account follows the server-wide settings, so check them before the review:
 
-1. [ ] On https://padi.mcp.visin.ch/admin, under **Settings**, check: **Read-only for everyone** off (the reviewers must test the tools that write); **Allow dynamic client registration** on; **Allow client ID metadata documents** on; **Allowed AI apps (redirect hosts)** empty, or containing `claude.ai claude.com`. Leave **Who can create an account** as it is.
+1. [ ] On https://suunto.mcp.visin.ch/admin, under **Settings**, check: **Read-only for everyone** off (the reviewers must test the tools that write); **Allow dynamic client registration** on; **Allow client ID metadata documents** on; **Allowed AI apps (redirect hosts)** empty, or containing `claude.ai claude.com`. Leave **Who can create an account** as it is.
 
 ### 5. Test every tool once with Claude
 
 The form asks you to confirm that you ran every tool. Do it with the demo account, so you test the reviewer's path at the same time.
 
-1. [ ] In Claude: **Customize > Connectors > Add custom connector**, URL `https://padi.mcp.visin.ch/mcp`, keep the defaults, then **Connect**.
+1. [ ] In Claude: **Customize > Connectors > Add custom connector**, URL `https://suunto.mcp.visin.ch/mcp`, keep the defaults, then **Connect**.
 2. [ ] On the sign-in page, use the **demo account** (not your own), then click **Allow**.
 3. [ ] In a new chat, run the prompts in [the tool test plan](#tool-test-plan), in that order. Check that each tool gives a sensible answer and no generic error.
 4. [ ] On the admin page, click **Reset demo data now** next to the demo account, so the reviewers start from fresh sample data. (It also happens by itself every day at 04:00 Swiss time.)
 5. [ ] Remove the custom connector from your Claude, and on the demo account's **Connected apps** page revoke the test connection, so the reviewers start clean.
 6. [ ] Optional: also run every tool once in the [MCP Inspector](https://modelcontextprotocol.io/docs/tools/inspector).
+7. [ ] Optional, with your own real account: connect Suunto on the account page and ask for your last workout, to check the production path end to end.
 
 ### 6. Prepare the listing materials
 
-- [ ] **Icon:** upload `docs/directory/icon-512.png` (512 x 512 PNG with transparent corners, made from `assets/brand/logo.svg` by `scripts/make-icons.mjs`). It is our own artwork, not PADI's logo. Smaller: https://padi.mcp.visin.ch/icon-192.png (192 x 192). If the form accepts SVG, https://padi.mcp.visin.ch/icon.svg is the sharpest.
+- [ ] **Icon:** upload `docs/directory/icon-512.png` (512 x 512 PNG with transparent corners, made from `assets/brand/logo.svg` by `scripts/make-icons.mjs`). It is our own artwork, not Suunto's logo. Smaller: https://suunto.mcp.visin.ch/icon-192.png (192 x 192). If the form accepts SVG, https://suunto.mcp.visin.ch/icon.svg is the sharpest.
 - [ ] Have the demo account's email and password at hand for step 8.
 
 ---
@@ -91,113 +92,113 @@ The form asks you to confirm that you ran every tool. Do it with the demo accoun
 
 | Field | Value |
 | --- | --- |
-| Server URL | `https://padi.mcp.visin.ch/mcp` |
+| Server URL | `https://suunto.mcp.visin.ch/mcp` |
 | Users connect to different URLs | No. Everyone uses this one URL (single URL). |
 
 ## Step 2: Tools
 
-Nothing to type: the tools sync from the server. Check that all **14 tools** appear with a title and that none is flagged. The server also offers two prompts, "Log a dive" and "Year in review". There are no resources.
+Nothing to type: the tools sync from the server. Check that all **14 tools** appear with a title and that none is flagged. The server also offers two prompts, "Training review" and "Sleep and recovery". There are no resources. (The titles below are the intended ones; the form shows the titles the live server reports.)
 
 | Tool | Title | readOnlyHint | destructiveHint | Talks to other people (openWorldHint) |
 | --- | --- | --- | --- | --- |
-| `padi_account_info` | PADI account info | true | false | false |
-| `logbook_list_dives` | List dives | true | false | false |
-| `logbook_get_dive` | Get dive | true | false | false |
-| `logbook_stats` | Dive statistics | true | false | false |
-| `logbook_search_dive_sites` | Search dive sites | true | false | false |
-| `logbook_export_dives` | Export dives | true | false | false |
-| `logbook_lookup_instructor` | Look up a PADI Pro | true | false | false |
-| `padi_list_certifications` | List certifications | true | false | false |
-| `logbook_get_photos` | Get dive photos | true | false | false |
-| `logbook_create_dive` | Log a dive | false | false | false |
-| `logbook_update_dive` | Update dive | false | false | false |
-| `logbook_set_units` | Set logbook units | false | false | false |
-| `logbook_submit_for_verification` | Submit dive for verification | false | false | true |
-| `logbook_delete_dive` | Delete dive | false | true | false |
+| `suunto_account_info` | Suunto account info | true | false | false |
+| `suunto_list_workouts` | List workouts | true | false | false |
+| `suunto_get_workout` | Get workout | true | false | false |
+| `suunto_workout_stats` | Workout statistics | true | false | false |
+| `suunto_export_workout_fit` | Export workout as FIT | true | false | false |
+| `suunto_daily_activity` | Daily activity | true | false | false |
+| `suunto_activity_samples` | 24/7 activity samples | true | false | false |
+| `suunto_sleep` | Sleep | true | false | false |
+| `suunto_recovery` | Recovery | true | false | false |
+| `suunto_list_routes` | List routes | true | false | false |
+| `suunto_get_route` | Get route | true | false | false |
+| `suunto_list_pois` | List points of interest | true | false | false |
+| `suunto_import_route` | Import route | false | false | false |
+| `suunto_create_poi` | Add point of interest | false | false | false |
 
-9 tools only read, 4 add or change things (`logbook_update_dive` and `logbook_set_units` are also marked idempotent), and 1 deletes. Sending a dive to a PADI Pro is marked as reaching another person, and deleting is marked destructive, so Claude asks before it runs them. Both also need an explicit confirmation in their arguments (`confirm: true`, and the dive's title).
+12 tools only read, and 2 add things to the user's own Suunto App (a route, a point of interest). Nothing deletes or changes existing data, and nothing reaches other people. The server tells Claude to ask before it adds a route or a point of interest, unless the user asked for exactly that.
 
-If a user turns on read-only mode, the server offers only the 9 reading tools and the "Year in review" prompt. The demo account has read-only mode off, so the form sees all 14.
+If a user turns on read-only mode, the server offers only the 12 reading tools and both prompts. The demo account has read-only mode off, so the form sees all 14.
 
 ## Step 3: Listing
 
-### Server name (12 of 100 characters)
+### Server name (14 of 100 characters)
 
 ```text
-MCP for PADI
+MCP for Suunto
 ```
 
-Use this exact name in every language. Do not write "PADI MCP", "PADI Logbook" or anything that starts with "PADI": the connector is not made by PADI.
+Use this exact name in every language. Do not write "Suunto MCP", "Suunto Connector" or anything that starts with "Suunto": the connector is not made by Suunto.
 
-### One-liner (159 of 200 characters)
+### One-liner (165 of 200 characters)
 
 ```text
-Your PADI online dive logbook in Claude: log dives in plain words, find and review past dives, see your statistics and certifications. Unofficial, not by PADI.
+Your Suunto workouts, sleep and recovery in Claude: review your training, find workouts, see trends, and add routes and places to the Suunto App. Not made by Suunto.
 ```
 
-### Description (1,857 of 2,000 characters)
+### Description (1,984 of 2,000 characters)
 
 ```text
-MCP for PADI connects Claude to your own PADI online dive logbook, the logbook you see at learning.padi.com. Ask in your own words, and Claude does the work in your logbook.
+MCP for Suunto connects Claude to your own Suunto data: the workouts, daily activity, sleep and recovery that your Suunto watch records and syncs to the Suunto App. Ask in your own words, and Claude finds the answer in your data.
 
-Log dives: tell Claude about a dive ("yesterday, boat dive at the house reef, 18 m for 45 minutes, water 24 degrees") and it fills in the logbook entry for you, asking only for what is missing. Training dives can be saved as drafts.
+Review your training: list workouts by date and sport, read every detail of a workout (laps, heart rate zones, pace, power, altitude, GPS track), and get statistics: number of workouts, time, distance, ascent and energy, per week, month, year or sport. Export a workout as a FIT file.
 
-Look back: find dives by date, place, buddy or text, read every detail of a dive, and get your statistics: number of dives, total bottom time, deepest and longest dive, by year, month or place. Export your dives as CSV or JSON, and list your PADI certification cards.
+See your day and night: steps and energy per day, 24/7 heart rate, HRV and SpO2, each night's sleep (deep, light and REM sleep, heart rate, quality), and your recovery balance.
 
-Keep it tidy: correct or complete a dive, switch the logbook between metric and imperial units, and, after you agree, send a dive to a PADI Pro for verification.
+Plan ahead: list your routes and points of interest, and, when you ask, add a GPX route or a new point of interest to the Suunto App, from where it can sync to your watch.
 
-How to connect: create an account at padi.mcp.visin.ch (new accounts are approved by the administrator). On your account page, sign in to PADI once with your PADI e-mail and password. Then add the connector in Claude, sign in and click Allow.
+How to connect: create an account at suunto.mcp.visin.ch (new accounts are approved by the administrator). On your account page, click Connect Suunto and allow access on Suunto's own sign-in page. Then add the connector in Claude, sign in and click Allow.
 
-You stay in control. Your account page lists every connected app, and you can revoke one with a click. An activity log shows which tool ran, when and whether it worked. Read-only mode lets Claude read but never change anything. Verified dives are locked, deleting a dive needs its title, and Claude asks before it deletes or sends anything to a PADI Pro.
+You stay in control. Your account page lists every connected app, and you can revoke one with a click. An activity log shows which tool ran, when and whether it worked. Read-only mode lets Claude read but never add anything. You can remove the Suunto connection at any time.
 
-Privacy: your PADI password is used once and never stored. Only an encrypted sign-in token (AES-256-GCM) is kept. Your dives pass between PADI and Claude and are not stored on the server. No ads, no tracking, and your data is never sold.
+Privacy: the connector uses the official Suunto Cloud API. Your Suunto password stays with Suunto. Only encrypted sign-in tokens (AES-256-GCM) are kept. Your workouts and health data pass between Suunto and Claude: they are never saved to disk, and recent answers stay in memory for a few minutes only. No ads, no tracking, and your data is never sold.
 
-Not for dive planning or safety decisions. MCP for PADI is a free, independent project by Marco Visin in Lugano, Switzerland. It is not made by, affiliated with or endorsed by PADI.
+Heart rate, sleep and recovery values come from your watch and are not medical advice. MCP for Suunto is a free, independent project by Marco Visin in Lugano, Switzerland. It is not made by, affiliated with or endorsed by Suunto.
 ```
 
 ### Categories (choose 1 to 5)
 
 The category names are only shown in the form's list. Choose in this order, as far as they exist:
 
-1. **Lifestyle** (or "Sports", "Hobbies")
-2. **Productivity** (or "Productivity and tools")
-3. **Travel**, if the list has it
+1. **Health and fitness** (or "Sports", "Fitness")
+2. **Lifestyle**
+3. **Productivity** (or "Productivity and tools")
 
-Three categories are enough. Do not choose health, developer or data categories: the connector is a logbook for everyday divers.
+Three categories are enough. Do not choose developer or data categories: the connector is for everyday athletes.
 
 ### Links and contact
 
 | Field | Value |
 | --- | --- |
-| Documentation URL | `https://padi.mcp.visin.ch/` (or `https://github.com/Mrc527/PADI-MCP#readme` if the repository is public) |
-| Privacy policy URL | `https://padi.mcp.visin.ch/privacy` |
-| Terms of service URL (if asked) | `https://padi.mcp.visin.ch/terms` |
+| Documentation URL | `https://github.com/Mrc527/suunto-mcp#readme` (or the start page `https://suunto.mcp.visin.ch/`) |
+| Privacy policy URL | `https://suunto.mcp.visin.ch/privacy` |
+| Terms of service URL (if asked) | `https://suunto.mcp.visin.ch/terms` |
 | Support contact | `marco@visin.ch` |
-| Security reports (if asked) | `marco@visin.ch`, subject starting with "Security:". Machine-readable: `https://padi.mcp.visin.ch/.well-known/security.txt` |
-| Icon | `docs/directory/icon-512.png`, or `https://padi.mcp.visin.ch/icon-192.png` (see [Prepare the listing materials](#6-prepare-the-listing-materials)) |
-| URL slug | `mcp-for-padi` (permanent once published, so check the spelling) |
-| Allowed link URIs (if asked) | None. The server never opens links. (`logbook_get_dive` returns a link to the dive on learning.padi.com as text.) |
+| Security reports (if asked) | `marco@visin.ch`, subject starting with "Security:". Machine-readable: `https://suunto.mcp.visin.ch/.well-known/security.txt` |
+| Icon | `docs/directory/icon-512.png`, or `https://suunto.mcp.visin.ch/icon-192.png` (see [Prepare the listing materials](#6-prepare-the-listing-materials)) |
+| URL slug | `mcp-for-suunto` (permanent once published, so check the spelling) |
+| Allowed link URIs (if asked) | None. The server never opens links. |
 | Screenshots (if asked) | Not needed: this is a plain MCP server, not an MCP App. |
 
 ## Step 4: Use cases
 
-### Primary use cases (585 characters)
+### Primary use cases (540 characters)
 
 ```text
-1. Logging: turn a plain description of a dive into a PADI logbook entry (site, date, depth, time, conditions, equipment, gas, buddies, notes), asking only for what is missing.
-2. Looking back: find dives by date, place, buddy or text and read every detail of a dive.
-3. Statistics: number of dives, total bottom time, deepest and longest dive, by year, month, place or dive type.
-4. Housekeeping: correct dives, delete mistakes, switch units, export the logbook as CSV or JSON.
-5. Certifications and verification: list PADI eCards, look up a PADI Pro and send a dive for verification.
+1. Training review: list workouts by date and sport and read every detail of a workout (laps, heart rate zones, pace, power, GPS track).
+2. Statistics and trends: number of workouts, time, distance, ascent and energy per week, month, year or sport.
+3. Daily health view: steps and energy per day, 24/7 heart rate, HRV and SpO2.
+4. Sleep and recovery: each night's sleep stages, heart rate and quality, and the recovery balance over time.
+5. Planning: list routes and points of interest, and add a GPX route or a new point to the Suunto App.
 ```
 
-### What users need before they connect (567 characters)
+### What users need before they connect (489 characters)
 
 ```text
-- A PADI account with access to the online logbook at learning.padi.com, and its password. Accounts that sign in to PADI with Google, Apple or Facebook first set a PADI password with "Forgot password" on account.padi.com.
-- A free account at https://padi.mcp.visin.ch. New accounts are approved by the administrator: send a short request on the site.
-- On the account page there, sign in to PADI once with the PADI e-mail and password (the password is not stored).
-No paid plan is needed for MCP for PADI. The user's Claude plan must allow custom or directory connectors.
+- A Suunto watch that syncs with the Suunto App, and the Suunto App account (old Movescount accounts do not work).
+- A free account at https://suunto.mcp.visin.ch. New accounts are approved by the administrator: send a short request on the site.
+- On the account page there, click Connect Suunto once and allow access on Suunto's own sign-in page (the password stays with Suunto).
+No paid plan is needed for MCP for Suunto. The user's Claude plan must allow custom or directory connectors.
 ```
 
 ### Does the connector read data, write data, or both?
@@ -205,7 +206,7 @@ No paid plan is needed for MCP for PADI. The user's Claude plan must allow custo
 Choose **Both**. If there is a text field:
 
 ```text
-Both. It reads dives, statistics, dive sites, certification cards, dive photos and the logbook units. It writes when the user asks: it adds, changes and deletes dives, sets the logbook units, and sends a dive to a PADI Pro for verification after the user agrees. Verified dives are locked and never changed. Each user can turn on read-only mode, which removes every tool that writes.
+Both. It reads workouts (with laps, heart rate zones and sample streams), FIT files, daily steps and energy, 24/7 heart rate, HRV and SpO2, sleep, recovery, routes and points of interest. It writes only when the user asks: it adds a GPX route or a new point of interest to the user's Suunto App. It never changes or deletes existing data. Each user can turn on read-only mode, which removes both tools that write.
 ```
 
 ### Example prompts
@@ -213,35 +214,35 @@ Both. It reads dives, statistics, dive sites, certification cards, dive photos a
 The policy asks for at least three working examples. All of these work with the demo account.
 
 ```text
-How many dives have I logged, and what is my total bottom time?
+How many workouts did I do this month, and how far did I go in total?
 ```
 
 ```text
-What was my deepest dive, and where was it?
+Show me my last five workouts.
 ```
 
 ```text
-Show me my last five dives.
+How did I sleep this week?
 ```
 
 ```text
-Give me a review of my diving last year.
+Give me a review of my training last month.
 ```
 
 ```text
-Log a dive from yesterday at Anchor Rock: shore dive, 14 m for 42 minutes, water 19 degrees, good visibility.
+What was my longest run in the last 90 days, and what was my average heart rate?
 ```
 
 ```text
-Which PADI certifications do I have?
+How has my recovery been over the last three days?
 ```
 
 ```text
-Find dive sites with "reef" in the name.
+How many steps did I take each day last week?
 ```
 
 ```text
-Export all my dives from this year as CSV.
+Add a point of interest called "Picnic spot" at 47.3769, 8.5417 to my Suunto App.
 ```
 
 ## Step 5: Company
@@ -250,7 +251,7 @@ Export all my dives from this year as CSV.
 | --- | --- |
 | Company name | `Marco Visin` (an individual developer, no company) |
 | Location (if asked) | `Lugano, Switzerland` |
-| Website | `https://padi.mcp.visin.ch` |
+| Website | `https://suunto.mcp.visin.ch` |
 | Primary contact | `Marco Visin`, `marco@visin.ch` |
 
 ## Step 6: Authentication
@@ -264,29 +265,33 @@ Export all my dives from this year as CSV.
 If there is a text field for details:
 
 ```text
-The server is its own OAuth 2.1 authorization server, built to the MCP authorization specification. Claude can identify itself with its Client ID Metadata Document (its published identity) or with dynamic client registration; both are enabled. Authorization code flow with PKCE (S256), a consent page that shows the app and where it returns to, single-use codes, tokens bound to https://padi.mcp.visin.ch/mcp (RFC 8707), rotating refresh tokens with reuse detection, and revocation. Metadata: https://padi.mcp.visin.ch/.well-known/oauth-protected-resource and https://padi.mcp.visin.ch/.well-known/oauth-authorization-server. Users sign in to Claude's connector with their account on padi.mcp.visin.ch. Claude never sees their PADI password: they enter it once on our account page, we use it to sign in to PADI and keep only an encrypted PADI refresh token.
+The server is its own OAuth 2.1 authorization server, built to the MCP authorization specification. Claude can identify itself with its Client ID Metadata Document (its published identity) or with dynamic client registration; both are enabled. Authorization code flow with PKCE (S256), a consent page that shows the app and where it returns to, single-use codes, tokens bound to https://suunto.mcp.visin.ch/mcp (RFC 8707), rotating refresh tokens with reuse detection, and revocation. Metadata: https://suunto.mcp.visin.ch/.well-known/oauth-protected-resource and https://suunto.mcp.visin.ch/.well-known/oauth-authorization-server. Users sign in to Claude's connector with their account on suunto.mcp.visin.ch. Claude never sees Suunto credentials or tokens: users connect Suunto once on our account page through Suunto's own OAuth 2.0 sign-in page, and we keep only the Suunto tokens, encrypted.
 ```
 
 ## Step 7: Data handling
 
 ### Where does the underlying API come from?
 
-Choose **a third party's API that you don't control** (PADI). The honest picture:
+Choose the option for **a partner's API that you use with permission** (if the form has no such option, the one closest to "an official API offered to us by its owner"). The picture is simple:
 
-- The connector, its OAuth sign-in and the domain padi.mcp.visin.ch are **ours**.
-- The dives live in each user's own PADI logbook at **PADI**, which we do not control and have no agreement with. So it is not "our own API", and not "a partner's API with permission".
-- PADI offers **no public API** and no way for other apps to ask for access. We use the same API that the PADI web app (learning.padi.com) uses, signed in as the user's own PADI account with the user's own e-mail and password. We do not read web pages, we do not use shared or stolen credentials, and each user only ever reaches their own logbook.
-- The demo account for the review is the exception: it reaches no API at all. Its logbook is sample data simulated inside our server, kept in memory only and reset every day.
+- The connector, its OAuth sign-in and the domain suunto.mcp.visin.ch are **ours**.
+- The data comes from the **Suunto Cloud API**, Suunto's official and documented API for partners (https://apizone.suunto.com). We use it as a member of the Suunto partner program, under Suunto's API agreement, with **our own partner keys** (client id, client secret and subscription key). We do not read web pages, use private app APIs or share anyone's credentials.
+- Each user allows access to their own Suunto account on **Suunto's own OAuth 2.0 page**, and can remove it on our account page at any time. Each user only ever reaches their own data.
+- The demo account for the review is the exception: it reaches no API at all. Its data is simulated inside our server, kept in memory only and reset every day.
 
-If there is a text field (814 characters):
+If there is a text field (834 characters):
 
 ```text
-The MCP server, its OAuth sign-in and the domain padi.mcp.visin.ch are our own. The dives live in each user's own PADI logbook at PADI (Professional Association of Diving Instructors), a third party we do not control and have no agreement with. PADI offers no public API. We use the same API that PADI's own web app at learning.padi.com uses, signed in as the user's own PADI account: the user enters their PADI e-mail and password once on our account page, we sign in to PADI, never store the password, and keep only the PADI refresh token, encrypted with AES-256-GCM. We do not store dives, notes, photos or certifications: they pass between PADI and Claude while a request runs. Each user only ever reaches their own logbook. PADI can change its API at any time; then the connector stops working until we update it.
+The MCP server, its OAuth sign-in and the domain suunto.mcp.visin.ch are our own. The data comes from the Suunto Cloud API, Suunto's official and documented API for partners. We use it as a member of the Suunto partner program, under Suunto's API agreement, with our own partner keys. Each user allows access to their own Suunto account on Suunto's own OAuth 2.0 sign-in page; we never see the Suunto password and keep only the Suunto tokens, encrypted with AES-256-GCM. We never save workouts, heart rate, sleep, recovery or routes to disk or to a database: they pass between Suunto and Claude, and recent answers stay in the server's memory for at most 30 minutes to save calls to Suunto. Each user only ever reaches their own data, and can remove the Suunto connection on our account page at any time, which also ends it at Suunto.
 ```
 
 ### Personal health data
 
-Choose **No**. A dive log records sport activity (place, date, depth, time, conditions, equipment), not medical data. The PADI logbook has no health fields, and the connector does not ask for, analyze or store health information. (A user can type anything into a dive's notes, but notes only pass through.)
+Choose **Yes**. Heart rate, HRV, SpO2, sleep and recovery measured by a sports watch are health-related data, even though they are fitness data and not medical records. If there is a text field (696 characters):
+
+```text
+Yes. The connector reads data that the user's own Suunto sports watch measures: heart rate (during workouts and 24/7), heart rate variability, blood oxygen (SpO2), sleep stages and recovery balance. It reads them only for the signed-in user, only when the user asks, and only from the user's own Suunto account. It never saves them to disk: they pass between Suunto and Claude, and recent answers stay in the server's memory for at most 30 minutes, to save calls to Suunto. It makes no diagnosis and gives no medical advice; the server instructions, the start page and the terms say that these values come from the watch and are not medical advice. No data is sold or used for ads or AI training.
+```
 
 ### Sponsored content
 
@@ -295,7 +300,7 @@ Choose **No**. There are no ads, no sponsored content and no promotions, in the 
 ### Data handling summary (if asked)
 
 ```text
-Stored: the user's account on our server (email, scrypt password hash), their PADI connection (PADI e-mail, name, PADI affiliate id, units, read-only setting and the PADI refresh token, all encrypted with AES-256-GCM; the PADI password is never stored), the connected apps (tokens only as hashes), and an activity log of tool calls (time, app, tool, duration, success; no content), kept 90 days. Not stored: dives, notes, photos and certifications. Shared with: PADI (to reach the user's logbook) and the AI apps the user approves. Access requests (email address and message) are kept until answered, or 30 days; if e-mail notices are on, they are e-mailed to the administrator through our own mail server. No ads, no tracking, no selling, no AI training. Users can revoke apps and delete their account and data at any time. Details: https://padi.mcp.visin.ch/privacy
+Stored: the user's account on our server (email, scrypt password hash), their Suunto connection (Suunto username, units, read-only setting, time zone and the Suunto tokens, all encrypted with AES-256-GCM; the Suunto password never reaches us), the connected apps (tokens only as hashes), and an activity log of tool calls (time, app, tool, duration, success; no content), kept 90 days. Not saved to disk: workouts, heart rate, sleep, recovery, routes and points of interest (recent answers stay in memory for at most 30 minutes, to save calls to Suunto). Shared with: Suunto (to read the user's data and to add the routes and points the user asks for) and the AI apps the user approves. Access requests (email address and message) are kept until answered, or 30 days; if e-mail notices are on, they are e-mailed to the administrator through our own mail server. No ads, no tracking, no selling, no AI training. Users can revoke apps, remove the Suunto connection and delete their account and data at any time. Details: https://suunto.mcp.visin.ch/privacy
 ```
 
 ## Step 8: Test and launch
@@ -305,36 +310,34 @@ Stored: the user's account on our server (email, scrypt password hash), their PA
 Replace the two values in square brackets before you paste. Do not save the filled-in version in the repository.
 
 ```text
-MCP for PADI connects Claude to a diver's own PADI online dive logbook. It is an independent project, not made by PADI. For the review we prepared a demo account on our server. Its logbook is sample data built into the server: no PADI account is connected, it contains no real person's data, and nothing you do reaches PADI or a PADI Pro.
+MCP for Suunto connects Claude to a person's own Suunto data (workouts, daily activity, sleep, recovery, routes) through the official Suunto Cloud API. It is an independent project, not made by Suunto. For the review we prepared a demo account on our server. Its data is sample data built into the server: no Suunto account is connected, it contains no real person's data, and nothing you do reaches Suunto or a watch.
 
-Demo account on our server (this is NOT a PADI account):
+Demo account on our server (this is NOT a Suunto account):
 Email: [DEMO ACCOUNT EMAIL]
 Password: [DEMO ACCOUNT PASSWORD]
 
 How to connect:
-1. In Claude, open Customize > Connectors and add the connector (or Add custom connector with the URL https://padi.mcp.visin.ch/mcp). Keep the default settings.
-2. Click Connect. A window opens on padi.mcp.visin.ch with "Sign in". Sign in with the demo account above. Do not create a new account.
-3. The next page asks "Allow access to your PADI logbook?" and shows that you return to claude.ai. Click Allow.
+1. In Claude, open Customize > Connectors and add the connector (or Add custom connector with the URL https://suunto.mcp.visin.ch/mcp). Keep the default settings.
+2. Click Connect. A window opens on suunto.mcp.visin.ch with "Sign in". Sign in with the demo account above. Do not create a new account.
+3. The next page asks you to allow access to your Suunto data and shows that you return to claude.ai. Click Allow.
 4. You are back in Claude and the tools are ready.
 
 What to try:
-- How many dives have I logged, and what is my total bottom time?
-- What was my deepest dive, and where was it?
-- Show me my last five dives.
-- Give me a review of my diving last year.
-- Log a dive from yesterday at Anchor Rock: shore dive, 14 m for 42 minutes, water 19 degrees, good visibility.
-- Which PADI certifications do I have?
-- Find dive sites with "reef" in the name.
-- Export all my dives from this year as CSV.
+- How many workouts did I do this month, and how far did I go in total?
+- Show me my last five workouts.
+- How did I sleep this week?
+- Give me a review of my training last month.
+- What was my longest run in the last 90 days, and what was my average heart rate?
+- How has my recovery been over the last three days?
+- How many steps did I take each day last week?
+- Add a point of interest called "Picnic spot" at 47.3769, 8.5417 to my Suunto App.
 
 About the demo data:
-- The diver is "Alex Demo" (alex.demo@example.com) in the time zone Europe/Zurich, with metric units. The logbook has 25 invented dives over about three years: an Open Water course, two Advanced adventure dives, holidays on invented reefs and wrecks, and lake and quarry dives. Every name, number and place is invented.
-- Most dives are published. The training dives and some others are verified by the invented PADI Pro "Robin Example" (member number 900001), "Second dive of the weekend" waits for verification and the newest dive is a Draft. Verified and pending dives are locked: the tools refuse to change or delete them, as PADI does.
-- There are three eCards (Open Water, Advanced Open Water, Enriched Air). The demo dives have no photos.
-- Sending a dive for verification works, but no PADI Pro gets a request. Use member number 900001 or 900002.
+- The athlete is "Alex Demo" (Suunto username alexdemo) in the time zone Europe/Zurich, with metric units. There are about 120 days of invented workouts (running, trail running, cycling, hiking, swimming, scuba diving, strength training, and cross-country skiing in winter), sleep for every night, daily steps and energy, 24/7 heart rate, HRV and SpO2, recovery, 4 routes and 5 points of interest. Every name, number and place is invented.
+- Adding a route or a point of interest works, but nothing goes to Suunto, a Suunto App or a watch.
 - Every change is kept in memory only. The data is reset to fresh sample data every day at 04:00 Swiss time (CET/CEST), so changes from one day are gone the next.
 
-Optional: sign in at https://padi.mcp.visin.ch/login with the same account to see the Connected apps page (revoke access with one click), the activity log, and the read-only switch on the account page. Please do not change the password and do not delete the account.
+Optional: sign in at https://suunto.mcp.visin.ch/login with the same account to see the Connected apps page (revoke access with one click), the activity log, and the read-only switch on the account page. Please do not change the password and do not delete the account.
 
 Questions or problems: marco@visin.ch. We can reset the demo data at any time.
 ```
@@ -345,26 +348,26 @@ Tick it only after you ran the whole test plan below with Claude (see [Test ever
 
 ### Tool test plan
 
-Run these in one chat, in this order, signed in as the demo account. Claude will ask before the tools marked as destructive or reaching other people: allow them.
+Run these in one chat, in this order, signed in as the demo account. Claude may ask before the two tools that add things: allow them.
 
 | # | Prompt | Tool it should use |
 | --- | --- | --- |
-| 1 | Check my PADI connection and tell me who is signed in and which units I use. | `padi_account_info` |
-| 2 | Show me my last five dives. | `logbook_list_dives` |
-| 3 | Show me every detail of the dive "Ferry wreck". | `logbook_get_dive` |
-| 4 | How many dives did I log per year, and what is my total bottom time? | `logbook_stats` |
-| 5 | Find dive sites with "reef" in the name. | `logbook_search_dive_sites` |
-| 6 | Export all my dives as CSV. | `logbook_export_dives` |
-| 7 | Who is the PADI Pro with member number 900001? | `logbook_lookup_instructor` |
-| 8 | Which PADI certifications do I have? | `padi_list_certifications` |
-| 9 | Show me the photos of my newest published dive. | `logbook_get_photos` (answers that there are no photos) |
-| 10 | Log a dive from yesterday at Anchor Rock: shore dive, 14 m for 42 minutes, water 19 degrees, good visibility, title "Test dive". | `logbook_create_dive` |
-| 11 | Change the dive "Test dive": the maximum depth was 16 m, and add the note "Saw an octopus". | `logbook_update_dive` |
-| 12 | Switch my logbook to imperial units. Then switch it back to metric. | `logbook_set_units` |
-| 13 | Send the dive "Test dive" to the PADI Pro 900001 for verification. | `logbook_submit_for_verification` (after `logbook_lookup_instructor`) |
-| 14 | Delete the dive "Lake dive (to finish)". | `logbook_delete_dive` |
+| 1 | Check my Suunto connection and tell me who is signed in and which units I use. | `suunto_account_info` |
+| 2 | Show me my last five workouts. | `suunto_list_workouts` |
+| 3 | Show me every detail of my most recent run, with its heart rate curve. | `suunto_get_workout` (with the heart_rate samples) |
+| 4 | How many workouts did I do per month in the last 90 days, and how far did I go each month? | `suunto_workout_stats` |
+| 5 | Export my most recent bike ride as a FIT file. | `suunto_export_workout_fit` |
+| 6 | How many steps did I take each day last week? | `suunto_daily_activity` |
+| 7 | Show my heart rate per hour for yesterday. | `suunto_activity_samples` |
+| 8 | How did I sleep in the last 7 nights? | `suunto_sleep` |
+| 9 | How has my recovery been over the last three days? | `suunto_recovery` |
+| 10 | List my routes. | `suunto_list_routes` |
+| 11 | Show me the first of those routes as a GPX file. | `suunto_get_route` |
+| 12 | List my points of interest. | `suunto_list_pois` |
+| 13 | Add a copy of that route to my Suunto App as a new route called "Test route". | `suunto_import_route` |
+| 14 | Add a point of interest called "Picnic spot" at 47.3769, 8.5417 to my Suunto App. | `suunto_create_poi` |
 
-Two checks that the guards work (optional): ask to change "Test dive" again after step 13 (it is Pending now, so the server refuses), and ask to delete a verified dive such as "Ferry wreck" (refused).
+Also try the two prompts once from Claude's prompt menu: "Training review" (for "last month") and "Sleep and recovery".
 
 Afterwards, reset the demo data (see step 4 of [Test every tool once with Claude](#5-test-every-tool-once-with-claude)).
 
@@ -374,13 +377,13 @@ All seven are required. Why we comply, one line each:
 
 | Acknowledgment | Why we comply |
 | --- | --- |
-| Directory guidelines | Each tool does one clear thing, has a title and the right read-only, destructive or open-world hint, and its description says only what it does; we have a privacy policy, terms, a support contact and public documentation. |
-| First-party API usage | **Decide before you tick.** We own and run the MCP server, its OAuth server and the domain padi.mcp.visin.ch, but the data comes from PADI's private API, which we do not own or control and which PADI does not offer to third parties. See [Things a reviewer may question](#things-a-reviewer-may-question). |
-| Financial transactions | The connector cannot move money or make payments of any kind; it only reads and writes dive log entries. |
-| AI media generation | It generates no images, video or audio; it only reads and writes dive log entries and shows the user's own dive photos. |
-| Prompt injection | Tool descriptions contain no hidden or behavioral instructions; the server marks dive titles, notes, buddies and other logbook text as user data that must not be followed, and deleting and sending a dive to a PADI Pro are marked so that Claude asks first. |
-| Conversation data collection | Tools take only the parameters they need; we never ask for chat history, memory or files, and we store no dives or prompts (the activity log keeps only time, app, tool, duration and success). |
-| Public documentation | The start page https://padi.mcp.visin.ch/ explains what it does and how to connect, with the privacy policy, terms and security.txt public as well. |
+| Directory guidelines | Each tool does one clear thing, has a title and the right read-only hint, and its description says only what it does; we have a privacy policy, terms, a support contact and public documentation. |
+| First-party API usage | We own and run the MCP server, its OAuth server and the domain suunto.mcp.visin.ch. The data comes from Suunto's official, documented Cloud API, which Suunto offers to partners; we use it with our own partner keys under Suunto's API agreement, and each user allows access on Suunto's own OAuth page. |
+| Financial transactions | The connector cannot move money or make payments of any kind; it only reads fitness data and adds routes and points of interest. |
+| AI media generation | It generates no images, video or audio; it only reads fitness data and passes on the user's own FIT and GPX files. |
+| Prompt injection | Tool descriptions contain no hidden or behavioral instructions; the server marks workout names, descriptions, route names and GPX text as user data that must not be followed, and tells Claude to ask before it adds anything. |
+| Conversation data collection | Tools take only the parameters they need; we never ask for chat history, memory or files, and we save no fitness data or prompts to disk (the activity log keeps only time, app, tool, duration and success). |
+| Public documentation | The README https://github.com/Mrc527/suunto-mcp#readme and the start page https://suunto.mcp.visin.ch/ explain what it does and how to connect, with the privacy policy, terms and security.txt public as well. |
 
 ## Step 10: Review and submit
 
@@ -394,11 +397,10 @@ All seven are required. Why we comply, one line each:
 
 Short notes, so there are no surprises:
 
-- **API ownership (the big one).** The policy (section 3F) says developers must own or control any API endpoint their software connects to. We own the MCP endpoint and the domain, but the data comes from PADI's servers, which we do not control. Unlike iCloud (where Apple documents app-specific passwords and standard protocols for other apps), PADI documents no way for other software to reach the logbook: we use the private API of PADI's own web app, as the signed-in user. That is a weaker position than MCP for iCloud. Our answer: each user connects only their own account with their own credentials, we never store the password, we send no more requests than the PADI web app would, and we say all this openly in step 7. If the acknowledgment's wording clearly excludes this, ask mcp-review@anthropic.com before you tick it, or do not submit and offer the connector only as a custom connector.
-- **PADI's terms.** PADI's terms of use may limit automated access. Read them before you submit (see [Before you submit](#1-decide-whether-to-submit-at-all)). The project is unofficial, and every page says so.
-- **The name and the logo.** "MCP for PADI" says what the connector is for; it does not use "PADI" as the product name, and the logo is our own (an open logbook with a wave and bubbles), not PADI's. The description says that the project is independent and not made by PADI.
-- **Safety.** A dive logbook is a record of past dives. The listing, the terms and the README say that the connector is not for dive planning or safety decisions.
-- **Writes to a real person.** `logbook_submit_for_verification` sends a real request to a PADI Pro. It is marked as reaching other people, needs `confirm: true`, and the server tells Claude to ask the user first. In the demo account no request leaves the server.
+- **Health data.** Heart rate, HRV, SpO2, sleep and recovery are health-related. We answer "Yes" to the health data question and explain it (step 7). The data comes from the user's own watch, is read only on request, is never saved to disk (only a short in-memory cache), and every page and the server instructions say that it is not medical advice.
+- **API ownership.** Unlike a connector that scrapes a website, this one uses the API that Suunto documents and offers to partners, with our own partner keys and Suunto's OAuth sign-in. Users see the connection in their Suunto App's list of partner services once Suunto accepted the production subscription.
+- **Rate limits.** The Suunto Developer API allows only 200 calls per week for the whole app. A short in-memory cache per user saves repeated calls, but it cannot make that enough for a public listing. Submit only after Suunto accepted the Production API subscription (see [Check the Suunto side](#1-check-the-suunto-side)); otherwise the reviewers may see "call limit reached" with a real account. (The demo account is not affected: it makes no calls to Suunto.)
+- **The name and the logo.** "MCP for Suunto" says what the connector is for; it does not use "Suunto" as the product name, and the logo is our own artwork, not Suunto's. The description says that the project is independent and not made by Suunto. Check that Suunto's partner rules allow the name.
+- **Writes.** The only writes add a route or a point of interest to the user's own Suunto App, from where they can sync to the watch. Nothing is changed or deleted, and nothing reaches other people. A route or point added by mistake is removed in the Suunto App. Routes and points of interest are not for navigation or safety decisions, and the terms say so.
 - **Sign-up needs approval.** New users must request access and wait for approval. The listing and the "what users need" answer say so, and the reviewers get an account that is already approved.
-- **The demo account is simulated.** The reviewers' account does not connect to PADI: its logbook is simulated in memory inside our server, with invented sample data. The tools and the logbook code are the same as for real accounts, only the PADI backend is replaced. That way the reviewers can test every tool, including deleting and sending for verification, without a PADI account and without anything reaching a real person. Real users always connect their own PADI account.
-- **Private repository.** If the GitHub repository stays private, the documentation link must be the start page, and security.txt keeps no `Policy:` line (already the case).
+- **The demo account is simulated.** The reviewers' account does not connect to Suunto: its data is simulated in memory inside our server, with invented sample data. The tools and the service code are the same as for real accounts, only the Suunto backend is replaced. That way the reviewers can test every tool, including the two that add things, without a Suunto account and a watch, and without anything reaching Suunto. Real users always connect their own Suunto account.

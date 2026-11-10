@@ -6,7 +6,10 @@
  * - every request sends Authorization: Bearer <access token>, Ocp-Apim-Subscription-Key, Accept
  *   and User-Agent suunto-mcp/<version>;
  * - HTTP 401: refresh the access token once and send the request once more (Suunto did not handle
- *   it). A 401 that is about the subscription key is not a sign-in problem: no refresh;
+ *   it). A 401 that is about the subscription key (an operator problem) or a rate limit is not a
+ *   sign-in problem: no refresh;
+ * - rate limits (429, 403 with a quota text, 401 with "RateLimitExceeded") become one error kind,
+ *   "rate_limit", with the wait from Retry-After or the quota text when there is one;
  * - reads (GET) are tried again on HTTP 429, 500, 502, 503 and 504, a timeout or a broken
  *   connection, at most 3 tries, with backoff. Retry-After is honoured up to 30 s; a longer wait
  *   is not worth it, so the error comes at once;
@@ -39,7 +42,8 @@ const RETRY_STATUSES: ReadonlySet<number> = new Set([429, 500, 502, 503, 504]);
 // Errors
 // ---------------------------------------------------------------------------------------------
 
-export type SuuntoHttpErrorKind = "http" | "timeout" | "network" | "too_large" | "api";
+/** rate_limit: Suunto's call limit for this service is reached (never a sign-in problem). */
+export type SuuntoHttpErrorKind = "http" | "timeout" | "network" | "too_large" | "api" | "rate_limit";
 
 /** A Suunto request that failed. The message is safe to show. */
 export class SuuntoHttpError extends UserFacingError {
@@ -114,6 +118,28 @@ export function backoff(base: number, attempt: number): number {
   if (base <= 0) return 0;
   const step = base * 3 ** (attempt - 1);
   return Math.round(step + Math.random() * (base / 2));
+}
+
+/** A wait for a message: "40 seconds", "3 minutes", "5 hours", "2 days". */
+export function formatWait(ms: number): string {
+  const s = Math.max(1, Math.ceil(ms / 1000));
+  if (s <= 90) return s === 1 ? "1 second" : `${s} seconds`;
+  const m = Math.ceil(s / 60);
+  if (m < 120) return `${m} minutes`;
+  const h = Math.ceil(m / 60);
+  if (h < 48) return `${h} hours`;
+  return `${Math.ceil(h / 24)} days`;
+}
+
+/**
+ * The wait in an Azure API Management quota text ("Quota will be replenished in 1.02:03:04" or
+ * "in 02:03:04"), in ms, or undefined.
+ */
+export function quotaWaitMs(text: string): number | undefined {
+  const m = text.match(/replenished in (?:(\d+)\.)?(\d{1,2}):(\d{2}):(\d{2})/i);
+  if (!m) return undefined;
+  const [days, hours, minutes, seconds] = [m[1] ?? "0", m[2]!, m[3]!, m[4]!].map(Number) as [number, number, number, number];
+  return (((days * 24 + hours) * 60 + minutes) * 60 + seconds) * 1000;
 }
 
 /** The Retry-After of an answer in ms (seconds or an HTTP date), or undefined. Not capped. */
@@ -317,10 +343,8 @@ function megabytes(bytes: number): string {
 
 /** Messages that mean the subscription key (not the user's sign-in) was refused. */
 const KEY_PROBLEM = /subscription key|subscription-key|ocp-apim/i;
-/** Messages of the API gateway when the app's call quota is used up. */
-const QUOTA_PROBLEM = /quota|rate limit|call volume/i;
-/** A 401 that is really a rate limit (seen from the gateway): not a sign-in problem. */
-const RATE_LIMIT_401 = /ratelimitexceeded|rate limit/i;
+/** Texts of the API gateway when the app's call quota or rate limit is used up (403 and 401). */
+const RATE_LIMIT_TEXT = /quota|rate ?limit|call volume/i;
 
 export class SuuntoHttp {
   private readonly doFetch: typeof fetch;
@@ -371,22 +395,28 @@ export class SuuntoHttp {
       const body = await readText(res);
       if (KEY_PROBLEM.test(body)) throw this.keyRefused();
       // The gateway sometimes answers a rate limit with 401: a new token would not help.
-      if (RATE_LIMIT_401.test(body)) throw this.busy(401);
+      if (RATE_LIMIT_TEXT.test(body)) throw this.rateLimited(res, body);
       // The token may have expired early or been revoked: refresh once and try once more.
       const fresh = await session.refreshNow(first);
       res = await this.send(req, fresh);
       if (res.status === 401) {
         const again = await readText(res);
         if (KEY_PROBLEM.test(again)) throw this.keyRefused();
-        if (RATE_LIMIT_401.test(again)) throw this.busy(401);
+        if (RATE_LIMIT_TEXT.test(again)) throw this.rateLimited(res, again);
         throw new SuuntoHttpError("http", `Suunto refused the sign-in. ${session.connectAgain ?? "Connect Suunto again."}`, { status: 401 });
       }
     }
     return this.finish(req, res);
   }
 
-  private busy(status: number): SuuntoHttpError {
-    return new SuuntoHttpError("http", `Suunto is busy or the rate limit is reached (HTTP ${status}). Try again later.`, { status });
+  /**
+   * Suunto's call limit for this service is reached (429, 403 with a quota text, 401 with
+   * "RateLimitExceeded"). Never a sign-in problem: the tokens stay as they are.
+   */
+  private rateLimited(res: Response, body: string): SuuntoHttpError {
+    const wait = retryAfterMs(res, this.now()) ?? quotaWaitMs(body);
+    const when = wait !== undefined ? `Try again in ${formatWait(wait)}.` : "Try again later.";
+    return new SuuntoHttpError("rate_limit", `Suunto's call limit for this service is reached (HTTP ${res.status}). ${when}`, { status: res.status });
   }
 
   private secrets(): string[] {
@@ -512,16 +542,18 @@ export class SuuntoHttp {
       return new SuuntoHttpError("http", `Suunto says the request is not valid (${what}, HTTP ${status}).${said}`, { status });
     }
     if (status === 403) {
-      if (QUOTA_PROBLEM.test(raw ?? "")) {
-        return new SuuntoHttpError("http", `The Suunto API call limit of this server is used up for now.${said} Try again later.`, { status });
-      }
+      // The weekly quota of the gateway also answers 403, with a text such as "Out of call volume quota".
+      if (RATE_LIMIT_TEXT.test(raw ?? body)) return this.rateLimited(res, body);
       return new SuuntoHttpError(
         "http",
         `Suunto refused ${what} (HTTP 403). Either this server's Suunto API subscription does not cover this data, or you did not allow it when you connected Suunto. Connecting Suunto again can help with the second case.`,
         { status },
       );
     }
-    if (status === 429 || (status === 503 && !write)) return this.busy(status);
+    if (status === 429) return this.rateLimited(res, body);
+    if (status === 503 && !write) {
+      return new SuuntoHttpError("http", `Suunto is busy right now (HTTP 503, ${what}). Try again later.`, { status });
+    }
     if (write && status >= 500) {
       return new UnconfirmedWriteError(
         `Suunto answered HTTP ${status}, so it is not clear whether the change was saved. Check in the Suunto App (or list the routes or points of interest) before you try again.`,

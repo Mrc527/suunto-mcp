@@ -2,14 +2,14 @@
 # Start a built Docker image the way production runs it and check that the web service works.
 # CI runs this for every platform before an image is published.
 #
-#   scripts/smoke-test-image.sh <image> [platform]      e.g. padi-mcp:test linux/arm64
+#   scripts/smoke-test-image.sh <image> [platform]      e.g. suunto-mcp:test linux/arm64
 set -euo pipefail
 
 image=${1:?usage: smoke-test-image.sh <image> [platform]}
 platform=${2:-}
 port=${SMOKE_PORT:-3999}
 base="http://127.0.0.1:$port"
-name="padi-mcp-smoke-$$"
+name="suunto-mcp-smoke-$$"
 label="$image${platform:+ ($platform)}"
 
 cleanup() { docker rm -f "$name" >/dev/null 2>&1 || true; }
@@ -46,7 +46,7 @@ code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST "$base/mcp" \
 [ "$code" = 401 ] || fail "POST /mcp answered $code instead of 401"
 
 curl -fsS --max-time 5 "$base/login" | grep -q '<form' || fail "the sign-in page did not render"
-curl -fsS --max-time 5 "$base/site.webmanifest" | grep -q '"name":"MCP for PADI"' || fail "the web manifest does not name MCP for PADI"
+curl -fsS --max-time 5 "$base/site.webmanifest" | grep -q '"name":"MCP for Suunto"' || fail "the web manifest does not name MCP for Suunto"
 [ "$(curl -fsS --max-time 5 -o /dev/null -w '%{content_type}' "$base/icon-192.png")" = image/png ] || fail "no PNG icon at /icon-192.png"
 
 health=""

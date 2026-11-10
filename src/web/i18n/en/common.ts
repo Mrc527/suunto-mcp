@@ -1,13 +1,13 @@
 /** English texts: common (layout, menus, messages shown after a redirect, error pages). Keys start with "common.". */
 export default {
   // The product name: the same in every language (do not translate it). Page titles are shown as
-  // "<title> · MCP for PADI".
-  "common.appName": "MCP for PADI",
+  // "<title> · MCP for Suunto".
+  "common.appName": "MCP for Suunto",
 
   // Top bar
   "common.nav.main": "Main",
-  "common.nav.account": "PADI account",
-  "common.nav.accountShort": "PADI",
+  "common.nav.account": "Suunto account",
+  "common.nav.accountShort": "Suunto",
   "common.nav.connections": "Connected apps",
   "common.nav.connectionsShort": "Apps",
   "common.nav.security": "Security",
@@ -19,8 +19,8 @@ export default {
 
   // Footer
   "common.footer.author": "Author: <a href=\"https://marco.visin.ch\" target=\"_blank\" rel=\"noopener noreferrer\">Marco Visin</a>",
-  "common.footer.about": "MCP for PADI connects your AI assistant (Claude, ChatGPT, Gemini, Cursor, VS Code and others) to your PADI dive logbook.",
-  "common.footer.disclaimer": "MCP for PADI is an independent open-source project. It is not made by, affiliated with, or endorsed by PADI (Professional Association of Diving Instructors). PADI is a registered trademark of PADI Worldwide Corp.",
+  "common.footer.about": "MCP for Suunto connects your AI assistant (Claude, ChatGPT, Gemini, Cursor, VS Code and others) to your Suunto workouts, sleep, recovery and routes.",
+  "common.footer.disclaimer": "MCP for Suunto is an independent open-source project. It uses the official Suunto Cloud API, but it is not made by, affiliated with, or endorsed by Suunto. Suunto is a registered trademark of Suunto Oy.",
   "common.footer.language": "Language",
   // The links at the bottom of every page (the menu's label is read by screen readers)
   "common.footer.legal": "Legal and contact",
@@ -33,7 +33,7 @@ export default {
 
   // Messages shown after a redirect
   "common.flash.saved": "Saved.",
-  "common.flash.removed": "Your PADI connection was removed.",
+  "common.flash.removed": "Your Suunto connection was removed.",
   "common.flash.revoked": "Access revoked.",
   "common.flash.password": "Password changed.",
   "common.flash.sessions": "Signed out of all other browsers.",
@@ -42,7 +42,7 @@ export default {
   "common.flash.approved": "Request approved. The person is not notified automatically: let them know they can sign in now.",
   "common.flash.rejected": "Request rejected and deleted.",
   "common.flash.deleted": "Deleted.",
-  "common.flash.welcome": "Welcome! Sign in to PADI below, then connect your AI app.",
+  "common.flash.welcome": "Welcome! Connect your Suunto account below, then connect your AI app.",
   "common.flash.denied": "Access was denied.",
   "common.flash.csrf": "Your form expired. Please try again.",
   "common.flash.lastadmin": "You cannot remove the last administrator.",

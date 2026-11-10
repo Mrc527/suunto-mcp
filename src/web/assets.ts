@@ -4,7 +4,7 @@ import { HOME_CSS } from "./assets-home.js";
 
 export const APP_CSS = `
 /* Design: clean and calm (system font, light gray canvas, white rounded cards, frosted bar).
-   No third-party artwork or fonts are bundled, and no PADI artwork or logos are used. */
+   No third-party artwork or fonts are bundled, and no Suunto artwork or logos are used. */
 :root {
   color-scheme: light dark;
   --canvas: #f5f5f7;
@@ -70,8 +70,8 @@ a:hover { text-decoration: underline; }
 .topbar-inner { max-width: 1040px; margin: 0 auto; padding: 0 20px; min-height: 56px; display: flex; align-items: center; gap: 16px; }
 .brand { display: flex; align-items: center; gap: 10px; color: var(--text); font: 600 18px/1 var(--font-display); letter-spacing: -.02em; }
 .brand:hover { text-decoration: none; }
-/* The product name "MCP for PADI": "for PADI" is lighter, so the name of PADI never stands out
-   more than the name of this project. */
+/* The product name "MCP for Suunto": "for Suunto" is lighter, so the name of Suunto never stands
+   out more than the name of this project. */
 .brand-name { font-weight: 400; white-space: nowrap; }
 .brand-name b { font-weight: 600; color: inherit; }
 .tabs { display: flex; gap: 2px; margin-left: auto; overflow-x: auto; scrollbar-width: none; }
@@ -101,13 +101,15 @@ a:hover { text-decoration: underline; }
 .mark { display: block; flex: none; border-radius: 22%; }
 .mark-sm { width: 30px; height: 30px; }
 .mark-lg { width: 56px; height: 56px; }
-.mark-xl { width: 84px; height: 84px; box-shadow: 0 10px 30px rgba(79, 114, 251, .3); }
+.mark-xl { width: 84px; height: 84px; box-shadow: 0 10px 30px rgba(242, 96, 44, .3); }
 .svc-icon { display: inline-flex; align-items: center; justify-content: center; flex: none; color: #fff; }
 .svc-icon svg { width: 58%; height: 58%; }
 .svc-sm { width: 32px; height: 32px; border-radius: 8px; }
 .svc-lg { width: 48px; height: 48px; border-radius: 12px; }
-.svc-logbook { background: linear-gradient(180deg, #2fb5e8, #0a6fc2); }
-.svc-cards { background: linear-gradient(180deg, #2fcfa8, #0e8f7a); }
+/* White glyphs keep a contrast of 3:1 or more, also at the lighter top of each tile. */
+.svc-workouts { background: linear-gradient(180deg, #ea6f2a, #c93a22); }
+.svc-health { background: linear-gradient(180deg, #f2638a, #c92a5c); }
+.svc-routes { background: linear-gradient(180deg, #22a366, #11804f); }
 
 /* Page */
 main { width: 100%; max-width: 760px; margin: 0 auto; padding: 32px 20px 24px; flex: 1; }
@@ -387,14 +389,24 @@ document.addEventListener("click", function (e) {
   if (confirmEl && !window.confirm(confirmEl.getAttribute("data-confirm"))) e.preventDefault();
 });
 
-// A new PADI connection: select the browser's own time zone (the server's default otherwise).
+// A new Suunto connection: use the browser's own time zone (the server's default otherwise).
+// A <select data-browser-tz> selects it when it is in the list; an <input data-browser-tz> (for
+// example a hidden field of the "Connect Suunto" form) gets it as its value.
 (function () {
-  var select = document.querySelector("select[data-browser-tz]");
-  if (!select || !window.Intl) return;
+  if (!window.Intl) return;
   var zone = "";
   try { zone = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (err) { return; }
-  for (var i = 0; i < select.options.length; i++) {
-    if (select.options[i].value === zone) { select.selectedIndex = i; return; }
+  if (!zone) return;
+  var fields = document.querySelectorAll("[data-browser-tz]");
+  for (var f = 0; f < fields.length; f++) {
+    var field = fields[f];
+    if (field.tagName === "SELECT") {
+      for (var i = 0; i < field.options.length; i++) {
+        if (field.options[i].value === zone) { field.selectedIndex = i; break; }
+      }
+    } else if (field.tagName === "INPUT") {
+      field.value = zone;
+    }
   }
 })();
 

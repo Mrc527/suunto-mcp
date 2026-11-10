@@ -1,4 +1,4 @@
-# CI/CD for padi-mcp.
+# CI/CD for suunto-mcp (MCP for Suunto).
 #
 # Pull requests: tests, plus a test build of the Docker image for linux/amd64 and linux/arm64.
 # Push to main:  tests, then the image is published to ghcr.io and deployed over SSH to the
@@ -7,6 +7,9 @@
 #                to the version that ran before the last deploy.
 #
 # One-time setup (server, secrets, variables): see "Deploy with GitHub Actions" in README.md.
+# Secrets: DEPLOY_SSH_KEY and DEPLOY_KNOWN_HOSTS (required for deploys), and optionally
+# SUUNTO_CLIENT_ID, SUUNTO_CLIENT_SECRET and SUUNTO_SUBSCRIPTION_KEY: when set, every deploy
+# writes them to .env on the server. Tests never need them.
 name: CI/CD
 
 on:
@@ -60,11 +63,12 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
       - run: npm run test:unit
-      # Against an in-process mock PADI API: no PADI account and no network needed.
+      # Against an in-process mock of the Suunto API (OAuth and data): no Suunto account, no API
+      # keys and no network needed.
       - name: Integration tests
         run: npm run test:integration
         env:
-          PADI_MCP_IT: "1"
+          SUUNTO_MCP_IT: "1"
 
   image:
     name: Docker image
@@ -100,18 +104,18 @@ jobs:
           context: .
           platforms: linux/amd64
           load: true
-          tags: padi-mcp:test-amd64
+          tags: suunto-mcp:test-amd64
       - name: Build linux/arm64
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           platforms: linux/arm64
           load: true
-          tags: padi-mcp:test-arm64
+          tags: suunto-mcp:test-arm64
       - name: Smoke test linux/amd64
-        run: scripts/smoke-test-image.sh padi-mcp:test-amd64 linux/amd64
+        run: scripts/smoke-test-image.sh suunto-mcp:test-amd64 linux/amd64
       - name: Smoke test linux/arm64 (emulated)
-        run: scripts/smoke-test-image.sh padi-mcp:test-arm64 linux/arm64
+        run: scripts/smoke-test-image.sh suunto-mcp:test-arm64 linux/arm64
 
       - name: Image tags and labels
         id: meta
@@ -173,7 +177,7 @@ jobs:
       DEPLOY_HOST: ${{ vars.DEPLOY_HOST || 'nebula.visin.ch' }}
       DEPLOY_USER: ${{ vars.DEPLOY_USER || 'deploy' }}
       DEPLOY_PORT: ${{ vars.DEPLOY_PORT || '22' }}
-      DEPLOY_PATH: ${{ vars.DEPLOY_PATH || 'padi-mcp' }}
+      DEPLOY_PATH: ${{ vars.DEPLOY_PATH || 'suunto-mcp' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -195,6 +199,11 @@ jobs:
           # and expires when the job ends. The server never stores it.
           REGISTRY_USER: ${{ github.actor }}
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Optional: the keys of the app in the Suunto API Zone. When set, deploy.sh writes them
+          # to .env on the server; when not, the server keeps the keys in its .env.
+          SUUNTO_CLIENT_ID: ${{ secrets.SUUNTO_CLIENT_ID || vars.SUUNTO_CLIENT_ID }}
+          SUUNTO_CLIENT_SECRET: ${{ secrets.SUUNTO_CLIENT_SECRET }}
+          SUUNTO_SUBSCRIPTION_KEY: ${{ secrets.SUUNTO_SUBSCRIPTION_KEY }}
       - name: Check the public URL
         if: steps.deploy.outputs.url != ''
         run: .github/scripts/ssh-deploy.sh check-url "$URL"
@@ -219,7 +228,7 @@ jobs:
       DEPLOY_HOST: ${{ vars.DEPLOY_HOST || 'nebula.visin.ch' }}
       DEPLOY_USER: ${{ vars.DEPLOY_USER || 'deploy' }}
       DEPLOY_PORT: ${{ vars.DEPLOY_PORT || '22' }}
-      DEPLOY_PATH: ${{ vars.DEPLOY_PATH || 'padi-mcp' }}
+      DEPLOY_PATH: ${{ vars.DEPLOY_PATH || 'suunto-mcp' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

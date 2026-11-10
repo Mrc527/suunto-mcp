@@ -1,5 +1,5 @@
 /**
- * Small inline SVG glyphs drawn for this project (no PADI artwork). Colors come from CSS: the
+ * Small inline SVG glyphs drawn for this project (no Suunto artwork). Colors come from CSS: the
  * glyphs use currentColor and sit on colored tiles defined in assets.ts. The logo itself is in
  * assets/brand (see scripts/make-icons.mjs).
  */
@@ -18,10 +18,12 @@ const LOGO_VERSION = createHash("sha256").update(LOGO_SVG).update(LOGO_SMALL_SVG
 const MARK_PX = { sm: 30, lg: 56, xl: 84 } as const;
 
 const GLYPHS = {
-  // An open logbook with a wave on its right page.
-  logbook: '<path d="M12 6.2C10.2 4.9 7.6 4.4 4 4.6v13.6c3.6-.2 6.2.3 8 1.6 1.8-1.3 4.4-1.8 8-1.6V4.6c-3.6-.2-6.2.3-8 1.6z"/><path d="M12 6.2v13.6"/><path d="M14.3 12.2c.9-.8 1.8-.8 2.7 0s1.8.8 2.7 0" stroke-width="1.7"/>',
-  // A certification card: a photo square and two lines of text.
-  cards: '<rect x="3" y="5.5" width="18" height="13" rx="2.4"/><rect x="5.8" y="8.6" width="4.6" height="5.4" rx="1"/><path d="M13 9.6h5M13 13h3.6" stroke-width="1.8"/>',
+  // A stopwatch: workouts.
+  workouts: '<circle cx="12" cy="13.6" r="7.2"/><path d="M9.6 2.8h4.8M12 2.8v3.6M12 13.6l3.1-3.1M18.2 6.6l1.5-1.5"/>',
+  // A heart with a pulse line: heart rate, sleep, recovery and daily activity.
+  health: '<path d="M12 20.2s-8-4.7-8-10.6A4.4 4.4 0 0 1 12 7a4.4 4.4 0 0 1 8 2.6c0 5.9-8 10.6-8 10.6z"/><path d="M7.4 12.6h2.3l1.3-2.3 2 4.4 1.3-2.1h2.3" stroke-width="1.7"/>',
+  // A winding route from a start point to a pin: routes and points of interest.
+  routes: '<circle cx="5.6" cy="18.4" r="2"/><path d="M7.6 18.4h7.6a3 3 0 0 0 0-6H8.8a3 3 0 0 1 0-6h3.4"/><path d="M18 3.4a2.7 2.7 0 0 0-2.7 2.7c0 2 2.7 4.5 2.7 4.5s2.7-2.5 2.7-4.5A2.7 2.7 0 0 0 18 3.4z"/>',
   check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
   arrow: '<path d="M5 12h14M13.5 6.5L19 12l-5.5 5.5"/>',
   device: '<rect x="4" y="5" width="16" height="11" rx="2"/><path d="M2.5 19.5h19"/>',
@@ -32,8 +34,14 @@ const GLYPHS = {
 } as const;
 
 export type Glyph = keyof typeof GLYPHS;
-/** What the account page and the start page show as tiles: the dive logbook and the certification cards. */
-export type Service = "logbook" | "cards";
+/**
+ * What the start page, the account page and the consent page show as tiles: workouts; heart
+ * rate, sleep, recovery and daily activity; routes and points of interest.
+ */
+export type Service = "workouts" | "health" | "routes";
+
+/** The services in the order the pages show them. */
+export const SERVICES: readonly Service[] = ["workouts", "health", "routes"];
 
 export function glyph(name: Glyph): SafeHtml {
   return svg(GLYPHS[name]);

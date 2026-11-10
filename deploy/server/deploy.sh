@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
-# Deploy, roll back, back up and inspect the MCP for PADI service on this server.
+# Deploy, roll back, back up and inspect the MCP for Suunto service on this server.
 #
 # The CI/CD pipeline (.github/workflows/ci.yml) copies this folder to the server over SSH and runs
 #   bash deploy.sh deploy <image>@sha256:<digest> [git revision]
-# with the registry user name and a short-lived token on stdin (two lines).
+# with the registry user name and a short-lived token on stdin (two lines), and optionally the
+# Suunto app keys from the GitHub secrets (three more lines: client id, client secret,
+# subscription key; empty lines when the secrets are not set).
 #
-# By hand, as the user that owns this folder (for example: sudo -iu deploy, then cd padi-mcp):
+# By hand, as the user that owns this folder (for example: sudo -iu deploy, then cd suunto-mcp):
 #   ./deploy.sh status       what runs now and the recent deploys
 #   ./deploy.sh rollback     go back to the version that ran before the last deploy
 #   ./deploy.sh backup       save a consistent copy of the database in /data/backups
 #   ./deploy.sh deploy <image>@sha256:<digest>   deploy a specific image
 #
-# Your settings live in .env (see .env.example); this script only changes its PADI_MCP_IMAGE
-# line. Before switching versions it saves a copy of the database in the data volume
+# Your settings live in .env (see .env.example); this script only changes its SUUNTO_MCP_IMAGE
+# line, and the SUUNTO_CLIENT_ID, SUUNTO_CLIENT_SECRET and SUUNTO_SUBSCRIPTION_KEY lines when the
+# pipeline sends those keys. Before switching versions it saves a copy of the database in the data volume
 # (/data/backups, newest KEEP_BACKUPS kept). If the new version does not become healthy within
 # HEALTH_TIMEOUT seconds, it switches back to the last version that was healthy. The output of
 # each deploy is also written to .deploy/deploy.log.
@@ -20,7 +23,7 @@
 set -euo pipefail
 umask 077
 
-SERVICE=padi-mcp
+SERVICE=suunto-mcp
 HEALTH_TIMEOUT=${HEALTH_TIMEOUT:-180}
 KEEP_IMAGES=${KEEP_IMAGES:-3}
 KEEP_BACKUPS=${KEEP_BACKUPS:-10}
@@ -28,11 +31,15 @@ STATE_DIR=.deploy
 HISTORY=$STATE_DIR/history
 PREVIOUS=$STATE_DIR/previous-image
 LOG_FILE=$STATE_DIR/deploy.log
-# An image pinned by digest, e.g. ghcr.io/owner/padi-mcp@sha256:<64 hex characters>.
+# An image pinned by digest, e.g. ghcr.io/owner/suunto-mcp@sha256:<64 hex characters>.
 IMAGE_RE='^[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}$'
 
 REG_USER=""
 REG_TOKEN=""
+# Suunto app keys sent by the pipeline (empty when the GitHub secrets are not set).
+NEW_CLIENT_ID=""
+NEW_CLIENT_SECRET=""
+NEW_SUBSCRIPTION_KEY=""
 REG_CONFIG=""
 REG_HOST=""
 
@@ -83,7 +90,7 @@ preflight() {
 # values and prints the rest of the value in a warning, so stop before that can reach a log.
 check_config() {
   local out rc=0
-  out=$(PADI_MCP_IMAGE=$1 compose config --quiet 2>&1) || rc=$?
+  out=$(SUUNTO_MCP_IMAGE=$1 compose config --quiet 2>&1) || rc=$?
   if grep -qE 'variable is not set|Invalid template' <<<"$out"; then
     die "a value in .env contains \$. Put that value in single quotes, for example ADMIN_PASSWORD='abc\$123'. (Details are hidden because they may contain a password.)"
   fi
@@ -113,7 +120,7 @@ lock() {
   fi
 }
 
-# Value of KEY in .env as this script writes it (only used for PADI_MCP_IMAGE).
+# Value of KEY in .env as this script writes it (SUUNTO_MCP_IMAGE and the Suunto app keys).
 env_get() {
   local line
   line=$(grep -E "^$1=" .env | tail -n 1) || true
@@ -139,14 +146,72 @@ env_set() {
   mv -f "$tmp" .env
 }
 
-# Registry user name and token (optional) arrive as two lines on stdin.
+# Registry user name and token (optional) arrive as two lines on stdin, then (optional) the three
+# Suunto app keys from the GitHub secrets.
 read_credentials() {
   if [ ! -t 0 ]; then
     IFS= read -r REG_USER || true
     IFS= read -r REG_TOKEN || true
+    IFS= read -r NEW_CLIENT_ID || true
+    IFS= read -r NEW_CLIENT_SECRET || true
+    IFS= read -r NEW_SUBSCRIPTION_KEY || true
   fi
   REG_USER=${REG_USER%$'\r'}
   REG_TOKEN=${REG_TOKEN%$'\r'}
+  NEW_CLIENT_ID=${NEW_CLIENT_ID%$'\r'}
+  NEW_CLIENT_SECRET=${NEW_CLIENT_SECRET%$'\r'}
+  NEW_SUBSCRIPTION_KEY=${NEW_SUBSCRIPTION_KEY%$'\r'}
+}
+
+# The Suunto app keys from the pipeline: all three or none (the service does not start with only
+# some of them). Each one is written in single quotes, so it must not contain a ' character.
+# Values are never printed: they are secrets.
+check_suunto_keys() {
+  local name value
+  if [ -z "$NEW_CLIENT_ID$NEW_CLIENT_SECRET$NEW_SUBSCRIPTION_KEY" ]; then return 0; fi
+  if [ -z "$NEW_CLIENT_ID" ] || [ -z "$NEW_CLIENT_SECRET" ] || [ -z "$NEW_SUBSCRIPTION_KEY" ]; then
+    die "the pipeline sent only some of the Suunto app keys. Set all three GitHub secrets (SUUNTO_CLIENT_ID, SUUNTO_CLIENT_SECRET, SUUNTO_SUBSCRIPTION_KEY), or none of them and keep the keys in .env."
+  fi
+  for name in SUUNTO_CLIENT_ID SUUNTO_CLIENT_SECRET SUUNTO_SUBSCRIPTION_KEY; do
+    value=$(suunto_key "$name")
+    if [ "${#value}" -gt 512 ] || [[ ! $value =~ ^[[:graph:]]+$ ]] || [[ $value == *"'"* ]]; then
+      die "the GitHub secret $name is not valid: use 1 to 512 visible characters, without spaces and without the ' character."
+    fi
+  done
+}
+
+suunto_key() {
+  case $1 in
+    SUUNTO_CLIENT_ID) printf '%s' "$NEW_CLIENT_ID" ;;
+    SUUNTO_CLIENT_SECRET) printf '%s' "$NEW_CLIENT_SECRET" ;;
+    SUUNTO_SUBSCRIPTION_KEY) printf '%s' "$NEW_SUBSCRIPTION_KEY" ;;
+  esac
+}
+
+# Write the Suunto app keys from the pipeline to .env when they differ from what is there.
+# Docker Compose then restarts the service with them.
+apply_suunto_keys() {
+  local name value changed=""
+  if [ -z "$NEW_CLIENT_ID" ]; then return 0; fi
+  for name in SUUNTO_CLIENT_ID SUUNTO_CLIENT_SECRET SUUNTO_SUBSCRIPTION_KEY; do
+    value=$(suunto_key "$name")
+    if [ "$(env_get "$name")" != "$value" ]; then
+      env_set "$name" "'$value'"
+      changed="$changed $name"
+    fi
+  done
+  if [ -n "$changed" ]; then
+    log "wrote the Suunto app keys from the GitHub secrets to .env:$changed"
+  else
+    log "the Suunto app keys in .env match the GitHub secrets"
+  fi
+}
+
+# Without the Suunto app keys the service runs, but only demo accounts work.
+warn_missing_suunto_keys() {
+  if [ -z "$(env_get SUUNTO_CLIENT_ID)" ] && [ -z "${SUUNTO_CLIENT_ID:-}" ]; then
+    log "warning: SUUNTO_CLIENT_ID is not set in .env. The service runs, but users cannot connect Suunto until you set the three Suunto app keys (see 'Suunto API Zone setup' in README.md)."
+  fi
 }
 
 registry_of() {
@@ -227,19 +292,19 @@ const path = require("node:path");
 const { DatabaseSync } = require("node:sqlite");
 const [stamp, keep] = process.argv.slice(1);
 const dir = process.env.DATA_DIR || "/data";
-const file = path.join(dir, "padi-mcp.db");
+const file = path.join(dir, "suunto-mcp.db");
 if (!fs.existsSync(file)) {
   console.log("[deploy] no database yet, nothing to back up");
   process.exit(0);
 }
 const out = path.join(dir, "backups");
 fs.mkdirSync(out, { recursive: true, mode: 0o700 });
-const target = path.join(out, `padi-mcp-${stamp}.db`);
+const target = path.join(out, `suunto-mcp-${stamp}.db`);
 const db = new DatabaseSync(file);
 db.exec("PRAGMA busy_timeout = 10000");
 db.exec(`VACUUM INTO '${target.replace(/'/g, "''")}'`);
 db.close();
-const all = fs.readdirSync(out).filter((f) => /^padi-mcp-\d{8}T\d{6}Z\.db$/.test(f)).sort();
+const all = fs.readdirSync(out).filter((f) => /^suunto-mcp-\d{8}T\d{6}Z\.db$/.test(f)).sort();
 for (const f of all.slice(0, Math.max(0, all.length - Number(keep)))) fs.rmSync(path.join(out, f));
 console.log(`[deploy] database saved to ${target} (inside the data volume)`);
 EOF
@@ -248,7 +313,7 @@ EOF
 # Run the backup in a one-off container from IMAGE on the data volume, so it also works while the
 # service is stopped or restarting.
 backup_db() {
-  PADI_MCP_IMAGE=$1 compose run --rm --no-deps -T "$SERVICE" \
+  SUUNTO_MCP_IMAGE=$1 compose run --rm --no-deps -T "$SERVICE" \
     node --no-warnings -e "$BACKUP_JS" "$(date -u +%Y%m%dT%H%M%SZ)" "$KEEP_BACKUPS" </dev/null ||
     die "the database backup failed, nothing was changed"
 }
@@ -297,7 +362,7 @@ cleanup_images() {
   local keep=() image
   [ -f "$HISTORY" ] || return 0
   mapfile -t keep < <(awk -F '\t' '$4 == "deployed" || $4 == "rolled back" { print $2 }' "$HISTORY" | tail -n "$KEEP_IMAGES")
-  keep+=("$(env_get PADI_MCP_IMAGE)")
+  keep+=("$(env_get SUUNTO_MCP_IMAGE)")
   if [ -f "$PREVIOUS" ]; then keep+=("$(cat "$PREVIOUS")"); fi
   while IFS= read -r image; do
     [[ $image =~ $IMAGE_RE ]] || continue
@@ -310,7 +375,7 @@ cleanup_images() {
 # Start IMAGE (already pulled). On failure switch back to FALLBACK. Returns 0 when IMAGE runs.
 switch_to() {
   local image=$1 fallback=$2
-  env_set PADI_MCP_IMAGE "$image"
+  env_set SUUNTO_MCP_IMAGE "$image"
   log "starting $image"
   if compose up -d --remove-orphans && wait_healthy "$image"; then return 0; fi
   log "the new version did not become healthy. Last log lines (e-mail addresses hidden):"
@@ -318,7 +383,7 @@ switch_to() {
   compose logs --no-color --tail 80 "$SERVICE" 2>&1 | sed -E 's/[[:alnum:]._%+-]+@[[:alnum:].-]+\.[[:alpha:]]{2,}/<e-mail>/g' || true
   if [ -n "$fallback" ] && [ "$fallback" != "$image" ]; then
     log "switching back to $fallback"
-    env_set PADI_MCP_IMAGE "$fallback"
+    env_set SUUNTO_MCP_IMAGE "$fallback"
     if compose up -d --remove-orphans && wait_healthy "$fallback"; then
       log "the previous version is running again"
       return 1
@@ -336,9 +401,12 @@ cmd_deploy() {
   [[ $revision =~ ^[A-Za-z0-9._-]{1,80}$ ]] || die "invalid revision: $revision"
   read_credentials
   preflight
+  check_suunto_keys
   check_config "$image"
   lock "deploy $image $revision"
-  current=$(env_get PADI_MCP_IMAGE)
+  apply_suunto_keys
+  warn_missing_suunto_keys
+  current=$(env_get SUUNTO_MCP_IMAGE)
   # Normally the running version; if that one never became healthy, the last one that did.
   fallback=$(last_good "$image")
   log "deploying $image (revision $revision)"
@@ -372,7 +440,7 @@ cmd_rollback() {
   local current previous
   read_credentials
   preflight
-  current=$(env_get PADI_MCP_IMAGE)
+  current=$(env_get SUUNTO_MCP_IMAGE)
   previous=$(cat "$PREVIOUS" 2>/dev/null || true)
   [ -n "$previous" ] || die "no previous version is recorded on this server"
   [[ $previous =~ $IMAGE_RE ]] || die "the recorded previous image is not valid: $previous"
@@ -398,7 +466,7 @@ cmd_rollback() {
 cmd_backup() {
   local current
   preflight
-  current=$(env_get PADI_MCP_IMAGE)
+  current=$(env_get SUUNTO_MCP_IMAGE)
   [ -n "$current" ] || die "nothing has been deployed here yet"
   check_config "$current"
   backup_db "$current"
@@ -407,7 +475,7 @@ cmd_backup() {
 cmd_status() {
   local current
   preflight
-  current=$(env_get PADI_MCP_IMAGE)
+  current=$(env_get SUUNTO_MCP_IMAGE)
   if [ -z "$current" ]; then
     log "nothing has been deployed here yet"
     return 0

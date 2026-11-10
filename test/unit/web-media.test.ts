@@ -17,7 +17,7 @@ describe("video files", () => {
   let base = "";
 
   beforeAll(async () => {
-    dir = mkdtempSync(join(tmpdir(), "padi-mcp-media-"));
+    dir = mkdtempSync(join(tmpdir(), "suunto-mcp-media-"));
     writeFileSync(join(dir, "intro-en.mp4"), video);
     const app = express();
     app.use(mediaRoutes(dir));

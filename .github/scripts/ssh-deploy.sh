@@ -12,6 +12,9 @@
 #   DEPLOY_SSH_KEY, DEPLOY_KNOWN_HOSTS   (secrets) private key and output of ssh-keyscan
 #   DEPLOY_HOST, DEPLOY_USER, DEPLOY_PORT, DEPLOY_PATH
 #   REGISTRY_USER, REGISTRY_TOKEN        short-lived login the server uses to pull the image
+#   SUUNTO_CLIENT_ID, SUUNTO_CLIENT_SECRET, SUUNTO_SUBSCRIPTION_KEY
+#                                        (optional secrets) the Suunto app keys; deploy.sh writes
+#                                        them to .env on the server. All three or none.
 set -euo pipefail
 
 IMAGE_RE='^[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}$'
@@ -26,7 +29,7 @@ fail() {
 ssh_target() { ssh -F "${DEPLOY_SSH_CONFIG:?run setup first}" deploy-target "$@"; }
 
 remote_dir() {
-  local dir=${DEPLOY_PATH:-padi-mcp}
+  local dir=${DEPLOY_PATH:-suunto-mcp}
   dir=${dir#\~/}
   [[ $dir =~ ^[A-Za-z0-9._/-]+$ ]] || fail "DEPLOY_PATH may only contain letters, digits and . _ / - (got: $dir)"
   printf '%s' "$dir"
@@ -45,6 +48,28 @@ run_untrusted() {
 
 summary() {
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then printf '%s\n' "$@" >>"$GITHUB_STEP_SUMMARY"; fi
+}
+
+# The Suunto app keys from the optional GitHub secrets. Spaces and line breaks around a value
+# (easy to paste by mistake) are removed. All three or none: the service does not start with only
+# some of them. The values are secrets, so no message ever shows them.
+SUUNTO_KEYS_SET=0
+check_suunto_keys() {
+  local name value
+  for name in SUUNTO_CLIENT_ID SUUNTO_CLIENT_SECRET SUUNTO_SUBSCRIPTION_KEY; do
+    value=${!name:-}
+    value=${value#"${value%%[![:space:]]*}"}
+    value=${value%"${value##*[![:space:]]}"}
+    case $value in
+      *[[:space:]]* | *"'"*) fail "The secret $name contains a space, a line break or a ' character. Save it again without them." ;;
+    esac
+    if [ "${#value}" -gt 512 ]; then fail "The secret $name is longer than 512 characters."; fi
+    printf -v "$name" '%s' "$value"
+    if [ -n "$value" ]; then SUUNTO_KEYS_SET=$((SUUNTO_KEYS_SET + 1)); fi
+  done
+  if [ "$SUUNTO_KEYS_SET" -ne 0 ] && [ "$SUUNTO_KEYS_SET" -ne 3 ]; then
+    fail "Only some of the Suunto secrets are set. Set all three (SUUNTO_CLIENT_ID, SUUNTO_CLIENT_SECRET, SUUNTO_SUBSCRIPTION_KEY), or none and keep the keys in .env on the server."
+  fi
 }
 
 # Read "public url: https://..." from the server log and expose it as the step output "url".
@@ -130,6 +155,12 @@ cmd_deploy() {
   [[ $image =~ $IMAGE_RE ]] || fail "Invalid image reference: '$image'"
   [[ $revision =~ ^[A-Za-z0-9._-]{1,80}$ ]] || fail "Invalid revision: '$revision'"
   dir=$(remote_dir)
+  check_suunto_keys
+  if [ "$SUUNTO_KEYS_SET" -eq 3 ]; then
+    echo "The Suunto app keys from the GitHub secrets go to the server's .env."
+  else
+    echo "No Suunto secrets in GitHub: the server keeps the Suunto app keys of its .env."
+  fi
 
   echo "Copying deploy/server to $DEPLOY_HOST:$dir"
   tar -C deploy/server -cf - compose.yml deploy.sh .env.example |
@@ -138,9 +169,16 @@ cmd_deploy() {
 
   echo "Running deploy.sh on the server"
   log=$(mktemp)
-  printf '%s\n%s\n' "${REGISTRY_USER:-}" "${REGISTRY_TOKEN:-}" |
+  # Secrets travel on stdin, never on a command line: registry login, then the Suunto app keys.
+  printf '%s\n%s\n%s\n%s\n%s\n' "${REGISTRY_USER:-}" "${REGISTRY_TOKEN:-}" \
+    "${SUUNTO_CLIENT_ID:-}" "${SUUNTO_CLIENT_SECRET:-}" "${SUUNTO_SUBSCRIPTION_KEY:-}" |
     run_untrusted ssh_target "cd -- '$dir' && bash ./deploy.sh deploy '$image' '$revision'" 2>&1 | tee "$log" || rc=$?
   summary "### Deploy to $DEPLOY_HOST" "- Image: \`$image\`" "- Revision: \`$revision\`"
+  if [ "$SUUNTO_KEYS_SET" -eq 3 ]; then
+    summary "- Suunto app keys: from the GitHub secrets"
+  else
+    summary "- Suunto app keys: kept in the server's .env"
+  fi
   export_url "$log"
   rm -f "$log"
   if [ "$rc" -eq 255 ]; then

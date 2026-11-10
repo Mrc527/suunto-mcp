@@ -28,9 +28,10 @@ export const HOME_CSS = `
 .home .home-video video p { padding: 20px; margin: 0; }
 .home .home-video-note { text-align: center; color: var(--muted); font-size: 13px; margin: 10px 0 0; }
 
-/* What you can do: the two services side by side (stacked on phones), as wide as the features below */
+/* What you can do: the three services stacked on phones, two and one on tablets, side by side on
+   wide screens, as wide as the features below */
 .home .tiles { margin: 0; }
-.home .home-services { grid-template-columns: 1fr; gap: 16px; }
+.home .home-services { grid-template-columns: 1fr; grid-auto-flow: row; gap: 16px; }
 .home .home-services .tile { gap: 12px; }
 .home .home-services .tile p { font-size: 16px; line-height: 1.5; }
 .home .tile-head h3 { font-size: 19px; line-height: 1.2; letter-spacing: -.02em; margin: 0; }
@@ -40,6 +41,7 @@ export const HOME_CSS = `
 .home .home-feature-icon { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 40px; height: 40px; border-radius: 11px;
   background: var(--info-tint); color: var(--info); }
 .home .home-feature-icon svg { width: 22px; height: 22px; }
+.home .home-note { margin: 20px auto 0; max-width: 640px; text-align: center; color: var(--muted); font-size: 14px; }
 
 /* Try asking: the requests as sent messages */
 .home .home-bubbles { list-style: none; padding: 0; margin: 0 auto; max-width: 900px; display: flex; flex-direction: column; align-items: flex-start; gap: 10px; }
@@ -95,6 +97,7 @@ export const HOME_CSS = `
   .home .home-hero h1 { font-size: 48px; }
   .home .home-hero .lead { font-size: 21px; }
   .home .home-services { grid-template-columns: repeat(2, 1fr); gap: 20px; }
+  .home .home-services .tile:last-child { grid-column: 1 / -1; }
   .home .home-services .tile { padding: 24px 26px 26px; }
   .home .home-services .tile-head h3 { font-size: 21px; }
   .home .home-bubbles { flex-direction: row; flex-wrap: wrap; justify-content: center; gap: 12px; }
@@ -108,7 +111,8 @@ export const HOME_CSS = `
 @media (min-width: 900px) {
   .home .home-hero { padding-top: 36px; }
   .home .home-hero h1 { font-size: 56px; max-width: 760px; }
-  .home .home-features, .home .home-steps { grid-template-columns: repeat(3, 1fr); }
+  .home .home-features, .home .home-steps, .home .home-services { grid-template-columns: repeat(3, 1fr); }
+  .home .home-services .tile:last-child { grid-column: auto; }
   .home .home-steps li { padding: 64px 22px 22px; }
   .home .home-steps li::before { top: 20px; left: 22px; }
   .home .home-checks li { flex-basis: calc((100% - 64px) / 3); }

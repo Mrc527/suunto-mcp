@@ -1,18 +1,19 @@
 # Run the multi-user web service with automatic HTTPS (Let's Encrypt) through Caddy.
 #
 #   cd deploy
-#   cp .env.example .env    # set DOMAIN, ADMIN_EMAIL, ADMIN_PASSWORD
+#   cp .env.example .env    # set DOMAIN, ADMIN_EMAIL, ADMIN_PASSWORD and the Suunto app keys
 #   docker compose up -d
 #
 # Then open https://$DOMAIN, sign in as the administrator and add https://$DOMAIN/mcp
 # as a custom connector in Claude.
 #
 # The project name keeps this stack apart from other Compose stacks in a folder called "deploy"
-# (for example MCP for iCloud): their containers and volumes would otherwise share names.
-name: padi-mcp
+# (for example MCP for PADI or MCP for iCloud): their containers and volumes would otherwise
+# share names.
+name: suunto-mcp
 
 services:
-  padi-mcp:
+  suunto-mcp:
     build: ..
     restart: unless-stopped
     environment:
@@ -20,23 +21,29 @@ services:
       TRUST_PROXY: "1"
       ADMIN_EMAIL: ${ADMIN_EMAIL:-}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
-      # MASTER_KEY: optional; otherwise generated once into the data volume (back it up).
+      # Optional. If empty, a key is generated once in the data volume (back it up).
+      MASTER_KEY: ${MASTER_KEY:-}
+      # The keys of your app in the Suunto API Zone. Without them the service starts, demo
+      # accounts work, and real accounts cannot connect Suunto yet.
+      SUUNTO_CLIENT_ID: ${SUUNTO_CLIENT_ID:-}
+      SUUNTO_CLIENT_SECRET: ${SUUNTO_CLIENT_SECRET:-}
+      SUUNTO_SUBSCRIPTION_KEY: ${SUUNTO_SUBSCRIPTION_KEY:-}
+      # Optional. Default: https://DOMAIN/suunto/callback (register it in the API Zone).
+      SUUNTO_REDIRECT_URI: ${SUUNTO_REDIRECT_URI:-}
       # Optional: e-mails to administrators about access requests (your own SMTP server).
       SMTP_URL: ${SMTP_URL:-}
       NOTIFY_FROM: ${NOTIFY_FROM:-}
-      # Optional: PADI logbook API for every user: proxy (default), direct or auto.
-      PADI_API_MODE: ${PADI_API_MODE:-}
     volumes:
       - data:/data
 
   caddy:
     image: caddy:2
     restart: unless-stopped
-    depends_on: [padi-mcp]
+    depends_on: [suunto-mcp]
     ports:
       - "80:80"
       - "443:443"
-    command: caddy reverse-proxy --from ${DOMAIN} --to padi-mcp:3000
+    command: caddy reverse-proxy --from ${DOMAIN} --to suunto-mcp:3000
     volumes:
       - caddy-data:/data
 

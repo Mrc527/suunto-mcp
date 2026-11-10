@@ -1,5 +1,5 @@
 /**
- * The start page: what MCP for PADI is, for people who are not signed in yet.
+ * The start page: what MCP for Suunto is, for people who are not signed in yet.
  * Signed-in people go straight to their account page.
  */
 
@@ -11,9 +11,6 @@ import { brandMark, glyph, serviceIcon, type Service } from "./icons.js";
 import { introVideo } from "./media.js";
 import { signupAllowedFor } from "./routes-auth.js";
 import { locals } from "./session.js";
-
-/** Where people with a Google, Apple or Facebook sign-in set a PADI password. */
-const PADI_ACCOUNT_URL = "https://account.padi.com";
 
 /** Glyphs used only here, drawn like the ones in icons.ts (24 px grid, currentColor). */
 const HOME_GLYPHS = {
@@ -111,24 +108,26 @@ function featuresSection(): SafeHtml {
       <p>${t("home.features.lead")}</p>
     </div>
     <div class="tiles home-services">
-      ${tile("logbook", "home.logbook.name", "home.logbook.text")}
-      ${tile("cards", "home.cards.name", "home.cards.text")}
+      ${tile("workouts", "home.workouts.name", "home.workouts.text")}
+      ${tile("health", "home.health.name", "home.health.text")}
+      ${tile("routes", "home.routes.name", "home.routes.text")}
     </div>
     <ul class="home-features" role="list">
       ${feature(homeGlyph("stats"), "home.stats.title", "home.stats.text")}
       ${feature(homeGlyph("apps"), "home.anyApp.title", "home.anyApp.text")}
       ${feature(homeGlyph("shield"), "home.control.title", "home.control.text")}
     </ul>
+    <p class="home-note">${t("home.features.note")}</p>
   </section>`;
 }
 
 const EXAMPLES: MessageKey[] = [
-  "home.examples.countYear",
-  "home.examples.logDive",
-  "home.examples.deepest",
-  "home.examples.yearReview",
-  "home.examples.certifications",
-  "home.examples.buddy",
+  "home.examples.month",
+  "home.examples.sleep",
+  "home.examples.longest",
+  "home.examples.steps",
+  "home.examples.route",
+  "home.examples.poi",
 ];
 
 function examplesSection(): SafeHtml {
@@ -163,7 +162,7 @@ function howSection(mode: Mode, mcpUrl: string): SafeHtml {
     </div>
     <ol class="home-steps" role="list">
       <li><h3>${t(step1Title[mode])}</h3><p>${t(step1Text[mode])}</p></li>
-      <li><h3>${t("home.how.step2.title")}</h3><p>${th("home.how.step2.text", { url: PADI_ACCOUNT_URL })}</p></li>
+      <li><h3>${t("home.how.step2.title")}</h3><p>${t("home.how.step2.connect")}</p></li>
       <li><h3>${t("home.how.step3.title")}</h3><p>${t("home.how.step3.text")}</p></li>
     </ol>
     <div class="home-address">
@@ -203,9 +202,12 @@ function faqSection(): SafeHtml {
     </div>
     <div class="card">
       ${qa("home.faq.official.q", t("home.faq.official.a"))}
-      ${qa("home.faq.password.q", th("home.faq.password.a", { url: PADI_ACCOUNT_URL }))}
+      ${qa("home.faq.sync.q", t("home.faq.sync.a"))}
+      ${qa("home.faq.watches.q", t("home.faq.watches.a"))}
+      ${qa("home.faq.suuntoPassword.q", t("home.faq.suuntoPassword.a"))}
       ${qa("home.faq.changes.q", t("home.faq.changes.a"))}
-      ${qa("home.faq.readOnly.q", t("home.faq.readOnly.a"))}
+      ${qa("home.faq.medical.q", t("home.faq.medical.a"))}
+      ${qa("home.faq.data.q", th("home.faq.data.a"))}
       ${qa("home.faq.apps.q", t("home.faq.apps.a"))}
       ${qa("home.faq.operator.q", t("home.faq.operator.a"))}
     </div>

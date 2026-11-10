@@ -10,17 +10,17 @@ import { html, type SafeHtml } from "./html.js";
 import { t, th, type MessageKey } from "./i18n/index.js";
 
 export interface ConnectInfo {
-  /** The MCP address, e.g. https://padi.example.com/mcp */
+  /** The MCP address, e.g. https://suunto.example.com/mcp */
   mcpUrl: string;
   /** The signed-in user's e-mail (they sign in with it during the app's sign-in). */
   email: string;
 }
 
 /** Name of this server in commands and configuration files (a key: no spaces). */
-const NAME = "padi";
+const NAME = "suunto";
 
 /** Name people see in apps that show a display name (the product name, the same in every language). */
-const DISPLAY_NAME = "MCP for PADI";
+const DISPLAY_NAME = "MCP for Suunto";
 
 type Group = "chat" | "code" | "desktop" | "other";
 
@@ -263,7 +263,7 @@ function apps(info: ConnectInfo): App[] {
       links: [
         {
           label: addTo("Goose"),
-          href: `goose://extension?url=${enc(url)}&type=streamable_http&id=${NAME}&name=${enc(DISPLAY_NAME)}&description=${enc("PADI dive logbook")}&timeout=300`,
+          href: `goose://extension?url=${enc(url)}&type=streamable_http&id=${NAME}&name=${enc(DISPLAY_NAME)}&description=${enc("Suunto workouts, sleep, recovery and routes")}&timeout=300`,
         },
       ],
       steps: [step("connect.goose.step1", { button: addTo("Goose") }), step("connect.goose.step2", { command: "goose configure" })],

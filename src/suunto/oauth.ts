@@ -178,6 +178,9 @@ function oauthDescription(json: Record<string, unknown> | undefined): string {
   return parts.join(" ");
 }
 
+/** OAuth error codes that mean "this request is wrong", not "the code or refresh token is dead". */
+const NOT_GRANT_ERRORS: ReadonlySet<string> = new Set(["invalid_request", "unsupported_grant_type", "invalid_scope", "unsupported_response_type"]);
+
 /** Map an error answer of the token endpoint. Suunto's text is read, never shown. */
 function tokenError(answer: TokenAnswer, flow: "code" | "refresh"): SuuntoAuthError {
   const { status, json } = answer;
@@ -193,6 +196,10 @@ function tokenError(answer: TokenAnswer, flow: "code" | "refresh"): SuuntoAuthEr
   }
   if (error === "invalid_grant" || error === "invalid_token") return new SuuntoAuthError("invalid_grant", refused, { status });
   if (error === "access_denied" || status === 403) return new SuuntoAuthError("denied", AUTH_MESSAGES.denied, { status });
+  if (error === "server_error" || error === "temporarily_unavailable") return new SuuntoAuthError("network", AUTH_MESSAGES.busy, { status });
+  // A named protocol error (invalid_request, unsupported_grant_type, ...) is about the request, not
+  // about the user's grant: connecting again would not help, so the connection is not ended.
+  if (NOT_GRANT_ERRORS.has(error)) return new SuuntoAuthError("unknown", `The Suunto sign-in failed (HTTP ${status}). Try again later.`, { status });
   // Any other 400 or 401 means Suunto refused the code or the refresh token.
   if (status === 400 || status === 401) return new SuuntoAuthError("invalid_grant", refused, { status });
   if (status === 429 || status >= 500) return new SuuntoAuthError("network", AUTH_MESSAGES.busy, { status });

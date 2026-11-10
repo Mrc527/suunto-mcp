@@ -2,7 +2,7 @@
  * English texts: connect ("Connect your AI app" card on the account page). Keys start with "connect.".
  *
  * Keep app names, commands, file names, URLs and the server's names as they are: the product name
- * "MCP for PADI" (the name people see in their app) and "padi" (in commands). Most of them
+ * "MCP for Suunto" (the name people see in their app) and "suunto" (in commands). Most of them
  * are placeholders ({app}, {command}, {file}, {name}, {key}, {snippet}, {url}). The names of buttons
  * and menus inside the other apps are shown in <strong>; translate them only where the app itself is
  * translated. {button} is the label of our own button ("connect.link.*"), so the step and the button
@@ -13,7 +13,7 @@ export default {
   // The card
   "connect.title": "Connect your AI app",
   "connect.intro":
-    "MCP for PADI works with any AI app that supports MCP servers: Claude, ChatGPT, Gemini, Codex, Cursor, VS Code and many more. Everyone uses the same address and signs in with their own account here. Pick your app for the steps.",
+    "MCP for Suunto works with any AI app that supports MCP servers: Claude, ChatGPT, Gemini, Codex, Cursor, VS Code and many more. Everyone uses the same address and signs in with their own account here. Pick your app for the steps.",
 
   // Group titles
   "connect.group.chat": "Chat assistants",
@@ -39,7 +39,7 @@ export default {
   "connect.claude.step2": "Keep the defaults (\"Use Claude's published identity\") and click <strong>Add</strong>, then <strong>Connect</strong>.",
   // Step 3 is the shared sentence "connect.signIn".
   "connect.claude.step4":
-    "In a chat, turn on MCP for PADI with <strong>+ &gt; Connectors</strong>. It works on the web, on the desktop and on the phone (add it on the web or desktop first).",
+    "In a chat, turn on MCP for Suunto with <strong>+ &gt; Connectors</strong>. It works on the web, on the desktop and on the phone (add it on the web or desktop first).",
   "connect.claude.note":
     "Free plans can add one custom connector. On Team and Enterprise plans an owner adds it once under <a href=\"{url}\" target=\"_blank\" rel=\"noopener noreferrer\">Organization settings &gt; Connectors</a>, then each member clicks Connect and signs in with their own account.",
 
@@ -48,11 +48,11 @@ export default {
   "connect.chatgpt.link": "Open ChatGPT plugins",
   "connect.chatgpt.step1": "On chatgpt.com open <strong>Plugins</strong>, click <strong>+</strong> and choose <strong>Add custom MCP server</strong>.",
   "connect.chatgpt.step2":
-    "Name it \"MCP for PADI\", paste the address above as <strong>Server URL</strong> and pick <strong>OAuth</strong> for authentication. Confirm the warning and create it.",
-  "connect.chatgpt.step3": "Open your plugins and add MCP for PADI. {signIn}",
-  "connect.chatgpt.step4": "In a chat, type <strong>@</strong> and pick MCP for PADI.",
+    "Name it \"MCP for Suunto\", paste the address above as <strong>Server URL</strong> and pick <strong>OAuth</strong> for authentication. Confirm the warning and create it.",
+  "connect.chatgpt.step3": "Open your plugins and add MCP for Suunto. {signIn}",
+  "connect.chatgpt.step4": "In a chat, type <strong>@</strong> and pick MCP for Suunto.",
   "connect.chatgpt.note":
-    "Custom MCP servers depend on your ChatGPT plan and workspace settings. On some personal plans ChatGPT only allows reading, so logging or changing dives may be blocked there.",
+    "Custom MCP servers depend on your ChatGPT plan and workspace settings. On some personal plans ChatGPT only allows reading, so adding routes or points of interest may be blocked there.",
 
   // Gemini
   "connect.gemini.hint": "gemini.google.com (personal Google accounts in the US)",
@@ -71,12 +71,12 @@ export default {
   "connect.perplexity.step1":
     "Open <strong>Plugins</strong> (or <strong>Settings &gt; Connectors</strong>), <strong>Add custom &gt; Add MCP connector &gt; Remote</strong>.",
   "connect.perplexity.step2":
-    "Name \"MCP for PADI\", paste the address. Under <strong>Advanced</strong> choose <strong>OAuth</strong> and <strong>Streamable HTTP</strong>. Save, turn it on and sign in. {signIn}",
+    "Name \"MCP for Suunto\", paste the address. Under <strong>Advanced</strong> choose <strong>OAuth</strong> and <strong>Streamable HTTP</strong>. Save, turn it on and sign in. {signIn}",
 
   // Claude Code
   "connect.claudeCode.hint": "terminal, VS Code and JetBrains",
   "connect.claudeCode.step1": "Run the two commands (or type <code>{command}</code> in Claude Code). A browser opens. {signIn}",
-  "connect.claudeCode.note": "Already added MCP for PADI on claude.ai? Claude Code signed in with the same Claude account lists it by itself.",
+  "connect.claudeCode.note": "Already added MCP for Suunto on claude.ai? Claude Code signed in with the same Claude account lists it by itself.",
 
   // Codex
   "connect.codex.hint": "OpenAI's coding agent: terminal, IDE extension, ChatGPT desktop app",
@@ -87,7 +87,7 @@ export default {
   // Cursor
   "connect.cursor.hint": "the editor and its agent command",
   "connect.cursor.step1": "Click <strong>{button}</strong> and confirm <strong>Install</strong> in Cursor.",
-  "connect.cursor.step2": "Cursor asks you to sign in the first time it uses MCP for PADI (in the terminal: <code>{command}</code>). {signIn}",
+  "connect.cursor.step2": "Cursor asks you to sign in the first time it uses MCP for Suunto (in the terminal: <code>{command}</code>). {signIn}",
 
   // VS Code
   "connect.vscode.hint": "GitHub Copilot in agent mode",
@@ -107,7 +107,7 @@ export default {
 
   // Gemini CLI
   "connect.geminiCli.hint": "Google's command-line agent",
-  "connect.geminiCli.step1": "Run the command. The first time Gemini CLI uses MCP for PADI it opens a browser. {signIn}",
+  "connect.geminiCli.step1": "Run the command. The first time Gemini CLI uses MCP for Suunto it opens a browser. {signIn}",
 
   // Windsurf (Devin Desktop)
   "connect.windsurf.hint": "Devin Local, Devin CLI and the legacy Cascade",
@@ -149,7 +149,7 @@ export default {
   // Raycast
   "connect.raycast.hint": "Mac, Windows and iPhone, Raycast Pro",
   "connect.raycast.step1":
-    "Run <strong>Install MCP Server</strong>. Name \"MCP for PADI\", Transport <strong>HTTP</strong>, paste the address, OAuth type <strong>Dynamic</strong>, then <strong>Install</strong>.",
+    "Run <strong>Install MCP Server</strong>. Name \"MCP for Suunto\", Transport <strong>HTTP</strong>, paste the address, OAuth type <strong>Dynamic</strong>, then <strong>Install</strong>.",
   "connect.raycast.step2": "Click <strong>Sign In</strong>. {signIn}",
 
   // LM Studio
@@ -173,14 +173,14 @@ export default {
   // Msty Studio
   "connect.msty.hint": "desktop app",
   "connect.msty.step1":
-    "<strong>Toolbox &gt; Tools &gt; Add New Tool</strong>, name \"MCP for PADI\", choose <strong>HTTP</strong>, paste the address and pick <strong>OAuth</strong>.",
+    "<strong>Toolbox &gt; Tools &gt; Add New Tool</strong>, name \"MCP for Suunto\", choose <strong>HTTP</strong>, paste the address and pick <strong>OAuth</strong>.",
   "connect.msty.step2": "Click <strong>Test tool</strong>, sign in, then <strong>Save</strong>. {signIn}",
 
   // Open WebUI
   "connect.openWebui.hint": "self-hosted, version 0.6.31 or later, added by an administrator",
   "connect.openWebui.step1":
     "Administrator: <strong>Settings &gt; Admin &gt; Integrations &gt; External Tool Servers &gt; Add Connection</strong>, type <strong>MCP (Streamable HTTP)</strong>, paste the address, auth <strong>OAuth 2.1</strong>, click <strong>Register Client</strong> and save.",
-  "connect.openWebui.step2": "Each person: in a chat, <strong>+ &gt; Integrations &gt; Tools</strong>, turn on MCP for PADI and sign in. {signIn}",
+  "connect.openWebui.step2": "Each person: in a chat, <strong>+ &gt; Integrations &gt; Tools</strong>, turn on MCP for Suunto and sign in. {signIn}",
 
   // LibreChat
   "connect.librechat.hint": "self-hosted",
