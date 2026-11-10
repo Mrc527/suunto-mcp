@@ -131,8 +131,10 @@ Files of the PADI template that are dropped: `src/padi/**`, `src/logbook/**`,
   errors, also while the answer is read. Never 500 (Suunto answers a malformed or unknown workout
   key with 500, and every try counts against the call limit). `Retry-After` is honoured up to
   30 s; a longer one, or a 429 without `Retry-After`, ends the tries at once. A read that timed
-  out reached Suunto: it is tried again at most once, and the FIT export never
-  (`retryOnTimeout: false`). A connection that never opened may be tried again for any request.
+  out reached Suunto: it is tried again at most once. The FIT export is sent once (`tries: 1`),
+  also when its download breaks, and reads at most 8 MB (`maxBytes`; a larger content-length is
+  refused before the body is read). A connection that never opened may be tried again for any
+  request.
 - **Timeouts** 20 s per request (FIT export 60 s).
 - **Rate limits.** The Developer API allows 10 calls per minute and at most 200 calls per week
   per subscription; Production limits are higher but not published, and Suunto forbids polling.
@@ -141,7 +143,11 @@ Files of the PADI template that are dropped: `src/padi/**`, `src/logbook/**`,
   with at most 200 entries and 20 MB): workout lists 2 minutes, a workout by key and FIT files
   30 minutes, 247 data and daily statistics 30 minutes for windows that end before the current
   hour and 2 minutes otherwise, routes and POIs 2 minutes; a successful route import or POI create
-  clears the route or POI entries. The demo is not cached. (2) No call to Suunto when a web page
+  clears the route or POI entries. The last 247 window of a range that reaches the present is
+  marked `endsNow` by the service and kept under its start alone. Entries are dropped when they
+  expire (a timer, and a pass on every store). A "too large" refusal is kept like an answer. The
+  web pool gives all caches one `CacheBudget` (128 MB): over it, the least recently used entry of
+  any user goes. The demo is not cached. (2) No call to Suunto when a web page
   is only shown (the account page shows what was saved at connect time). (3) The gateway answers
   429 (minute limit, `Retry-After`), 403 with a text such as "Out of call volume quota" (weekly
   quota), and possibly 401 with "RateLimitExceeded": all three are rate limit errors ("Suunto's
@@ -152,23 +158,43 @@ Files of the PADI template that are dropped: `src/padi/**`, `src/logbook/**`,
   - `SUUNTO_CALLS_PER_MINUTE` (default 10, Suunto's Developer limit; 0 = off): a sliding window
     of 60 s for the whole process. A request without a free slot waits for one, up to 45 s; a
     longer wait fails at once with a `rate_limit` error ("Suunto's call limit for this service is
-    reached. Try again in <time>.").
+    reached. Try again in <time>."). Every tool call runs in `withWaitBudget(45 s)`: its requests
+    wait at most 45 s together. The connect-time check gets half its cutoff, so it never books a
+    slot it cannot use.
   - `SUUNTO_CALLS_PER_USER_PER_DAY` (0 = off): at most this many requests per user id and UTC day
     ("You reached this service's daily limit of <n> Suunto requests for your account. Try again
-    tomorrow."). Default 100 in the web service (`WEB_DEFAULT_LIMITS`), so one account cannot use
-    up the shared weekly quota; default 0 in single-user mode, where the whole process is one key.
-  - `callLimitsFromEnv` (src/config.ts) reads both; an empty value means the default, a value that
-    is not a whole number of 0 or more is a ConfigError at startup. The deploy compose files pass
-    both as `${VAR:-}`. The admin page's Suunto API card shows the limits in use. The test request
-    of "Connect Suunto" counts too. Raise both after Suunto accepts the Production subscription.
+    tomorrow."). Default 100 in the web service (`WEB_DEFAULT_LIMITS`); default 0 in single-user
+    mode, where the whole process is one key. It cannot protect the weekly quota alone (it starts
+    again at midnight UTC).
+  - `SUUNTO_CALLS_PER_USER_PER_WEEK` (0 = off): at most this many requests per user id in any 7
+    days ("You reached this service's limit of <n> Suunto requests per week for your account. Try
+    again in <time>."). Default 100 in the web service, half of the Developer API's weekly 200, so
+    one account cannot use up the shared weekly quota; default 0 in single-user mode.
+  - `block(ms)`: when Suunto answers with its call limit (429, 403 quota, 401 RateLimitExceeded),
+    SuuntoHttp blocks the limiter for the wait Suunto names (60 s when it names none): every
+    request of the process fails at once, unsent. Errors of the limiter carry `waitMs`.
+  - The counts per user and the block live in a `CallUsageStore`: in memory in single-user mode;
+    in the web service in the database (table `suunto_calls`, rows deleted after 8 days; settings
+    key `suunto_blocked_until`), so a restart does not reset them.
+  - `callLimitsFromEnv` (src/config.ts) reads all three; an empty value means the default, a value
+    that is not a whole number of 0 or more is a ConfigError at startup. The deploy compose files
+    pass them as `${VAR:-}`. The admin page's Suunto API card shows the limits in use. The test
+    request of "Connect Suunto" counts too. Raise them after Suunto accepts the Production
+    subscription.
 - **Workout keys** are checked (24 hex characters, `WORKOUT_KEY` in src/activity/service.ts)
   before any request: Suunto answers any other key with HTTP 500.
 - **Workout lists** do not trust the order of Suunto's list (it is not documented). The service
   walks the range backward from its end in time windows (the first 60 days, the next sized from the
-  count of the last), asks each window with `filter-by-modification-time=false` and limit 100,
-  keeps only whole windows and sorts newest first itself. It stops when the list page (plus one)
-  is known, at the cap (1000 for lists, 2000 for statistics) or after 40 requests; a window
-  stopped by a call limit is dropped and the answer says which part is missing.
+  count of the last to fill 1 to 3 whole pages: 80, 175 or 270 workouts, from the workouts still
+  needed; with a sport filter the match rate is (matched + 1) / (read + 2), and the first page of
+  a full window counts as a sample), asks each window with `filter-by-modification-time=false` and
+  limit 100, keeps only whole windows and sorts newest first itself. A full window that needs one
+  page more is split at a whole hour (the same call repeated a moment later sends the same
+  requests). It stops when the list page (plus one) is known, at the cap (1000 for lists, 2000 for
+  statistics) or after `maxScanRequests` requests (the per-minute limit, 10 by default; 40 without
+  one). A window stopped by a call limit is dropped and the answer says which part is missing. A
+  limit that clears within 2 minutes gives a partial answer with the limit's own message; a
+  daily or weekly limit is thrown as it is.
 - **One session per connection.** The web pool keeps one `SuuntoSession` and one cached backend
   per user and connection (user id + connectedAt) across rebuilds of the user's services
   (`CreateServicesOptions.reuse`), so there is never more than one refresh per user and the cache
@@ -260,8 +286,9 @@ a leading `~` is the home folder, because MCP apps do not expand it: `expandPath
 `SUUNTO_REDIRECT_URI` (only for `--login`; default `http://localhost:8723/callback`; it must be a
 loopback http URL and must be registered in the Suunto app settings), `SUUNTO_UNITS`
 (metric/imperial, default metric), `SUUNTO_READ_ONLY`, `SUUNTO_TIMEZONE` (default `TZ` when it is
-an IANA name, else the system's), `SUUNTO_CALLS_PER_MINUTE` (default 10) and
-`SUUNTO_CALLS_PER_USER_PER_DAY` (default 0 here) of section 4 (`AppConfig.callLimits`), plus the
+an IANA name, else the system's), `SUUNTO_CALLS_PER_MINUTE` (default 10),
+`SUUNTO_CALLS_PER_USER_PER_DAY` and `SUUNTO_CALLS_PER_USER_PER_WEEK` (default 0 here) of section 4
+(`AppConfig.callLimits`), plus the
 template's `MCP_HTTP_*` settings and the operator URL overrides of section 4.
 `AppConfig.secrets` holds the client secret, the subscription key, the refresh token and the HTTP
 token for redaction. An empty value means "not set" everywhere (Docker Compose passes unset
@@ -285,8 +312,9 @@ the token cache, prints the Suunto username and exits. It never opens a browser 
 
 - **Operator settings** (environment, never per user): `SUUNTO_CLIENT_ID`,
   `SUUNTO_CLIENT_SECRET` (`_FILE`), `SUUNTO_SUBSCRIPTION_KEY` (`_FILE`), optional
-  `SUUNTO_REDIRECT_URI` (default `<PUBLIC_URL>/suunto/callback`), `SUUNTO_CALLS_PER_MINUTE` and
-  `SUUNTO_CALLS_PER_USER_PER_DAY` (section 4; defaults 10 and 100 here), and the test-only URL
+  `SUUNTO_REDIRECT_URI` (default `<PUBLIC_URL>/suunto/callback`), `SUUNTO_CALLS_PER_MINUTE`,
+  `SUUNTO_CALLS_PER_USER_PER_DAY` and `SUUNTO_CALLS_PER_USER_PER_WEEK` (section 4; defaults 10,
+  100 and 100 here), and the test-only URL
   overrides. A configured `SUUNTO_REDIRECT_URI` must be on the origin of `PUBLIC_URL` (only there
   does the browser send the sign-in cookie), have the path of the callback route below
   `PUBLIC_URL`'s path, and be https (plain http only on a loopback host); anything else is a

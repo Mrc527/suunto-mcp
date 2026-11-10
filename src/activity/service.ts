@@ -11,6 +11,7 @@
 
 import { z } from "zod";
 import { activityIdFor, activityIdsFor, activityName, DEFAULT_POI_TYPE, POI_TYPES, poiTypeId, SPORT_EXAMPLES } from "../suunto/activities.js";
+import { MAX_FIT_BYTES } from "../suunto/api.js";
 import {
   addDays,
   DAY_MS,
@@ -84,6 +85,11 @@ export interface ServiceOptions {
   timeZone: string;
   /** The clock (epoch ms), for tests. */
   now?: () => number;
+  /**
+   * The most Suunto requests one workout list or statistics call sends (default SCAN_MAX_CALLS).
+   * createServices sets the per-minute call limit, so one tool call never waits a minute for it.
+   */
+  maxScanRequests?: number;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -105,13 +111,14 @@ export const STATS_CAP = 2000;
 export const WORKOUT_PAGE = 100;
 /** The first time window of a workout scan; later windows adapt to how many workouts the last one held. */
 export const SCAN_FIRST_WINDOW_MS = 60 * DAY_MS;
-/** The most Suunto requests of one workout scan. */
+/** The most Suunto requests of one workout scan (when no lower per-minute call limit applies). */
 export const SCAN_MAX_CALLS = 40;
 /** A full window this short is read with offsets instead of being split again (100 workouts in an hour cannot happen). */
 const SCAN_MIN_SPLIT_MS = HOUR_MS;
 /** The longest window the 247 endpoints accept (docs/suunto-api.md section 3.2). */
 export const WINDOW_MS = 28 * DAY_MS;
-export const MAX_FIT_BYTES = 8 * 1024 * 1024;
+/** The largest FIT file suunto_export_workout_fit sends (SuuntoApi reads no more). */
+export { MAX_FIT_BYTES };
 export const MAX_ROUTE_GPX_BYTES = 1024 * 1024;
 export const MAX_IMPORT_GPX_BYTES = 5 * 1024 * 1024;
 /** Altitudes of new points of interest, in metres. */
@@ -689,9 +696,26 @@ function append<T>(target: T[], items: readonly T[]): void {
   for (const item of items) target.push(item);
 }
 
-/** True for Suunto's call limit (the HTTP layer and the call limiter give it the kind "rate_limit"). */
-function isRateLimit(error: unknown): boolean {
-  return typeof error === "object" && error !== null && (error as { kind?: unknown }).kind === "rate_limit";
+/** The kind of a SuuntoHttpError ("rate_limit", "too_large", ...), or undefined for other errors. */
+function errorKind(error: unknown): string | undefined {
+  const kind = typeof error === "object" && error !== null ? (error as { kind?: unknown }).kind : undefined;
+  return typeof kind === "string" ? kind : undefined;
+}
+
+/** A call limit that clears within this time stops a workout scan with the windows read so far. */
+export const SCAN_SHORT_LIMIT_WAIT_MS = 2 * MINUTE_MS;
+
+/**
+ * True for a call limit that clears soon: the per-minute limit (the HTTP layer and the call
+ * limiter give it the kind "rate_limit" and the wait). A daily or weekly limit, or Suunto's
+ * weekly quota, is not: the caller gets that error as it is, so the AI app does not try again in
+ * a minute (and send requests that Suunto refuses again).
+ */
+function isShortRateLimit(error: unknown): error is Error {
+  if (errorKind(error) !== "rate_limit") return false;
+  const { waitMs, status } = error as { waitMs?: unknown; status?: unknown };
+  // Suunto's per-minute limit answers 429; without a wait, a 403 (the weekly quota) is long.
+  return typeof waitMs === "number" ? waitMs <= SCAN_SHORT_LIMIT_WAIT_MS : status === 429;
 }
 
 /** Why a workout scan stopped before it reached the start of the range. */
@@ -712,16 +736,17 @@ interface ScanResult {
   /** The start of the part of the range that was read completely; `since` when all of it was. */
   readFrom: number;
   stopped?: ScanStop;
+  /** For "rate_limit": the message of the call limit error (it says when to try again). */
+  limitMessage?: string;
 }
 
 /**
- * Windows are sized to hold about as many workouts as are still needed: at least 70, so that a
- * window usually fits in one request when a few are needed, and at most 290 (three requests;
- * just under a multiple of 100, since a window of n workouts takes floor(n / 100) + 1 requests)
- * when many are needed.
+ * The workouts a window is sized for, by the requests it may take (a window of n workouts takes
+ * floor(n / 100) + 1 requests): a little less than whole pages, since the count of the next window
+ * is only an estimate from the last one. At most 3 pages, so that a window that turns out larger
+ * than planned costs little.
  */
-const SCAN_TARGET_MIN = 70;
-const SCAN_TARGET_MAX = 290;
+const SCAN_TARGETS = [80, 175, 270] as const;
 
 /** The length of the next window from the length and the workout count of the last one (at most 8 times longer). */
 function nextSpan(windowMs: number, count: number, target: number): number {
@@ -820,13 +845,22 @@ export class ActivityService {
   /**
    * Calls a 247 endpoint for [fromMs, toMs) in windows shorter than 28 days, one after another,
    * never for the future. Each window ends 1 ms before the next starts: the docs do not say
-   * whether `to` is included, and the span stays below the 28-day limit.
+   * whether `to` is included, and the span stays below the 28-day limit. The last window of a
+   * range that reaches the present ends "now" (the time this call started), and says so
+   * (`endsNow`): the cache keeps it under its start alone, so the same call a moment later, or at
+   * the same time, is served from it.
    */
-  private async windowed<T>(fromMs: number, toMs: number, call: (from: number, to: number) => Promise<WireSample<T>[]>): Promise<WireSample<T>[]> {
-    const end = Math.min(toMs, this.now());
+  private async windowed<T>(
+    fromMs: number,
+    toMs: number,
+    call: (from: number, to: number, endsNow: boolean) => Promise<WireSample<T>[]>,
+  ): Promise<WireSample<T>[]> {
+    const now = this.now();
+    const end = Math.min(toMs, now);
     const out: WireSample<T>[] = [];
     for (let start = fromMs; start < end; start += WINDOW_MS) {
-      append(out, await call(start, Math.min(start + WINDOW_MS, end) - 1));
+      const stop = Math.min(start + WINDOW_MS, end);
+      append(out, await call(start, stop - 1, stop === now));
     }
     return out;
   }
@@ -867,46 +901,69 @@ export class ActivityService {
    * a window is complete, every workout not read yet is older than every workout read, so the walk
    * stops as soon as `want` matching workouts are known (a list page and one more), or after the
    * window that reaches `cap` workouts. The first window is 60 days (or the whole range when
-   * shorter), and each next one is sized from the count of the last, so a window usually needs
-   * one request, or a few when many workouts are needed. Pacing is done by the HTTP layer; when
-   * Suunto's call limit is reached after some windows were read, the scan returns those windows
-   * (`stopped` "rate_limit"). A window left unfinished is never used: its workouts may not be its
-   * newest.
+   * shorter), and each next one is sized from the count of the last to fill whole pages: one page
+   * when a few more workouts are needed, up to three when many are (also while a sport filter
+   * finds nothing: the match rate is estimated as (matched + 1) / (read + 2), so windows grow).
+   *
+   * One scan sends at most `maxScanRequests` requests (the per-minute call limit when there is
+   * one, so that a tool call never waits a minute for the limiter), and never plans a window that
+   * needs more requests than are left. When the call limit is reached after some windows were
+   * read, and it clears within two minutes, the scan returns those windows (`stopped`
+   * "rate_limit", with the limit's own message). A daily or weekly limit is thrown as it is. A
+   * window left unfinished is never used: its workouts may not be its newest.
    */
   private async scanWorkouts(since: number, until: number, opts: ScanOptions): Promise<ScanResult> {
     const found: WireWorkout[] = [];
     const seen = new Set<string>();
+    const maxCalls = this.maxScanRequests;
     let matched = 0;
     let calls = 0;
     let end = until;
     let span = Math.min(until - since, SCAN_FIRST_WINDOW_MS);
-    /** About how many workouts the scan still has to read (never much more than the cap allows). */
-    const target = (): number => {
-      const rate = found.length ? Math.max(matched / found.length, 0.05) : 1;
-      const needed = opts.want === undefined ? SCAN_TARGET_MAX : Math.ceil((opts.want - matched) / rate);
-      return Math.max(SCAN_TARGET_MIN, Math.min(SCAN_TARGET_MAX, needed, opts.cap - found.length));
+    /**
+     * About how many workouts the next window should hold, with `left` requests left. `sample`:
+     * the first page of a window that is not finished yet, which only helps to estimate the share
+     * of matching workouts.
+     */
+    const target = (left: number, sample: readonly WireWorkout[] = []): number => {
+      let needed = opts.cap - found.length;
+      if (opts.want !== undefined) {
+        // Laplace's estimate: while nothing matches, the rate falls as more workouts are read.
+        const hits = opts.match ? sample.filter(opts.match).length : sample.length;
+        const rate = (matched + hits + 1) / (found.length + sample.length + 2);
+        needed = Math.min(needed, Math.ceil((opts.want - matched) / rate));
+      }
+      const pages = Math.max(1, Math.min(SCAN_TARGETS.length, Math.ceil(needed / WORKOUT_PAGE), left));
+      return SCAN_TARGETS[pages - 1]!;
     };
     const page = async (start: number, stop: number, offset: number): Promise<WireWorkout[]> => {
       calls++;
       return (await this.backend.listWorkouts({ since: start, until: stop, limit: WORKOUT_PAGE, offset, byModificationTime: false })).payload ?? [];
     };
-    const result = (stopped?: ScanStop): ScanResult => ({ workouts: newestFirst(found), readFrom: end, ...(stopped ? { stopped } : {}) });
+    const result = (stopped?: ScanStop, limitMessage?: string): ScanResult => ({
+      workouts: newestFirst(found),
+      readFrom: end,
+      ...(stopped ? { stopped } : {}),
+      ...(limitMessage ? { limitMessage } : {}),
+    });
     try {
       while (end > since) {
-        if (calls >= SCAN_MAX_CALLS) return result("calls");
+        if (calls >= maxCalls) return result("calls");
         const start = Math.max(since, end - span);
         const first = await page(start, end, 0);
-        if (first.length >= WORKOUT_PAGE && target() <= WORKOUT_PAGE && end - start > SCAN_MIN_SPLIT_MS) {
-          // The next window still ends at `end`, but holds only the newest quarter of the past part
-          // (the range often ends at midnight, and no workout starts in the future).
-          const past = Math.min(end, this.now());
-          span = end - past + Math.max(SCAN_MIN_SPLIT_MS, Math.floor((past - start) / 4));
-          continue;
+        // A full window is split when about one page of workouts is still needed (its first page
+        // shows how many of them match); else it is read to its end.
+        if (first.length >= WORKOUT_PAGE && target(maxCalls - calls + 1, this.inRange(first, start, end)) <= WORKOUT_PAGE) {
+          const at = this.splitPoint(start, end);
+          if (at !== undefined) {
+            span = end - at;
+            continue;
+          }
         }
         const window: WireWorkout[] = [];
         append(window, first);
         for (let last = first, offset = WORKOUT_PAGE; last.length >= WORKOUT_PAGE; offset += WORKOUT_PAGE) {
-          if (calls >= SCAN_MAX_CALLS) return result("calls");
+          if (calls >= maxCalls) return result("calls");
           last = await page(start, end, offset);
           append(window, last);
         }
@@ -917,16 +974,36 @@ export class ActivityService {
           found.push(w);
           if (!opts.match || opts.match(w)) matched++;
         }
-        span = nextSpan(end - start, window.length, target());
+        span = nextSpan(end - start, window.length, target(maxCalls - calls));
         end = start;
         if (opts.want !== undefined && matched >= opts.want) break;
         if (found.length >= opts.cap && end > since) return result("cap");
       }
     } catch (error) {
-      if (end < until && isRateLimit(error)) return result("rate_limit");
+      if (end < until && isShortRateLimit(error)) return result("rate_limit", error.message);
       throw error;
     }
     return result();
+  }
+
+  /** The most Suunto requests of one workout scan. */
+  private get maxScanRequests(): number {
+    const n = this.opts.maxScanRequests;
+    return n !== undefined && Number.isFinite(n) && n >= 1 ? Math.floor(n) : SCAN_MAX_CALLS;
+  }
+
+  /**
+   * Where a full window [start, end) is split: its newest quarter of the past part (the range often
+   * ends at midnight, and no workout starts in the future) is asked next. The point is a whole
+   * hour, so the same call repeated while the list cache is valid sends the same requests (and is
+   * served from the cache). Undefined when the window is too short to split.
+   */
+  private splitPoint(start: number, end: number): number | undefined {
+    // The end of the current hour: no workout starts later.
+    const past = Math.min(end, (Math.floor(this.now() / HOUR_MS) + 1) * HOUR_MS);
+    const quarter = Math.max(SCAN_MIN_SPLIT_MS, Math.floor((past - start) / 4));
+    const at = Math.floor((past - quarter) / HOUR_MS) * HOUR_MS;
+    return at > start && at < end ? at : undefined;
   }
 
   /** Suunto filters on the start time already; this keeps a strange answer from leaking in. */
@@ -944,9 +1021,9 @@ export class ActivityService {
       case "cap":
         return `Only the newest ${scan.workouts.length} workouts of this range were read (back to ${from}), so older workouts are missing.`;
       case "calls":
-        return `This range needs too many Suunto requests, so only the workouts back to ${from} were read and older ones are missing.`;
+        return `Reading all of this range needs more than the ${this.maxScanRequests} Suunto requests one call may send, so only the workouts back to ${from} were read and older ones are missing.`;
       case "rate_limit":
-        return `Suunto's call limit was reached, so only the workouts back to ${from} were read and older ones are missing. Try again in a minute.`;
+        return `Only the workouts back to ${from} were read, and older ones are missing: ${scan.limitMessage ?? "Suunto's call limit for this service is reached."}`;
       default:
         return "";
     }
@@ -1043,7 +1120,7 @@ export class ActivityService {
       const from = oldest ? formatInZone(new Date(workoutTime(oldest)), tz) : formatInZone(new Date(scan.readFrom), tz);
       result.note = `More than ${STATS_CAP} workouts are in this range; only the newest ${counted.length} were counted (back to ${from}). Use a shorter range (from, to).`;
     } else if (scan.stopped) {
-      result.note = `${this.scanGap(scan)} Use a shorter range (from, to).`;
+      result.note = `${this.scanGap(scan)} So the numbers count only the workouts from ${formatInZone(new Date(scan.readFrom), tz)} to ${r.to}. For the older part, ask again with to set to ${formatInZone(new Date(scan.readFrom), tz)}.`;
     }
     return { ...result, units: U.unitLabels(units) };
   }
@@ -1051,13 +1128,20 @@ export class ActivityService {
   /** suunto_export_workout_fit: the FIT file (at most 8 MB). */
   async exportFit(args: ExportFitArgs): Promise<ExportFitResult> {
     const a = parse(schemas.exportFit, args);
-    const data = await this.backend.exportFit(a.workout_key);
-    if (!data.length) throw new UserFacingError(`Suunto sent an empty FIT file for workout ${a.workout_key}. Try again later, or export it in the Suunto App.`);
-    if (data.length > MAX_FIT_BYTES) {
-      throw new UserFacingError(
-        `The FIT file of workout ${a.workout_key} is ${mb(data.length)} MB, more than the 8 MB this tool can send. Export it in the Suunto App instead, or use suunto_get_workout with samples for the data.`,
+    const tooLarge = (size: string) =>
+      new UserFacingError(
+        `The FIT file of workout ${a.workout_key} is ${size}, more than the 8 MB this tool can send. Export it in the Suunto App instead, or use suunto_get_workout with samples for the data.`,
       );
+    let data: Buffer;
+    try {
+      data = await this.backend.exportFit(a.workout_key);
+    } catch (error) {
+      // SuuntoApi stops reading at 8 MB (from the content-length when Suunto sends one).
+      if (errorKind(error) === "too_large") throw tooLarge("larger than 8 MB");
+      throw error;
     }
+    if (!data.length) throw new UserFacingError(`Suunto sent an empty FIT file for workout ${a.workout_key}. Try again later, or export it in the Suunto App.`);
+    if (data.length > MAX_FIT_BYTES) throw tooLarge(`${mb(data.length)} MB`);
     return { workout_key: a.workout_key, bytes: data.length, file_name: `suunto-workout-${a.workout_key}.fit`, data };
   }
 
@@ -1124,7 +1208,7 @@ export class ActivityService {
     const tz = this.opts.timeZone;
     const r = this.range(a.from, a.to, SAMPLES_MAX_DAYS, SAMPLES_MAX_DAYS, "suunto_activity_samples");
     const resolution = this.resolutionFor(r, a.resolution, "suunto_activity_samples");
-    const samples = await this.windowed(r.fromMs, r.toMs, (f, t) => this.backend.activitySamples(f, t));
+    const samples = await this.windowed(r.fromMs, r.toMs, (f, t, endsNow) => this.backend.activitySamples(f, t, endsNow));
     const points = toSamplePoints(samples, { tz, units, resolution, fromMs: r.fromMs, toMs: r.toMs });
     return { from: r.from, to: r.to, time_zone: tz, resolution, count: points.length, points, units: U.unitLabels(units) };
   }
@@ -1139,7 +1223,7 @@ export class ActivityService {
     const r = this.range(a.from, a.to, SLEEP_MAX_DAYS, SLEEP_MAX_DAYS, "suunto_sleep");
     const eve = parseDateOnly(addDays(r.fromDate!, -1));
     const queryFrom = wallTimeToDate({ ...eve, hour: 18, minute: 0, second: 0 }, tz).getTime();
-    const raw = await this.windowed(queryFrom, r.toMs, (f, t) => this.backend.sleep(f, t));
+    const raw = await this.windowed(queryFrom, r.toMs, (f, t, endsNow) => this.backend.sleep(f, t, endsNow));
     const seen = new Set<string>();
     const entries: Array<{ night: SleepNight; startMs: number }> = [];
     for (const sample of raw) {
@@ -1185,7 +1269,7 @@ export class ActivityService {
     const r = this.range(a.from, a.to, RECOVERY_MAX_DAYS, RECOVERY_MAX_DAYS, "suunto_recovery");
     const resolution = a.resolution ?? "day";
     if (resolution === "raw") this.resolutionFor(r, "raw", "suunto_recovery");
-    const samples = await this.windowed(r.fromMs, r.toMs, (f, t) => this.backend.recovery(f, t));
+    const samples = await this.windowed(r.fromMs, r.toMs, (f, t, endsNow) => this.backend.recovery(f, t, endsNow));
     const points = toRecoveryPoints(samples, { tz, resolution, fromMs: r.fromMs, toMs: r.toMs });
     const result: RecoveryResult = { from: r.from, to: r.to, time_zone: tz, resolution, count: points.length, points };
     const balances = timedSamples(samples)

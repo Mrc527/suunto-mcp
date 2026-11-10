@@ -6,6 +6,7 @@ import { ActivityService } from "../../src/activity/service.js";
 import { registerActivityTools } from "../../src/activity/tools.js";
 import type { ActivityBackend, WireWorkout } from "../../src/activity/types.js";
 import type { AppConfig } from "../../src/config.js";
+import { CallLimiter } from "../../src/suunto/limiter.js";
 import type { ToolContext } from "../../src/tooling.js";
 
 // Invented test data only.
@@ -259,5 +260,25 @@ describe("activity tools", () => {
     const bad = await client.callTool({ name: "suunto_import_route", arguments: { gpx: "<kml/>" } });
     expect(bad.isError).toBe(true);
     expect(text(bad)).toMatch(/root element must be <gpx>/);
+  });
+
+  it("lets the Suunto requests of one tool call wait for the call limiter at most 45 s in all", async () => {
+    // One request a minute; each request alone could wait up to 100 s.
+    let clock = NOW;
+    const limiter = new CallLimiter({ perMinute: 1, maxWaitMs: 100_000, now: () => clock, sleep: async (ms) => void (clock += ms) });
+    const backend = fakeBackend();
+    let sent = 0;
+    backend.sleep = async () => {
+      await limiter.acquire("user-1");
+      sent++;
+      return [];
+    };
+    const { client } = await connect({ backend });
+    // 92 days are 4 windows: the second would wait 60 s, more than the call may wait.
+    const result = await client.callTool({ name: "suunto_sleep", arguments: { from: "2026-08-11", to: "2026-11-10" } });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toBe("Suunto's call limit for this service is reached. Try again in 60 seconds.");
+    expect(sent).toBe(1);
+    expect(clock).toBe(NOW);
   });
 });

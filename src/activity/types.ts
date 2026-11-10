@@ -269,10 +269,13 @@ export interface ActivityBackend {
   /** `extensions`: extension names for the `extensions` query parameter (may be empty). */
   getWorkout(key: string, extensions: readonly string[]): Promise<WireWorkout>;
   exportFit(key: string): Promise<Buffer>;
-  /** Times in epoch milliseconds; the window is at most 28 days. */
-  activitySamples(fromMs: number, toMs: number): Promise<WireSample<WireActivityEntry>[]>;
-  sleep(fromMs: number, toMs: number): Promise<WireSample<WireSleepEntry>[]>;
-  recovery(fromMs: number, toMs: number): Promise<WireSample<WireRecoveryEntry>[]>;
+  /**
+   * Times in epoch milliseconds; the window is at most 28 days. `endsNow`: the window ends at the
+   * present (the service asks up to the time the tool call started); only the cache uses it.
+   */
+  activitySamples(fromMs: number, toMs: number, endsNow?: boolean): Promise<WireSample<WireActivityEntry>[]>;
+  sleep(fromMs: number, toMs: number, endsNow?: boolean): Promise<WireSample<WireSleepEntry>[]>;
+  recovery(fromMs: number, toMs: number, endsNow?: boolean): Promise<WireSample<WireRecoveryEntry>[]>;
   /** `startdate`/`enddate`: "YYYY-MM-DDTHH:MM:SS" in UTC (no offset); at most 28 days. */
   dailyStatistics(startdate: string, enddate: string): Promise<WireDailyStatistic[]>;
   listRoutes(q: ListRoutesQuery): Promise<WireRoute[]>;

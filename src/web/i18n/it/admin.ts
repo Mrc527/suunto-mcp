@@ -59,7 +59,9 @@ export default {
   "admin.suunto.perMinuteOff": "Nessun limite al minuto",
   "admin.suunto.perUser": "{n} richieste per utente al giorno",
   "admin.suunto.perUserOff": "Nessun limite giornaliero per utente",
-  "admin.suunto.limitsHint": "Si impostano con SUUNTO_CALLS_PER_MINUTE e SUUNTO_CALLS_PER_USER_PER_DAY (0 significa nessun limite). Gli account demo non contano.",
+  "admin.suunto.perUserWeek": "{n} richieste per utente in 7 giorni",
+  "admin.suunto.perUserWeekOff": "Nessun limite settimanale per utente",
+  "admin.suunto.limitsHint": "Si impostano con SUUNTO_CALLS_PER_MINUTE, SUUNTO_CALLS_PER_USER_PER_DAY e SUUNTO_CALLS_PER_USER_PER_WEEK (0 significa nessun limite). Gli account demo non contano.",
   "admin.suunto.plan": "Un abbonamento Developer della Suunto API consente 10 chiamate al minuto e 200 chiamate a settimana per l'intero server: abbastanza per provarlo, non per molti utenti. Chiedi a Suunto l'accesso Production prima di invitare altre persone. Quando si raggiunge il limite, le app di IA ricevono un errore che indica quando riprovare.",
 
   // Settings

@@ -5,8 +5,8 @@ import { dirname } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Icon } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { CachedBackend } from "./activity/cache.js";
-import { ActivityService } from "./activity/service.js";
+import { CachedBackend, type CacheBudget } from "./activity/cache.js";
+import { ActivityService, SCAN_MAX_CALLS, type ServiceOptions } from "./activity/service.js";
 import { registerActivityTools } from "./activity/tools.js";
 import type { ActivityBackend, SuuntoAccount } from "./activity/types.js";
 import { describeConfig, inspectTokenCache, type AppConfig } from "./config.js";
@@ -52,6 +52,8 @@ export interface CreateServicesOptions {
   connectAgain?: string;
   /** Keep recent Suunto answers in memory (default true; DESIGN.md section 4, rate limits). */
   cache?: boolean;
+  /** A byte budget the cache shares with the caches of other users (the web pool passes one). */
+  cacheBudget?: CacheBudget;
   /** fetch for every Suunto request (tests pass a mock). */
   fetch?: typeof fetch;
   log?: (m: string) => void;
@@ -185,15 +187,22 @@ function logOnlySink(log: (m: string) => void): TokenSink {
   };
 }
 
-/** One limiter per process and limits (single-user mode); undefined when both limits are off. */
+/**
+ * One limiter per process and limits (single-user mode). It exists also without limits: after
+ * Suunto answered with its call limit, it stops the requests of this process until the wait ends.
+ */
 const processLimiters = new Map<string, CallLimiter>();
 
-function processLimiter(limits: CallLimits): CallLimiter | undefined {
-  if (limits.perMinute <= 0 && limits.perUserPerDay <= 0) return undefined;
-  const key = `${limits.perMinute}/${limits.perUserPerDay}`;
+function processLimiter(limits: CallLimits): CallLimiter {
+  const perWeek = limits.perUserPerWeek ?? 0;
+  const key = `${limits.perMinute}/${limits.perUserPerDay}/${perWeek}`;
   let limiter = processLimiters.get(key);
   if (!limiter) {
-    limiter = new CallLimiter({ perMinute: limits.perMinute, ...(limits.perUserPerDay > 0 ? { perKeyPerDay: limits.perUserPerDay } : {}) });
+    limiter = new CallLimiter({
+      perMinute: limits.perMinute,
+      ...(limits.perUserPerDay > 0 ? { perKeyPerDay: limits.perUserPerDay } : {}),
+      ...(perWeek > 0 ? { perKeyPerWeek: perWeek } : {}),
+    });
     processLimiters.set(key, limiter);
   }
   return limiter;
@@ -213,7 +222,7 @@ const LOCAL_LIMITER_KEY = "local";
  */
 export function createServices(config: AppConfig, opts: CreateServicesOptions = {}): Services {
   const log = opts.log ?? (() => {});
-  const serviceOpts = { readOnly: config.readOnly, units: config.units, timeZone: config.timeZone };
+  const serviceOpts: ServiceOptions = { readOnly: config.readOnly, units: config.units, timeZone: config.timeZone };
   if (opts.demo) {
     // The demo is never cached: it is in memory already, and its writes must show at once.
     const backend = new DemoActivityBackend(opts.demo);
@@ -222,7 +231,7 @@ export function createServices(config: AppConfig, opts: CreateServicesOptions = 
   if (opts.reuse) {
     // Same connection, new settings: one session (one refresh at a time) and one cache stay.
     const { session, backend } = opts.reuse;
-    return { backend, session, activity: new ActivityService(backend, serviceOpts), reused: true };
+    return { backend, session, activity: new ActivityService(backend, { ...serviceOpts, ...scanLimit(opts.limiter) }), reused: true };
   }
 
   const s = config.suunto;
@@ -260,8 +269,17 @@ export function createServices(config: AppConfig, opts: CreateServicesOptions = 
     ...(limiter ? { limiter } : {}),
     ...(limiter && limiterKey !== undefined ? { limiterKey } : {}),
   });
-  const backend: ActivityBackend = opts.cache === false ? api : new CachedBackend(api);
-  return { backend, session, activity: new ActivityService(backend, serviceOpts), reused: false };
+  const backend: ActivityBackend = opts.cache === false ? api : new CachedBackend(api, opts.cacheBudget ? { budget: opts.cacheBudget } : {});
+  return { backend, session, activity: new ActivityService(backend, { ...serviceOpts, ...scanLimit(limiter) }), reused: false };
+}
+
+/**
+ * A workout list or statistics call sends at most as many requests as the per-minute call limit
+ * allows, so it never waits a minute for the limiter (or runs past an AI app's 60 s timeout).
+ */
+function scanLimit(limiter: CallLimiter | undefined): Pick<ServiceOptions, "maxScanRequests"> {
+  const perMinute = limiter?.requestsPerMinute ?? 0;
+  return perMinute > 0 ? { maxScanRequests: Math.min(perMinute, SCAN_MAX_CALLS) } : {};
 }
 
 /** Close what createServices built. A reused backend stays open: its owner closes it. */

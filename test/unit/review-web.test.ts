@@ -275,7 +275,8 @@ describe("the outcome of Connect Suunto on a translated page", () => {
     mock.failNext("/oauth/token", 400, { error: "invalid_grant", error_description: "Invalid authorization code: echoed-code" });
     await check((await connectSuunto(italian)).res.headers.get("location"), "account.flash.connectFailed");
     await check((await italian.fetch("/suunto/callback?code=x&state=unknown")).headers.get("location"), "account.flash.stateExpired");
-    mock.failNext("/v3/workouts", 403, { statusCode: 403, message: "Out of call volume quota. Quota will be replenished in 2.00:00:00." });
+    // A refusal that is not Suunto's call limit (that one would stop every request for 2 days).
+    mock.failNext("/v3/workouts", 403, { statusCode: 403, message: "Forbidden for this subscription." });
     await check((await connectSuunto(italian)).res.headers.get("location"), "account.flash.checkFailed");
     await check((await connectSuunto(italian)).res.headers.get("location"), "account.flash.connected");
     expect(outcomes).toEqual(["/account?m=denied", "/account?m=connectfailed", "/account?m=stateexpired", "/account?m=checkfailed", "/account?m=connected"]);

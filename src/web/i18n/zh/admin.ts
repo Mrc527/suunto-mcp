@@ -53,7 +53,9 @@ export default {
   "admin.suunto.perMinuteOff": "不限制每分钟的请求数",
   "admin.suunto.perUser": "每个用户每天 {n} 次请求",
   "admin.suunto.perUserOff": "不限制每个用户每天的请求数",
-  "admin.suunto.limitsHint": "通过 SUUNTO_CALLS_PER_MINUTE 和 SUUNTO_CALLS_PER_USER_PER_DAY 设置（0 表示不限制）。演示账户不计入。",
+  "admin.suunto.perUserWeek": "每个用户每 7 天 {n} 次请求",
+  "admin.suunto.perUserWeekOff": "不限制每个用户每周的请求数",
+  "admin.suunto.limitsHint": "通过 SUUNTO_CALLS_PER_MINUTE、SUUNTO_CALLS_PER_USER_PER_DAY 和 SUUNTO_CALLS_PER_USER_PER_WEEK 设置（0 表示不限制）。演示账户不计入。",
   "admin.suunto.plan": "Suunto API 的 Developer 订阅允许整个服务器每分钟调用 10 次、每周调用 200 次：足够试用，但不够许多用户使用。在邀请他人之前，请向 Suunto 申请 Production 访问权限。达到限制时，AI 应用会收到一条错误，说明何时可以重试。",
 
   "admin.settings.title": "设置",

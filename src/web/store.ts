@@ -385,6 +385,7 @@ export class Store {
 
   deleteUser(id: string): void {
     this.db.prepare("DELETE FROM users WHERE id = ?").run(id);
+    this.db.prepare("DELETE FROM suunto_calls WHERE user_id = ?").run(id);
   }
 
   countAdmins(): number {
@@ -585,6 +586,33 @@ export class Store {
       .prepare("INSERT INTO settings (key, value) VALUES ('server', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
       .run(JSON.stringify(settings));
     this.settingsCache = undefined;
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Suunto call limits (the CallLimiter's counts, so a restart does not reset them)
+  // -------------------------------------------------------------------------------------------
+
+  /** The times of a user's Suunto requests at or after `sinceMs`, oldest first. */
+  suuntoCallTimes(userId: string, sinceMs: number): number[] {
+    const rows = this.db.prepare("SELECT at FROM suunto_calls WHERE user_id = ? AND at >= ? ORDER BY at").all(userId, sinceMs) as Row[];
+    return rows.map((r) => Number(r.at));
+  }
+
+  recordSuuntoCall(userId: string, at: number): void {
+    this.db.prepare("INSERT INTO suunto_calls (user_id, at) VALUES (?, ?)").run(userId, Math.round(at));
+  }
+
+  /** The end of the block after Suunto's own call limit answer, if one was saved. */
+  getSuuntoBlock(): number | undefined {
+    const r = this.db.prepare("SELECT value FROM settings WHERE key = 'suunto_blocked_until'").get() as Row | undefined;
+    const until = r ? Number(r.value) : Number.NaN;
+    return Number.isFinite(until) ? until : undefined;
+  }
+
+  saveSuuntoBlock(until: number): void {
+    this.db
+      .prepare("INSERT INTO settings (key, value) VALUES ('suunto_blocked_until', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+      .run(String(Math.round(until)));
   }
 
   // -------------------------------------------------------------------------------------------
@@ -877,6 +905,8 @@ export class Store {
     this.db.prepare("DELETE FROM suunto_oauth_states WHERE created_at <= ?").run(t - OAUTH_STATE_TTL_MS);
     this.db.prepare("DELETE FROM oauth_tokens WHERE expires_at < ?").run(t - 86_400_000);
     this.db.prepare("DELETE FROM activity WHERE at < ?").run(t - 90 * 86_400_000);
+    // The call limiter looks back 7 days at most.
+    this.db.prepare("DELETE FROM suunto_calls WHERE at < ?").run(t - 8 * 86_400_000);
     // Access requests nobody answered within 30 days.
     this.db.prepare("DELETE FROM users WHERE pending = 1 AND disabled = 1 AND created_at < ?").run(t - 30 * 86_400_000);
     // Claude registers a new client for every fresh connection. Registrations nobody approved are

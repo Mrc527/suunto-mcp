@@ -15,6 +15,7 @@ import { DEMO_NAME, DEMO_TIME_ZONE, DEMO_USERNAME } from "../demo/index.js";
 import { SuuntoApi } from "../suunto/api.js";
 import { formatWait, retryAfterMs } from "../suunto/http.js";
 import { authorizeUrl, callbackError, exchangeCode, type StoredSuuntoTokens, type TokenResult } from "../suunto/oauth.js";
+import { withWaitBudget } from "../suunto/limiter.js";
 import { SuuntoSession } from "../suunto/session.js";
 import { isValidTimeZone } from "../util/dates.js";
 import { describeError, redact, UserFacingError } from "../util/errors.js";
@@ -132,7 +133,11 @@ export async function testConnection(
       reject(stop.signal.reason);
     }, timeoutMs);
   });
-  const request = api.listWorkouts({ since: at - 30 * DAY_MS, until: at, limit: CHECK_LIMIT, offset: 0, byModificationTime: false });
+  // The request never waits for a slot of the call limiter past half the cutoff: a slot booked for
+  // a request that the cutoff then stops would count against the limits for nothing.
+  const request = withWaitBudget(Math.floor(timeoutMs / 2), () =>
+    api.listWorkouts({ since: at - 30 * DAY_MS, until: at, limit: CHECK_LIMIT, offset: 0, byModificationTime: false }),
+  );
   // Once the cutoff won, the request may still end (it sends nothing more): ignore its outcome.
   request.catch(() => undefined);
   let check: SuuntoConnectionCheck;

@@ -53,7 +53,9 @@ export default {
   "admin.suunto.perMinuteOff": "Kein Limit pro Minute",
   "admin.suunto.perUser": "{n} Anfragen pro Benutzer und Tag",
   "admin.suunto.perUserOff": "Kein Tageslimit pro Benutzer",
-  "admin.suunto.limitsHint": "Einstellen mit SUUNTO_CALLS_PER_MINUTE und SUUNTO_CALLS_PER_USER_PER_DAY (0 heißt kein Limit). Demo-Accounts zählen nicht.",
+  "admin.suunto.perUserWeek": "{n} Anfragen pro Benutzer in 7 Tagen",
+  "admin.suunto.perUserWeekOff": "Kein Wochenlimit pro Benutzer",
+  "admin.suunto.limitsHint": "Einstellen mit SUUNTO_CALLS_PER_MINUTE, SUUNTO_CALLS_PER_USER_PER_DAY und SUUNTO_CALLS_PER_USER_PER_WEEK (0 heißt kein Limit). Demo-Accounts zählen nicht.",
   "admin.suunto.plan": "Ein Developer-Abo der Suunto API erlaubt 10 Aufrufe pro Minute und 200 Aufrufe pro Woche für den ganzen Server: genug zum Ausprobieren, aber nicht für viele Benutzer. Bitte Suunto um Production-Zugang, bevor du Leute einlädst. Ist das Limit erreicht, bekommen KI-Apps eine Fehlermeldung, die sagt, wann sie es erneut versuchen können.",
 
   "admin.settings.title": "Einstellungen",

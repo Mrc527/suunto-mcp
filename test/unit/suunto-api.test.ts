@@ -459,6 +459,10 @@ describe("SuuntoApi errors and retries", () => {
     expect(t.kind).toBe("timeout");
     expect(t.message).toBe("Suunto stopped answering (the FIT file of the workout). Try again later.");
     expect(stalled.requests).toHaveLength(1);
+    // Nor when the FIT download breaks: each try would take up to 60 s and download it again.
+    const fit = api(() => brokenBody(200));
+    expect(((await failure(fit.api.exportFit(KEY))) as SuuntoHttpError).message).toBe("The connection to Suunto broke (the FIT file of the workout). Try again later.");
+    expect(fit.requests).toHaveLength(1);
     // A write is never sent again: its 2xx answer means it was saved.
     const input: WirePoiInput = { point: { x: 8.5, y: 47.3, name: "Spring", type: 75 }, watchEnabled: true };
     const write = api(() => brokenBody(200));
@@ -529,6 +533,61 @@ describe("SuuntoApi errors and retries", () => {
     const input: WirePoiInput = { point: { x: 8.5, y: 47.3, name: "Spring", type: 75 }, watchEnabled: true };
     expect(await failure(a.createPoi(input))).not.toBeInstanceOf(UnconfirmedWriteError);
     expect(requests).toHaveLength(1);
+  });
+
+  it("refuses a FIT file over 8 MB from its content-length, without downloading it", async () => {
+    let pulled = 0;
+    const big = () => {
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          pulled++;
+          controller.enqueue(new Uint8Array(1024 * 1024));
+        },
+      });
+      return new Response(body, { status: 200, headers: { "content-type": "application/octet-stream", "content-length": String(15 * 1024 * 1024) } });
+    };
+    const { api: a, requests } = api(big);
+    const e = (await failure(a.exportFit(KEY))) as SuuntoHttpError;
+    expect(e.kind).toBe("too_large");
+    expect(e.message).toBe("The answer from Suunto (the FIT file of the workout) is larger than 8 MB, more than this server reads.");
+    expect(requests).toHaveLength(1);
+    expect(pulled).toBeLessThanOrEqual(1);
+    // Without a content-length it stops after 8 MB.
+    const chunked = api(() => new Response(new Uint8Array(9 * 1024 * 1024), { status: 200 }));
+    expect(((await failure(chunked.api.exportFit(KEY))) as SuuntoHttpError).kind).toBe("too_large");
+    // 8 MB itself is read.
+    const ok = api(() => new Response(new Uint8Array(8 * 1024 * 1024), { status: 200 }));
+    expect((await ok.api.exportFit(KEY)).length).toBe(8 * 1024 * 1024);
+  });
+
+  it("stops every request of the process, for every user, until Suunto's call limit has passed", async () => {
+    let now = T0 + 1000;
+    const limiter = new CallLimiter({ perMinute: 10, now: () => now });
+    let quota = true;
+    const answer = () => (quota ? jsonResponse({ statusCode: 403, message: "Out of call volume quota. Quota will be replenished in 2.00:00:00." }, 403) : jsonResponse([]));
+    const first = api(answer, { limiter, limiterKey: "user-1" });
+    const e = (await failure(first.api.listPois({ limit: 1, offset: 0 }))) as SuuntoHttpError;
+    expect(e.message).toBe("Suunto's call limit for this service is reached (HTTP 403). Try again in 2 days.");
+    expect(e.waitMs).toBe(2 * DAY);
+    // Another user: refused at once, nothing is sent.
+    const other = api(answer, { limiter, limiterKey: "user-2" });
+    now += DAY;
+    const refused = (await failure(other.api.listPois({ limit: 1, offset: 0 }))) as SuuntoHttpError;
+    expect(refused.message).toBe("Suunto's call limit for this service is reached. Try again in 24 hours.");
+    expect(refused.sent).toBe(false);
+    expect(dataCalls(other.requests)).toHaveLength(0);
+    // When the wait is over, requests go out again.
+    now += DAY;
+    quota = false;
+    expect(await other.api.listPois({ limit: 1, offset: 0 })).toEqual([]);
+    expect(dataCalls(other.requests)).toHaveLength(1);
+    // A limit answer that names no wait stops requests for a minute.
+    const bare = api(() => new Response("", { status: 429 }), { limiter, limiterKey: "user-1" });
+    await failure(bare.api.listPois({ limit: 1, offset: 0 }));
+    now += 59_000;
+    expect(((await failure(other.api.listPois({ limit: 1, offset: 0 }))) as SuuntoHttpError).sent).toBe(false);
+    now += 1000;
+    expect(await other.api.listPois({ limit: 1, offset: 0 })).toEqual([]);
   });
 
   it("refuses an answer above the size limit", async () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CachedBackend } from "../../src/activity/cache.js";
+import { CachedBackend, SHORT_TTL_MS } from "../../src/activity/cache.js";
 import { ActivityService, checkGpx, ReadOnlyError, type ListWorkoutsResult, type ServiceOptions } from "../../src/activity/service.js";
 import type {
   ActivityBackend,
@@ -36,9 +36,9 @@ function hash(text: string): number {
   return h >>> 0;
 }
 
-/** An error like the HTTP layer's (and the call limiter's) when Suunto's call limit is reached. */
+/** An error like the call limiter's when the per-minute limit is reached (a short wait). */
 function rateLimitError(): Error {
-  return Object.assign(new UserFacingError("Suunto's call limit for this service is reached. Try again in 50 seconds."), { kind: "rate_limit" });
+  return Object.assign(new UserFacingError("Suunto's call limit for this service is reached. Try again in 50 seconds."), { kind: "rate_limit", waitMs: 50_000 });
 }
 
 /** An in-memory backend that records every call and checks the API's window rules. */
@@ -53,6 +53,8 @@ class FakeBackend implements ActivityBackend {
   order: "desc" | "asc" | "modified" | "shuffled" = "desc";
   /** After this many workout list requests, every further one fails with the call limit. */
   rateLimitAfter?: number;
+  /** The error of those requests (default: the per-minute limit). */
+  rateLimit: () => Error = rateLimitError;
   activity: WireSample<WireActivityEntry>[] = [];
   sleeps: WireSample<WireSleepEntry>[] = [];
   recoveries: WireSample<WireRecoveryEntry>[] = [];
@@ -76,7 +78,7 @@ class FakeBackend implements ActivityBackend {
 
   async listWorkouts(q: ListWorkoutsQuery): Promise<WireWorkoutList> {
     this.record("listWorkouts", q);
-    if (this.rateLimitAfter !== undefined && this.ops("listWorkouts").length > this.rateLimitAfter) throw rateLimitError();
+    if (this.rateLimitAfter !== undefined && this.ops("listWorkouts").length > this.rateLimitAfter) throw this.rateLimit();
     expect(q.limit).toBeGreaterThanOrEqual(1);
     expect(q.limit).toBeLessThanOrEqual(100);
     expect(q.byModificationTime).toBe(false);
@@ -319,14 +321,87 @@ describe("workout list", () => {
   it("keeps what was read when Suunto's call limit is reached in the middle, and says so", async () => {
     const b = new FakeBackend();
     b.workouts = Array.from({ length: 1500 }, (_, i) => workout(i, i * 2, i === 1499 ? 78 : 1));
-    b.rateLimitAfter = 4;
+    // The first window (60 days, 720 workouts) takes 8 requests; the next one is stopped.
+    b.rateLimitAfter = 9;
     const r = await service(b).listWorkouts({ from: "2026-01-01", sport: "dive" });
     expect(r.count).toBe(0);
-    expect(r.note).toMatch(/Suunto's call limit was reached, so only the workouts back to 2026-\S+ were read and older ones are missing\. Try again in a minute\./);
+    // The limiter's own message, with its own wait.
+    expect(r.note).toMatch(
+      /^Only the workouts back to 2026-\S+ were read, and older ones are missing: Suunto's call limit for this service is reached\. Try again in 50 seconds\. For older workouts, ask again with to set to 2026-\S+\.$/,
+    );
     // Nothing read yet: the error itself.
     const c = new FakeBackend();
     c.rateLimitAfter = 0;
     await expect(service(c).listWorkouts({})).rejects.toThrow(/call limit/);
+  });
+
+  it("passes a daily or weekly call limit on as an error, not as a partial answer that says to try again in a minute", async () => {
+    const long = [
+      // The server's daily limit per user, and Suunto's weekly quota (HTTP 403).
+      Object.assign(new UserFacingError("You reached this service's daily limit of 100 Suunto requests for your account. Try again tomorrow."), {
+        kind: "rate_limit",
+        waitMs: 15 * HOUR_MS,
+      }),
+      Object.assign(new UserFacingError("Suunto's call limit for this service is reached (HTTP 403). Try again in 3 days."), { kind: "rate_limit", status: 403, waitMs: 3 * DAY_MS }),
+      // Suunto's quota without a wait: not known to be short.
+      Object.assign(new UserFacingError("Suunto's call limit for this service is reached (HTTP 403). Try again later."), { kind: "rate_limit", status: 403 }),
+    ];
+    for (const error of long) {
+      const b = new FakeBackend();
+      b.workouts = Array.from({ length: 1500 }, (_, i) => workout(i, i * 6));
+      b.rateLimitAfter = 3;
+      b.rateLimit = () => error;
+      await expect(service(b).workoutStats({})).rejects.toBe(error);
+      await expect(service(b).listWorkouts({ from: "2026-01-01", sport: "dive" })).rejects.toBe(error);
+    }
+    // Suunto's per-minute limit (429) without a wait is short: the windows read so far are kept.
+    const b = new FakeBackend();
+    b.workouts = Array.from({ length: 1500 }, (_, i) => workout(i, i * 6));
+    b.rateLimitAfter = 3;
+    b.rateLimit = () => Object.assign(new UserFacingError("Suunto's call limit for this service is reached (HTTP 429). Try again later."), { kind: "rate_limit", status: 429 });
+    const r = await service(b).workoutStats({});
+    expect(r.count).toBeGreaterThan(0);
+    expect(r.note).toContain("Suunto's call limit for this service is reached (HTTP 429). Try again later.");
+  });
+
+  it("reads a long range with a sport that rarely or never matches in about one request per 100 workouts", async () => {
+    for (const perDay of [1, 2, 4]) {
+      for (const limit of [1, 3, 20]) {
+        // Newest first, no dives at all: the scan reads until the 1000 workout cap.
+        const b = new FakeBackend();
+        b.workouts = Array.from({ length: perDay * 7 * 365 }, (_, i) => workout(i, (i + 0.5) * (24 / perDay)));
+        const r = await service(b).listWorkouts({ from: "2020-01-01", sport: "Scuba diving", limit });
+        expect(r.count).toBe(0);
+        expect(r.note, `${perDay}/day, limit ${limit}`).toMatch(/^Only the newest 1\d{3} workouts/);
+        expect(b.ops("listWorkouts").length, `${perDay}/day, limit ${limit}`).toBeLessThanOrEqual(12);
+        // With the per-minute limit as the budget (10 requests), most of the 1000 are still read.
+        const c = new FakeBackend();
+        c.workouts = b.workouts;
+        const capped = await service(c, { maxScanRequests: 10 }).listWorkouts({ from: "2020-01-01", sport: "Scuba diving", limit });
+        expect(c.ops("listWorkouts").length).toBe(10);
+        const from = capped.note!.match(/back to (\S+) were read/)![1]!;
+        const read = b.workouts.filter((w) => w.startTime! >= Date.parse(from)).length;
+        expect(read, `${perDay}/day, limit ${limit}`).toBeGreaterThanOrEqual(800);
+        expect(capped.note).toMatch(/needs more than the 10 Suunto requests one call may send/);
+      }
+    }
+  });
+
+  it("sends the same requests when the same list is asked again a moment later, so the cache serves it", async () => {
+    // 4 workouts a day: the first window (30 days) is full and split at a whole hour.
+    for (const args of [{ limit: 5 }, { from: "2025-01-01", limit: 10 }]) {
+      let now = NOW;
+      const b = new FakeBackend();
+      b.workouts = Array.from({ length: 1600 }, (_, i) => workout(i, (i + 0.5) * 6));
+      const s = service(new CachedBackend(b, { now: () => now }), { now: () => now });
+      const first = await s.listWorkouts(args);
+      const sent = b.ops("listWorkouts").length;
+      expect(sent).toBeGreaterThan(1);
+      now += 1000;
+      const again = await s.listWorkouts(args);
+      expect(b.ops("listWorkouts").length).toBe(sent);
+      expect(keys(again)).toEqual(keys(first));
+    }
   });
 
   it("refuses unknown sports with examples, and bad ranges", async () => {
@@ -395,6 +470,11 @@ describe("one workout", () => {
     expect(ok).toMatchObject({ workout_key: KEY, bytes: 8, file_name: `suunto-workout-${KEY}.fit` });
     b.fit = Buffer.alloc(8 * 1024 * 1024 + 1);
     await expect(service(b).exportFit({ workout_key: KEY })).rejects.toThrow(/8\.0 MB, more than the 8 MB/);
+    // SuuntoApi stops reading at 8 MB ("too large"): the same message, without the exact size.
+    b.fail = Object.assign(new UserFacingError("The answer from Suunto (the FIT file of the workout) is larger than 8 MB, more than this server reads."), { kind: "too_large" });
+    await expect(service(b).exportFit({ workout_key: KEY })).rejects.toThrow(
+      `The FIT file of workout ${KEY} is larger than 8 MB, more than the 8 MB this tool can send. Export it in the Suunto App instead, or use suunto_get_workout with samples for the data.`,
+    );
   });
 });
 
@@ -512,7 +592,27 @@ describe("statistics", () => {
     expect(r.count).toBeGreaterThan(0);
     expect(r.count).toBeLessThan(1460);
     expect(r.last_date).toBe("2026-11-10");
-    expect(r.note).toMatch(/^Suunto's call limit was reached, so only the workouts back to 2026-\S+ were read and older ones are missing\. Try again in a minute\. Use a shorter range \(from, to\)\.$/);
+    expect(r.note).toMatch(
+      /^Only the workouts back to (2026-\S+) were read, and older ones are missing: Suunto's call limit for this service is reached\. Try again in 50 seconds\. So the numbers count only the workouts from \1 to 2026-11-10\. For the older part, ask again with to set to \1\.$/,
+    );
+  });
+
+  it("sends at most the per-minute call limit of requests, and says how far back it counted", async () => {
+    const b = new FakeBackend();
+    // 1500 workouts in the last year (about 4 a day).
+    b.workouts = Array.from({ length: 1500 }, (_, i) => workout(i, (i * 364 * 24) / 1500));
+    const r = await service(b, { maxScanRequests: 10 }).workoutStats({});
+    expect(b.ops("listWorkouts")).toHaveLength(10);
+    // About 85 workouts per request.
+    expect(r.count).toBeGreaterThanOrEqual(800);
+    expect(r.count).toBeLessThan(1500);
+    expect(r.note).toMatch(
+      /^Reading all of this range needs more than the 10 Suunto requests one call may send, so only the workouts back to (2026-\S+) were read and older ones are missing\. So the numbers count only the workouts from \1 to 2026-11-10\. For the older part, ask again with to set to \1\.$/,
+    );
+    // The older part, asked as the note says, is counted in another call.
+    const to = r.note!.match(/to set to (\S+)\.$/)![1]!;
+    const older = await service(b, { maxScanRequests: 10 }).workoutStats({ from: "2025-11-11", to });
+    expect(older.count + r.count).toBe(1500);
   });
 });
 
@@ -802,6 +902,33 @@ describe("long answers and the response cache", () => {
     const s = service(new CachedBackend(b, { now: clock }), { now: clock });
     await Promise.all([s.sleep({ from: "2026-11-04", to: "2026-11-10" }), s.sleep({ from: "2026-11-04", to: "2026-11-10" })]);
     expect(b.ops("sleep")).toHaveLength(1);
+  });
+
+  it("serves the window up to now from the cache also when the earlier windows of the call were slow", async () => {
+    // 92 days of sleep: 4 windows. Each request takes 2 s, so the last window is asked more than
+    // 5 s after the call fixed its end ("now").
+    let now = ms("2026-11-10T09:20:00Z");
+    const b = new FakeBackend();
+    const slow = new Proxy(b, {
+      get(target, prop, receiver) {
+        if (prop !== "sleep") return Reflect.get(target, prop, receiver);
+        return async (...args: [number, number]) => {
+          await new Promise((r) => setTimeout(r, 2));
+          now += 2000;
+          return target.sleep(...args);
+        };
+      },
+    });
+    const s = service(new CachedBackend(slow, { now: () => now }), { now: () => now });
+    await s.sleep({ from: "2026-08-11", to: "2026-11-10" });
+    expect(b.ops("sleep")).toHaveLength(4);
+    now += 10_000;
+    await s.sleep({ from: "2026-08-11", to: "2026-11-10" });
+    expect(b.ops("sleep")).toHaveLength(4);
+    // Two identical calls at the same time share every window, the last one too.
+    now += SHORT_TTL_MS;
+    await Promise.all([s.sleep({ from: "2026-08-11", to: "2026-11-10" }), s.sleep({ from: "2026-08-11", to: "2026-11-10" })]);
+    expect(b.ops("sleep")).toHaveLength(5);
   });
 
   it("asks again for samples up to now after a call that ended earlier in the hour", async () => {

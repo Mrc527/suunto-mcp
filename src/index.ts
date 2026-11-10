@@ -60,6 +60,9 @@ Single-user settings (one Suunto account):
   SUUNTO_CALLS_PER_USER_PER_DAY
                            Suunto requests per user per day (default: no limit here, 100 with
                            --web; 0 = no limit)
+  SUUNTO_CALLS_PER_USER_PER_WEEK
+                           Suunto requests per user in any 7 days (default: no limit here, 100
+                           with --web; 0 = no limit)
 
 HTTP mode (--http):
   MCP_HTTP_TOKEN           Bearer token required on every request (or MCP_HTTP_TOKEN_FILE)

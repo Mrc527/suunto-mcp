@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { CACHE_MAX_BINARY_BYTES, CachedBackend, LONG_TTL_MS, SHORT_TTL_MS } from "../../src/activity/cache.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { CACHE_MAX_BINARY_BYTES, CacheBudget, CachedBackend, LONG_TTL_MS, SERVER_CACHE_MAX_BYTES, SHORT_TTL_MS } from "../../src/activity/cache.js";
 import { MAX_FIT_BYTES } from "../../src/activity/service.js";
 import type { ActivityBackend, WireDailyStatistic, WirePoiInput, WireRoute, WireWorkoutList } from "../../src/activity/types.js";
 
@@ -135,6 +135,24 @@ describe("CachedBackend", () => {
     expect(cache.size).toBe(1);
   });
 
+  it("keeps the refusal of a FIT file that is too large, so asking again costs no call to Suunto", async () => {
+    const { inner, cache, advance } = setup();
+    const tooLarge = Object.assign(new Error("The answer from Suunto (the FIT file of the workout) is larger than 8 MB, more than this server reads."), { kind: "too_large" });
+    let calls = 0;
+    const refusing = new CachedBackend({ ...inner, exportFit: async () => (calls++, Promise.reject(tooLarge)) }, { now: () => START });
+    await expect(refusing.exportFit("big")).rejects.toBe(tooLarge);
+    await expect(refusing.exportFit("big")).rejects.toBe(tooLarge);
+    expect(calls).toBe(1);
+    // Other errors are not kept.
+    inner.failNext.add("exportFit");
+    await expect(cache.exportFit("w1")).rejects.toThrow(/exportFit failed/);
+    await cache.exportFit("w1");
+    expect(inner.count("exportFit")).toBe(2);
+    advance(LONG_TTL_MS);
+    await cache.exportFit("w1");
+    expect(inner.count("exportFit")).toBe(3);
+  });
+
   it("keeps a workout by key and FIT files for 30 minutes", async () => {
     const { inner, cache, advance } = setup();
     await cache.getWorkout("w1", ["SummaryExtension"]);
@@ -236,6 +254,20 @@ describe("CachedBackend", () => {
     const [a, b] = await Promise.all([first, second]);
     expect(inner.count("sleep")).toBe(1);
     expect(a).toEqual(b);
+  });
+
+  it("keeps a window the service marks as ending now under its start, however long the earlier windows took", async () => {
+    const { inner, cache, advance, now } = setup();
+    const from = HOUR_START - 24 * HOUR;
+    // The call fixed its end 8 s ago (its earlier windows were slow): still the window up to now.
+    const end = now() - 8000;
+    await cache.sleep(from, end, true);
+    advance(10_000);
+    await cache.sleep(from, now() - 1, true);
+    expect(inner.count("sleep")).toBe(1);
+    // A window that does not end now is kept under its exact end, even when it ends a moment ago.
+    await cache.sleep(from, now() - 1, false);
+    expect(inner.count("sleep")).toBe(2);
   });
 
   it("serves a window that ends now to a later call with the same start", async () => {
@@ -374,6 +406,48 @@ describe("CachedBackend", () => {
     expect(big.size).toBe(0);
   });
 
+  it("drops every entry when it expires, also when nobody asks for it again", async () => {
+    vi.useFakeTimers({ now: START });
+    const inner = fakeBackend();
+    const cache = new CachedBackend(inner);
+    await cache.getWorkout("w1", []);
+    await cache.listWorkouts(LIST);
+    expect(cache.size).toBe(2);
+    await vi.advanceTimersByTimeAsync(SHORT_TTL_MS);
+    expect(cache.size).toBe(1);
+    await vi.advanceTimersByTimeAsync(LONG_TTL_MS - SHORT_TTL_MS);
+    expect(cache.size).toBe(0);
+    expect(cache.bytes).toBe(0);
+    await cache.close();
+  });
+
+  it("shares one byte budget across the caches of all users, dropping the least recently used entry of any", async () => {
+    expect(SERVER_CACHE_MAX_BYTES).toBe(128 * 1024 * 1024);
+    let now = START;
+    const budget = new CacheBudget(2500);
+    const file = (n: number) => async () => Buffer.alloc(1000, n);
+    const alice = new CachedBackend({ ...fakeBackend(), exportFit: file(1) }, { now: () => now, budget });
+    const bob = new CachedBackend({ ...fakeBackend(), exportFit: file(2) }, { now: () => now, budget });
+    await alice.exportFit("a1");
+    now += 1;
+    await bob.exportFit("b1");
+    now += 1;
+    expect(budget.bytes).toBe(2000);
+    // Alice reads a1 again, so Bob's b1 is now the least recently used of all.
+    await alice.exportFit("a1");
+    now += 1;
+    await alice.exportFit("a2");
+    expect(budget.bytes).toBe(2000);
+    expect(alice.size).toBe(2);
+    expect(bob.size).toBe(0);
+    // Closing a cache gives its bytes back.
+    await alice.close();
+    expect(budget.bytes).toBe(0);
+    expect(budget.size).toBe(1);
+    await bob.close();
+    expect(budget.size).toBe(0);
+  });
+
   it("passes account() and close() through, and forgets everything on close", async () => {
     const { inner, cache } = setup();
     expect(await cache.account()).toEqual({ username: "cachetester" });
@@ -386,4 +460,8 @@ describe("CachedBackend", () => {
     expect(cache.size).toBe(0);
     expect(cache.bytes).toBe(0);
   });
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });

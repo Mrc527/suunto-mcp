@@ -7,6 +7,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult, ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import type { AppConfig } from "./config.js";
+import { TOOL_CALL_MAX_WAIT_MS, withWaitBudget } from "./suunto/limiter.js";
 import { describeError, redact, redactForLog, UserFacingError } from "./util/errors.js";
 
 export type ZodShape = Record<string, z.ZodType>;
@@ -98,7 +99,9 @@ export function registerTool<Shape extends ZodShape>(
       const started = Date.now();
       try {
         ctx.beforeToolCall?.(spec.name);
-        const result = await handler(args);
+        // All Suunto requests of one call wait for the call limiter at most 45 s together, so a
+        // tool call does not run past the 60 s an AI app waits for it.
+        const result = await withWaitBudget(TOOL_CALL_MAX_WAIT_MS, () => handler(args));
         const out = jsonResult(result);
         delete (out as { __raw?: boolean }).__raw;
         ctx.onToolCall?.(spec.name, true, Date.now() - started);

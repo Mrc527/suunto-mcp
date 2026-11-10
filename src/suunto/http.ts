@@ -16,9 +16,12 @@
  *   wrong workout key with 500, and every try counts against the call limit. Retry-After is
  *   honoured up to 30 s; a longer wait is not worth it, so the error comes at once. A 429 without
  *   Retry-After is not tried again either: a per-minute limit does not clear in a second;
- * - a read that timed out is tried again at most once (the request reached Suunto and counted),
- *   and never when the request says so (the FIT export: its timeout is long already);
- * - the optional CallLimiter is asked before every data request that is sent, retries included;
+ * - a read that timed out is tried again at most once (the request reached Suunto and counted);
+ * - a request can ask for fewer tries (the FIT export is sent once: one try of 60 s, with up to
+ *   8 MB to download, is as long as an AI app waits for a tool);
+ * - the optional CallLimiter is asked before every data request that is sent, retries included.
+ *   When Suunto answers with its call limit, the limiter stops every request of the process until
+ *   the wait is over (Suunto's limits count all users of the app together);
  * - writes are never sent again once they may have reached Suunto (a route would be added twice).
  *   A write without a clear answer fails with UnconfirmedWriteError ("check before you try
  *   again"). Only a connection that never opened is tried again;
@@ -41,6 +44,8 @@ export const MAX_BINARY_BYTES = 20 * 1024 * 1024;
 export const MAX_TEXT_BYTES = 5 * 1024 * 1024;
 /** How much of an error answer is read (enough for any error text). */
 const MAX_ERROR_BYTES = 64 * 1024;
+/** When Suunto's call limit answer names no wait, no request is sent for this long. */
+export const UNKNOWN_LIMIT_WAIT_MS = 60_000;
 
 /**
  * Statuses a read is tried again on: Suunto (or its gateway) did not handle the request. Not 500:
@@ -62,13 +67,16 @@ export class SuuntoHttpError extends UserFacingError {
   readonly status?: number;
   /** False when the request certainly never left this server. */
   readonly sent: boolean;
+  /** For "rate_limit": how long until the limit lets requests through again (ms), when known. */
+  readonly waitMs?: number;
 
-  constructor(kind: SuuntoHttpErrorKind, message: string, opts: { status?: number; sent?: boolean; cause?: unknown } = {}) {
+  constructor(kind: SuuntoHttpErrorKind, message: string, opts: { status?: number; sent?: boolean; cause?: unknown; waitMs?: number } = {}) {
     super(message, opts.cause === undefined ? undefined : { cause: opts.cause });
     this.name = "SuuntoHttpError";
     this.kind = kind;
     if (opts.status !== undefined) this.status = opts.status;
     this.sent = opts.sent ?? true;
+    if (opts.waitMs !== undefined) this.waitMs = opts.waitMs;
   }
 }
 
@@ -325,8 +333,11 @@ export interface SuuntoRequest {
   notFound?: string;
   /** A sentence added to the message of an HTTP 500 (for example: a wrong workout key gives 500). */
   serverErrorHint?: string;
-  /** False: a read that timed out is not sent again (default: once). */
-  retryOnTimeout?: boolean;
+  /**
+   * Tries in all for this read (default the client's, 3). A connection that never opened is
+   * still tried again: nothing was sent.
+   */
+  tries?: number;
 }
 
 /** What send() returns: the answer, and the body of a 2xx read (read inside the retry rules). */
@@ -440,7 +451,13 @@ export class SuuntoHttp {
   private rateLimited(res: Response, body: string): SuuntoHttpError {
     const wait = retryAfterMs(res, this.now()) ?? quotaWaitMs(body);
     const when = wait !== undefined ? `Try again in ${formatWait(wait)}.` : "Try again later.";
-    return new SuuntoHttpError("rate_limit", `Suunto's call limit for this service is reached (HTTP ${res.status}). ${when}`, { status: res.status });
+    // Suunto's limits count every user of the app: no request of this process is sent until the
+    // wait is over (a short pause when Suunto names no wait).
+    this.opts.limiter?.block(wait ?? UNKNOWN_LIMIT_WAIT_MS);
+    return new SuuntoHttpError("rate_limit", `Suunto's call limit for this service is reached (HTTP ${res.status}). ${when}`, {
+      status: res.status,
+      ...(wait !== undefined ? { waitMs: wait } : {}),
+    });
   }
 
   private secrets(): string[] {
@@ -491,7 +508,7 @@ export class SuuntoHttp {
   private async send(req: SuuntoRequest, token: string): Promise<Answer> {
     const method = req.method ?? "GET";
     const read = method === "GET";
-    const tries = read ? Math.max(1, this.opts.tries ?? DEFAULT_TRIES) : 1;
+    const tries = read ? Math.max(1, req.tries ?? this.opts.tries ?? DEFAULT_TRIES) : 1;
     const timeoutMs = req.timeoutMs ?? this.opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const base = this.opts.backoffMs ?? 500;
     const max = req.maxBytes ?? defaultMax(req.responseType ?? "json");
@@ -519,7 +536,7 @@ export class SuuntoHttp {
         const timedOut = isTimeout(error);
         if (timedOut) timeouts++;
         // A timed-out read reached Suunto and counted: it is tried again at most once.
-        const retryRead = read && attempt < tries && (!timedOut || (req.retryOnTimeout !== false && timeouts <= 1));
+        const retryRead = read && attempt < tries && (!timedOut || timeouts <= 1);
         if (notSent ? attempt < maxTries : retryRead) {
           this.opts.log?.(`Suunto ${method} ${req.path}: ${timedOut ? "timeout" : "network error"}, trying again`);
           await this.sleep(backoff(base, attempt));

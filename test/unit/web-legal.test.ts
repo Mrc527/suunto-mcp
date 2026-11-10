@@ -276,15 +276,20 @@ describe("what the privacy policy states matches the code", () => {
     const recent = store.createUser("new-request@example.com", "x", false, { note: "please" });
     store.db.prepare("UPDATE users SET created_at = ? WHERE id = ?").run(Date.now() - 31 * DAY, old.id);
     store.db.prepare("UPDATE users SET created_at = ? WHERE id = ?").run(Date.now() - 29 * DAY, recent.id);
+    // The counts of Suunto requests (the call limits look back 7 days at most).
+    store.recordSuuntoCall(user.id, Date.now() - 9 * DAY);
+    store.recordSuuntoCall(user.id, Date.now() - 7 * DAY);
     store.cleanup();
     expect(store.recentActivity(user.id).map((a) => a.tool)).toEqual(["suunto_get_workout"]);
+    expect(store.suuntoCallTimes(user.id, 0)).toHaveLength(1);
     expect(store.getUser(old.id)).toBeUndefined();
     expect(store.getUser(recent.id)?.requestNote).toBe("please");
     // Approving the request deletes the message to the administrator.
     expect(store.approveAccessRequest(recent.id)).toBe(true);
     expect(store.getUser(recent.id)?.requestNote).toBeUndefined();
     const { html } = await get("/privacy");
-    expect(html).toContain("<strong>Activity log:</strong> 90 days.");
+    expect(html).toContain("<strong>Activity log:</strong> 90 days. <strong>Counts of Suunto requests:</strong> 8 days.");
+    expect(html).toContain("We also count the requests sent to Suunto for your account, with only the time of each one, to keep the call limits per user. These counts are deleted after 8 days.");
     expect(html).toContain("after 30 days if nobody answers. The message to the administrator is deleted when the request is approved.");
   });
 
@@ -296,14 +301,16 @@ describe("what the privacy policy states matches the code", () => {
     store.issueTokens({ clientId: "client", userId: user.id, scopes: ["suunto"], accessTtlMs: 60_000, refreshTtlMs: DAY });
     store.logActivity(user.id, "suunto_list_workouts", true, 12, "client");
     store.createOAuthState(user.id);
+    store.recordSuuntoCall(user.id, Date.now());
     const code = store.createInvite(user.id, "", 7);
     expect(store.consumeInvite(code, "leaving@example.com")).toBe(true);
     const rows = (table: string) => Number((store.db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE user_id = ?`).get(user.id) as { n: number }).n);
-    for (const table of ["sessions", "oauth_tokens", "activity", "suunto_oauth_states"]) expect(rows(table), table).toBeGreaterThan(0);
+    const linked = ["sessions", "oauth_tokens", "activity", "suunto_oauth_states", "suunto_calls"];
+    for (const table of linked) expect(rows(table), table).toBeGreaterThan(0);
 
     store.deleteUser(user.id);
     expect(store.getUser(user.id)).toBeUndefined();
-    for (const table of ["sessions", "oauth_tokens", "activity", "suunto_oauth_states"]) expect(rows(table), table).toBe(0);
+    for (const table of linked) expect(rows(table), table).toBe(0);
     // The invite keeps the address until the administrator deletes it, as the policy says.
     expect(store.listInvites().some((i) => i.usedBy === "leaving@example.com")).toBe(true);
     expect((await get("/privacy")).html).toContain("Deleting your account does not remove your email address from an invite you used");
@@ -387,7 +394,7 @@ describe("what the privacy policy states matches the code", () => {
 
   it("has no place in the database for IP addresses, workouts or health data", () => {
     const tables = (web.ctx.store.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all() as { name: string }[]).map((t) => t.name);
-    expect(tables.sort()).toEqual(["activity", "invites", "oauth_clients", "oauth_codes", "oauth_pending", "oauth_tokens", "sessions", "settings", "suunto_oauth_states", "users"]);
+    expect(tables.sort()).toEqual(["activity", "invites", "oauth_clients", "oauth_codes", "oauth_pending", "oauth_tokens", "sessions", "settings", "suunto_calls", "suunto_oauth_states", "users"]);
     for (const table of tables) {
       const columns = (web.ctx.store.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name);
       for (const column of columns) {
@@ -399,6 +406,9 @@ describe("what the privacy policy states matches the code", () => {
     // The activity log keeps when, which tool, which app, how long and whether it worked.
     const activity = (web.ctx.store.db.prepare("PRAGMA table_info(activity)").all() as { name: string }[]).map((c) => c.name);
     expect(activity.sort()).toEqual(["at", "client_id", "duration_ms", "id", "ok", "tool", "user_id"]);
+    // The call limits keep only who sent a request to Suunto and when.
+    const calls = (web.ctx.store.db.prepare("PRAGMA table_info(suunto_calls)").all() as { name: string }[]).map((c) => c.name);
+    expect(calls.sort()).toEqual(["at", "user_id"]);
   });
 
   it("states the backup and log limits of the deploy files", async () => {

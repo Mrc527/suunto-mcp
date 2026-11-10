@@ -125,6 +125,16 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX suunto_oauth_states_user ON suunto_oauth_states(user_id, created_at);
   `,
+  // 2: the Suunto requests of each user (the call limiter's daily and weekly counts survive a
+  // restart; rows older than 8 days are deleted). The end of a block after Suunto's own call
+  // limit answer is in settings, key 'suunto_blocked_until'.
+  `
+  CREATE TABLE suunto_calls (
+    user_id TEXT NOT NULL,
+    at INTEGER NOT NULL
+  );
+  CREATE INDEX suunto_calls_user ON suunto_calls(user_id, at);
+  `,
 ];
 
 export type Db = DatabaseSync;

@@ -36,6 +36,7 @@ services:
       # the Production subscription.
       SUUNTO_CALLS_PER_MINUTE: ${SUUNTO_CALLS_PER_MINUTE:-}
       SUUNTO_CALLS_PER_USER_PER_DAY: ${SUUNTO_CALLS_PER_USER_PER_DAY:-}
+      SUUNTO_CALLS_PER_USER_PER_WEEK: ${SUUNTO_CALLS_PER_USER_PER_WEEK:-}
       # Optional: e-mails to administrators about access requests (your own SMTP server).
       SMTP_URL: ${SMTP_URL:-}
       NOTIFY_FROM: ${NOTIFY_FROM:-}

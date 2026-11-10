@@ -83,7 +83,8 @@ async function selfTest(ctx: WebContext): Promise<SelfTestRow[]> {
 function callLimits(limits: CallLimits | undefined): SafeHtml {
   const perMinute = limits?.perMinute ?? 0;
   const perUser = limits?.perUserPerDay ?? 0;
-  return html`${perMinute > 0 ? t("admin.suunto.perMinute", { n: perMinute }) : t("admin.suunto.perMinuteOff")}<br>${perUser > 0 ? t("admin.suunto.perUser", { n: perUser }) : t("admin.suunto.perUserOff")}`;
+  const perWeek = limits?.perUserPerWeek ?? 0;
+  return html`${perMinute > 0 ? t("admin.suunto.perMinute", { n: perMinute }) : t("admin.suunto.perMinuteOff")}<br>${perUser > 0 ? t("admin.suunto.perUser", { n: perUser }) : t("admin.suunto.perUserOff")}<br>${perWeek > 0 ? t("admin.suunto.perUserWeek", { n: perWeek }) : t("admin.suunto.perUserWeekOff")}`;
 }
 
 /** Which Suunto servers the users' requests go to, as a phrase. */

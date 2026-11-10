@@ -48,6 +48,8 @@ export interface SuuntoApiOptions {
 
 /** The FIT export can be large and slow: at least this timeout. */
 export const FIT_TIMEOUT_MS = 60_000;
+/** The largest FIT file that is read (suunto_export_workout_fit sends at most this much). */
+export const MAX_FIT_BYTES = 8 * 1024 * 1024;
 /** The GPX of one route: at most this many bytes are read. */
 export const MAX_GPX_BYTES = 5 * 1024 * 1024;
 
@@ -214,8 +216,12 @@ export class SuuntoApi implements ActivityBackend {
       path: `/v3/workouts/${pathSegment(key)}/fit`,
       accept: "application/octet-stream",
       timeoutMs: Math.max(this.opts.timeoutMs ?? 0, FIT_TIMEOUT_MS),
-      // One try of 60 s is already as long as an AI app waits for a tool: no second one.
-      retryOnTimeout: false,
+      // One try of 60 s is already as long as an AI app waits for a tool: no second one, also
+      // not when the download breaks (each try would download the file again).
+      tries: 1,
+      // A larger file is refused anyway (suunto_export_workout_fit): stop at once, from the
+      // content-length when Suunto sends one, instead of downloading up to 20 MB.
+      maxBytes: MAX_FIT_BYTES,
       what: "the FIT file of the workout",
       notFound: `Suunto has no FIT file for the workout ${key.trim()}.`,
       serverErrorHint: WRONG_KEY_HINT,

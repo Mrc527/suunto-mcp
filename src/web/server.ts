@@ -10,7 +10,7 @@ import { readFileSync } from "node:fs";
 import { callLimitsFromEnv, envValue, suuntoKeysFromEnv } from "../config.js";
 import { demoRegistry, type DemoRegistry } from "../demo/index.js";
 import { endpointsFromEnv, isLoopbackHost } from "../suunto/endpoints.js";
-import { CallLimiter, type CallLimits } from "../suunto/limiter.js";
+import { CallLimiter, type CallLimits, type CallUsageStore } from "../suunto/limiter.js";
 import type { SuuntoAppKeys } from "../suunto/oauth.js";
 import { ConfigError, maskEmails, redactForLog } from "../util/errors.js";
 import { VERSION } from "../version.js";
@@ -60,8 +60,9 @@ export interface WebOptions {
   /** SUUNTO_REDIRECT_URI (default: <PUBLIC_URL>/suunto/callback). */
   suuntoRedirectUri?: string;
   /**
-   * The limits of Suunto data requests (SUUNTO_CALLS_PER_MINUTE, SUUNTO_CALLS_PER_USER_PER_DAY).
-   * Default WEB_DEFAULT_LIMITS: 10 per minute for the whole server, 100 per user per day.
+   * The limits of Suunto data requests (SUUNTO_CALLS_PER_MINUTE, SUUNTO_CALLS_PER_USER_PER_DAY,
+   * SUUNTO_CALLS_PER_USER_PER_WEEK). Default WEB_DEFAULT_LIMITS: 10 per minute for the whole
+   * server, 100 per user per day and 100 per user in any 7 days.
    */
   callLimits?: CallLimits;
   /** The operator's SMTP server for e-mails to administrators (none: no e-mails). */
@@ -95,10 +96,12 @@ const EXAMPLE_ADMIN_PASSWORD = "change-me-to-a-long-password";
 
 /**
  * The limits of Suunto data requests in web mode: the Developer API's 10 calls per minute for the
- * whole server, and at most 100 calls per user per day, so one user cannot use up the shared
- * weekly quota (200 calls on the Developer API) alone.
+ * whole server, at most 100 calls per user per UTC day, and at most 100 per user in any 7 days.
+ * The weekly cap (half of the Developer API's 200 calls a week, which all users share) is what
+ * keeps one user from using up the weekly quota alone: a daily cap cannot (it starts again at
+ * midnight). The counts are kept in the database, so a restart does not reset them.
  */
-export const WEB_DEFAULT_LIMITS: CallLimits = { perMinute: 10, perUserPerDay: 100 };
+export const WEB_DEFAULT_LIMITS: CallLimits = { perMinute: 10, perUserPerDay: 100, perUserPerWeek: 100 };
 
 /** The path of the "Connect Suunto" callback (routes-account.ts). */
 const CALLBACK_PATH = "/suunto/callback";
@@ -203,10 +206,20 @@ export function webOptionsFromEnv(env: Env, cli: { host?: string; port?: number 
     ...withKeys(suuntoKeysFromEnv(env)),
     ...(env.SUUNTO_REDIRECT_URI?.trim() ? { suuntoRedirectUri: suuntoRedirectUri(publicUrl, env.SUUNTO_REDIRECT_URI) } : {}),
     // A ConfigError for a value that is not a whole number of 0 or more.
-    callLimits: callLimitsFromEnv(env, { perUserPerDay: WEB_DEFAULT_LIMITS.perUserPerDay }),
+    callLimits: callLimitsFromEnv(env, { perUserPerDay: WEB_DEFAULT_LIMITS.perUserPerDay, perUserPerWeek: WEB_DEFAULT_LIMITS.perUserPerWeek ?? 0 }),
     ...(smtpUrl ? { smtpUrl } : {}),
     ...(notifyFrom ? { notifyFrom } : {}),
     log,
+  };
+}
+
+/** The call limiter's counts and block, in the web store. */
+function storeCallUsage(store: Store): CallUsageStore {
+  return {
+    callTimes: (key, sinceMs) => store.suuntoCallTimes(key, sinceMs),
+    recordCall: (key, at) => store.recordSuuntoCall(key, at),
+    loadBlock: () => store.getSuuntoBlock(),
+    saveBlock: (until) => store.saveSuuntoBlock(until),
   };
 }
 
@@ -258,12 +271,16 @@ export async function createWebApp(webOpts: WebOptions): Promise<WebApp> {
       `warning: SUUNTO_CLIENT_ID, SUUNTO_CLIENT_SECRET and SUUNTO_SUBSCRIPTION_KEY are not set. Nobody can connect Suunto until they are (demo accounts work). Register ${redirectUri} as the redirect URI of your app in the Suunto API Zone.`,
     );
   }
-  // One limiter of Suunto data requests for the whole process (the user id is its key).
+  // One limiter of Suunto data requests for the whole process (the user id is its key). Its counts
+  // per user and a block after Suunto's own call limit answer are kept in the database. It exists
+  // also without limits: the block stops every user's requests after Suunto refused one.
   const limits = opts.callLimits ?? WEB_DEFAULT_LIMITS;
-  const limiter =
-    limits.perMinute > 0 || limits.perUserPerDay > 0
-      ? new CallLimiter({ perMinute: limits.perMinute, ...(limits.perUserPerDay > 0 ? { perKeyPerDay: limits.perUserPerDay } : {}) })
-      : undefined;
+  const limiter = new CallLimiter({
+    perMinute: limits.perMinute,
+    ...(limits.perUserPerDay > 0 ? { perKeyPerDay: limits.perUserPerDay } : {}),
+    ...((limits.perUserPerWeek ?? 0) > 0 ? { perKeyPerWeek: limits.perUserPerWeek } : {}),
+    usage: storeCallUsage(store),
+  });
   const pool = new ServicePool(store, {
     operator,
     ...(suuntoKeys ? { keys: suuntoKeys } : {}),
@@ -271,7 +288,7 @@ export async function createWebApp(webOpts: WebOptions): Promise<WebApp> {
     log: opts.log,
     ...(opts.suuntoFetch ? { fetch: opts.suuntoFetch } : {}),
     connectAgain: `Connect Suunto again at ${publicUrl.href.replace(/\/+$/, "")}/account.`,
-    ...(limiter ? { limiter } : {}),
+    limiter,
     limits,
   });
   const send = opts.sendNotice ?? (opts.smtpUrl ? smtpSender(opts.smtpUrl) : undefined);

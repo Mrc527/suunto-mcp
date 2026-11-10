@@ -8,7 +8,7 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { LONG_TTL_MS } from "../activity/cache.js";
+import { CacheBudget, LONG_TTL_MS, SERVER_CACHE_MAX_BYTES } from "../activity/cache.js";
 import type { ActivityBackend, UnitChoice } from "../activity/types.js";
 import { loadConfig, type AppConfig } from "../config.js";
 import { DEMO_TIME_ZONE, demoRegistry, type DemoRegistry } from "../demo/index.js";
@@ -197,6 +197,8 @@ export interface ServicePoolOptions {
   limiter?: CallLimiter;
   /** The limits `limiter` was built with (the admin page shows them). */
   limits?: CallLimits;
+  /** The memory all users' response caches may use together (default SERVER_CACHE_MAX_BYTES, 128 MB). */
+  cacheBytes?: number;
   /** The clock (epoch ms), for tests. */
   now?: () => number;
 }
@@ -222,6 +224,8 @@ export class ServicePool {
   private readonly demo: DemoRegistry;
   private readonly log: (m: string) => void;
   private readonly now: () => number;
+  /** One memory budget for the response caches of all users. */
+  readonly cacheBudget: CacheBudget;
   /** Tool calls running now, and who waits until there are none. */
   private running = 0;
   private idleWaiters: (() => void)[] = [];
@@ -236,6 +240,7 @@ export class ServicePool {
     this.demo = opts.demo ?? demoRegistry;
     this.log = opts.log ?? (() => {});
     this.now = opts.now ?? Date.now;
+    this.cacheBudget = new CacheBudget(opts.cacheBytes ?? SERVER_CACHE_MAX_BYTES);
     this.timer = setInterval(() => void this.sweep(), 60_000);
     this.timer.unref();
   }
@@ -284,7 +289,7 @@ export class ServicePool {
     if (kept) this.entries.delete(user.id);
     else void this.drop(user.id);
     const services = kept
-      ? createServices(config, { reuse: { session: kept.session, backend: kept.backend }, log: this.log })
+      ? createServices(config, { reuse: { session: kept.session, backend: kept.backend }, log: this.log, ...(this.opts.limiter ? { limiter: this.opts.limiter } : {}) })
       : createServices(config, {
           // The stored tokens win over the configuration: they hold the newest refresh token.
           tokens: storedTokens(settings),
@@ -293,6 +298,7 @@ export class ServicePool {
           ...(this.opts.fetch ? { fetch: this.opts.fetch } : {}),
           ...(this.opts.connectAgain ? { connectAgain: this.opts.connectAgain } : {}),
           ...(this.opts.limiter ? { limiter: this.opts.limiter, limiterKey: user.id } : {}),
+          cacheBudget: this.cacheBudget,
         });
     const connection = kept ?? (services.session && services.backend ? { connectedAt: settings.connectedAt, session: services.session, backend: services.backend } : undefined);
     const entry: PoolEntry = { config, services, version, lastUsed: this.now(), ...(connection ? { connection } : {}) };

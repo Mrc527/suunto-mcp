@@ -95,10 +95,14 @@ describe("the listening port", () => {
 });
 
 describe("the Suunto call limits", () => {
-  it("default to 10 per minute and 100 per user per day, and can be changed or turned off", () => {
-    expect(webOptionsFromEnv(env({}), {}, () => {}).callLimits).toEqual({ perMinute: 10, perUserPerDay: 100 });
-    expect(webOptionsFromEnv(env({ SUUNTO_CALLS_PER_MINUTE: "", SUUNTO_CALLS_PER_USER_PER_DAY: "" }), {}, () => {}).callLimits).toEqual({ perMinute: 10, perUserPerDay: 100 });
-    expect(webOptionsFromEnv(env({ SUUNTO_CALLS_PER_MINUTE: "30", SUUNTO_CALLS_PER_USER_PER_DAY: "0" }), {}, () => {}).callLimits).toEqual({ perMinute: 30, perUserPerDay: 0 });
+  it("default to 10 per minute, 100 per user per day and 100 per user in 7 days, and can be changed or turned off", () => {
+    expect(webOptionsFromEnv(env({}), {}, () => {}).callLimits).toEqual({ perMinute: 10, perUserPerDay: 100, perUserPerWeek: 100 });
+    expect(
+      webOptionsFromEnv(env({ SUUNTO_CALLS_PER_MINUTE: "", SUUNTO_CALLS_PER_USER_PER_DAY: "", SUUNTO_CALLS_PER_USER_PER_WEEK: "" }), {}, () => {}).callLimits,
+    ).toEqual({ perMinute: 10, perUserPerDay: 100, perUserPerWeek: 100 });
+    expect(
+      webOptionsFromEnv(env({ SUUNTO_CALLS_PER_MINUTE: "30", SUUNTO_CALLS_PER_USER_PER_DAY: "0", SUUNTO_CALLS_PER_USER_PER_WEEK: "0" }), {}, () => {}).callLimits,
+    ).toEqual({ perMinute: 30, perUserPerDay: 0, perUserPerWeek: 0 });
     expect(() => webOptionsFromEnv(env({ SUUNTO_CALLS_PER_USER_PER_DAY: "many" }), {}, () => {})).toThrow(/SUUNTO_CALLS_PER_USER_PER_DAY/);
   });
 });
@@ -127,6 +131,7 @@ describe("deploy files", () => {
         "SUUNTO_REDIRECT_URI",
         "SUUNTO_CALLS_PER_MINUTE",
         "SUUNTO_CALLS_PER_USER_PER_DAY",
+        "SUUNTO_CALLS_PER_USER_PER_WEEK",
       ]) {
         // Unset in .env: Compose passes an empty value, which the service reads as "use the default".
         expect(compose, `${path}: ${name}`).toContain(`${name}: \${${name}:-}`);
@@ -137,10 +142,10 @@ describe("deploy files", () => {
 
   it("explain the Suunto call limits with the defaults the service uses, and set none", () => {
     // What an empty value (as Compose passes an unset one) turns into.
-    const limits = webOptionsFromEnv(env({ SUUNTO_CALLS_PER_MINUTE: "", SUUNTO_CALLS_PER_USER_PER_DAY: "" }), {}, () => {}).callLimits!;
+    const limits = webOptionsFromEnv(env({ SUUNTO_CALLS_PER_MINUTE: "", SUUNTO_CALLS_PER_USER_PER_DAY: "", SUUNTO_CALLS_PER_USER_PER_WEEK: "" }), {}, () => {}).callLimits!;
     for (const path of ["deploy/.env.example", "deploy/server/.env.example"]) {
       const text = read(path);
-      for (const name of ["SUUNTO_CALLS_PER_MINUTE", "SUUNTO_CALLS_PER_USER_PER_DAY"]) {
+      for (const name of ["SUUNTO_CALLS_PER_MINUTE", "SUUNTO_CALLS_PER_USER_PER_DAY", "SUUNTO_CALLS_PER_USER_PER_WEEK"]) {
         // Commented out: the defaults apply until the operator sets a value.
         expect(text, `${path}: ${name}`).toMatch(new RegExp(`^#${name}=$`, "m"));
         expect(text, `${path}: ${name}`).not.toMatch(new RegExp(`^${name}=`, "m"));
@@ -149,6 +154,7 @@ describe("deploy files", () => {
       const comment = text.replace(/\n# ?/g, " ");
       expect(comment, path).toContain(`SUUNTO_CALLS_PER_MINUTE counts the requests of the whole service in any 60 seconds (default ${limits.perMinute},`);
       expect(comment, path).toContain(`SUUNTO_CALLS_PER_USER_PER_DAY caps each user per UTC day (default ${limits.perUserPerDay})`);
+      expect(comment, path).toContain(`SUUNTO_CALLS_PER_USER_PER_WEEK caps each user in any 7 days (default ${limits.perUserPerWeek}), so one person cannot use up the weekly quota`);
       expect(comment, path).toContain("0 means no limit; empty means the default.");
       expect(comment, path).toContain("Raise both after Suunto accepts the Production subscription");
     }

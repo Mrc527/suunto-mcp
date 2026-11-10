@@ -23,6 +23,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadConfig } from "../../src/config.js";
 import { closeServices, createMcpServer, createServices, type Services } from "../../src/server.js";
+import { CallLimiter } from "../../src/suunto/limiter.js";
 import { addDays, todayInZone } from "../../src/util/dates.js";
 import { MOCK_CLIENT_ID, MOCK_CLIENT_SECRET, MOCK_SUBSCRIPTION_KEY, MOCK_USERNAME, startMockSuunto, type MockSuunto } from "../helpers/mock-suunto.js";
 
@@ -461,7 +462,8 @@ describe.skipIf(!enabled)("against a mock Suunto API", () => {
     /** A client of the real MCP server (in process), signed in with a fresh refresh token. */
     async function inProcess(m: MockSuunto, logs: string[] = []): Promise<Client> {
       const config = loadConfig({ ...m.env(), SUUNTO_REFRESH_TOKEN: m.issueTokens().refreshToken, SUUNTO_TIMEZONE: ZONE, SUUNTO_CALLS_PER_MINUTE: "0" });
-      const services = createServices(config, { log: (line) => void logs.push(line) });
+      // A limiter of its own: a stop after a call limit answer in one test leaves the others alone.
+      const services = createServices(config, { log: (line) => void logs.push(line), limiter: new CallLimiter({ perMinute: 0 }) });
       opened.push(services);
       const server = createMcpServer(config, services, (line) => void logs.push(line));
       const client = new Client({ name: "it", version: "1.0.0" });
@@ -482,12 +484,21 @@ describe.skipIf(!enabled)("against a mock Suunto API", () => {
       // The minute limit: 429 with a Retry-After longer than this server waits.
       mock.failNext("/v3/workouts", 429, { statusCode: 429, message: "Rate limit is exceeded. Try again in 60 seconds." }, { "retry-after": "60" });
       expect(await callError(client, "suunto_list_workouts", { limit: 5, ...uncachedRange(27) })).toContain("Suunto's call limit for this service is reached (HTTP 429). Try again in 60 seconds.");
-      // The weekly quota: 403 with Azure's quota text.
-      mock.failNext("/v3/workouts", 403, { statusCode: 403, message: "Out of call volume quota. Quota will be replenished in 2.03:04:05." });
-      expect(await callError(client, "suunto_list_workouts", { limit: 6, ...uncachedRange(28) })).toMatch(/^Suunto's call limit for this service is reached \(HTTP 403\)\. Try again in \d+ (days|hours)\./);
-      // A call limit is never a sign-in problem.
+      // Suunto's limits count every request of the app: until the wait is over, nothing is sent.
+      const sent = mock.count("/v3/workouts");
+      expect(await callError(client, "suunto_list_workouts", { limit: 6, ...uncachedRange(28) })).toMatch(/^Suunto's call limit for this service is reached\. Try again in (59|60) seconds\.$/);
+      expect(mock.count("/v3/workouts")).toBe(sent);
+      // The weekly quota: 403 with Azure's quota text (another process, so no stop is in force).
       expect(mock.count("/oauth/token")).toBe(tokenCalls);
-      expect((await call<{ count: number }>(client, "suunto_list_workouts", { limit: 6, ...uncachedRange(28) })).count).toBe(6);
+      const fresh = await inProcess(mock);
+      await call(fresh, "suunto_account_info");
+      const freshTokenCalls = mock.count("/oauth/token");
+      mock.failNext("/v3/workouts", 403, { statusCode: 403, message: "Out of call volume quota. Quota will be replenished in 2.03:04:05." });
+      expect(await callError(fresh, "suunto_list_workouts", { limit: 6, ...uncachedRange(28) })).toMatch(/^Suunto's call limit for this service is reached \(HTTP 403\)\. Try again in \d+ (days|hours)\./);
+      // A call limit is never a sign-in problem.
+      expect(mock.count("/oauth/token")).toBe(freshTokenCalls);
+      const third = await inProcess(mock);
+      expect((await call<{ count: number }>(third, "suunto_list_workouts", { limit: 6, ...uncachedRange(28) })).count).toBe(6);
     });
 
     it("says to sign in again when Suunto refuses the refresh token, and waits before trying again", async () => {

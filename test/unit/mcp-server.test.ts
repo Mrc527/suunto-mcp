@@ -536,10 +536,19 @@ describe("account info against a mock Suunto", () => {
     // The second build of this process shares the budget: the day's one call is used up.
     expect(await b.activity!.check()).toEqual({ ok: false, error: "You reached this service's daily limit of 1 Suunto requests for your account. Try again tomorrow." });
     expect(mock.count("/v3/workouts") - lists).toBe(1);
-    // Without limits there is no limiter.
+    // Without limits nothing is held back.
     const free = createServices(localConfig({ SUUNTO_CALLS_PER_MINUTE: "0" }), { cache: false });
     for (let i = 0; i < 3; i++) expect((await free.activity!.check()).ok).toBe(true);
     await Promise.all([a, b, free].map(closeServices));
+  });
+
+  it("lets one workout list or statistics call send at most the per-minute limit of requests", async () => {
+    const scanLimit = (s: Awaited<ReturnType<typeof createServices>>) => (s.activity as unknown as { opts: { maxScanRequests?: number } }).opts.maxScanRequests;
+    const eight = createServices(localConfig({ SUUNTO_CALLS_PER_MINUTE: "8" }), { cache: false });
+    expect(scanLimit(eight)).toBe(8);
+    const free = createServices(localConfig({ SUUNTO_CALLS_PER_MINUTE: "0" }), { cache: false });
+    expect(scanLimit(free)).toBeUndefined();
+    await Promise.all([eight, free].map(closeServices));
   });
 
   it("uses the limiter and key it is given (the web service: one limiter, the user id as key)", async () => {

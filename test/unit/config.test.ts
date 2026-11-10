@@ -39,22 +39,27 @@ describe("loadConfig", () => {
     expect(c.transport).toBe("stdio");
     expect(c.http).toMatchObject({ host: "127.0.0.1", port: 3000, allowedHosts: [], allowedOrigins: [] });
     expect(c.secrets.sort()).toEqual(["rt-invented-value", "secret-invented-value", "subkey-invented-value"]);
-    expect(c.callLimits).toEqual({ perMinute: 10, perUserPerDay: 0 });
+    expect(c.callLimits).toEqual({ perMinute: 10, perUserPerDay: 0, perUserPerWeek: 0 });
   });
 
   it("reads the Suunto call limits (0 = no limit, empty = unset, other values refused)", () => {
-    expect(callLimitsFromEnv({})).toEqual({ perMinute: 10, perUserPerDay: 0 });
-    expect(callLimitsFromEnv({ SUUNTO_CALLS_PER_MINUTE: "0", SUUNTO_CALLS_PER_USER_PER_DAY: " 250 " })).toEqual({ perMinute: 0, perUserPerDay: 250 });
-    expect(callLimitsFromEnv({ SUUNTO_CALLS_PER_MINUTE: "", SUUNTO_CALLS_PER_USER_PER_DAY: " " })).toEqual({ perMinute: 10, perUserPerDay: 0 });
+    expect(callLimitsFromEnv({})).toEqual({ perMinute: 10, perUserPerDay: 0, perUserPerWeek: 0 });
+    expect(callLimitsFromEnv({ SUUNTO_CALLS_PER_MINUTE: "0", SUUNTO_CALLS_PER_USER_PER_DAY: " 250 " })).toEqual({ perMinute: 0, perUserPerDay: 250, perUserPerWeek: 0 });
+    expect(callLimitsFromEnv({ SUUNTO_CALLS_PER_MINUTE: "", SUUNTO_CALLS_PER_USER_PER_DAY: " " })).toEqual({ perMinute: 10, perUserPerDay: 0, perUserPerWeek: 0 });
     // The web service's own default (100 a day) applies only while the variable is unset.
-    expect(callLimitsFromEnv({}, { perUserPerDay: 100 })).toEqual({ perMinute: 10, perUserPerDay: 100 });
-    expect(callLimitsFromEnv({ SUUNTO_CALLS_PER_USER_PER_DAY: "" }, { perUserPerDay: 100 })).toEqual({ perMinute: 10, perUserPerDay: 100 });
-    expect(callLimitsFromEnv({ SUUNTO_CALLS_PER_USER_PER_DAY: "0" }, { perUserPerDay: 100 })).toEqual({ perMinute: 10, perUserPerDay: 0 });
+    expect(callLimitsFromEnv({}, { perUserPerDay: 100 })).toEqual({ perMinute: 10, perUserPerDay: 100, perUserPerWeek: 0 });
+    expect(callLimitsFromEnv({ SUUNTO_CALLS_PER_USER_PER_DAY: "" }, { perUserPerDay: 100 })).toEqual({ perMinute: 10, perUserPerDay: 100, perUserPerWeek: 0 });
+    expect(callLimitsFromEnv({ SUUNTO_CALLS_PER_USER_PER_DAY: "0" }, { perUserPerDay: 100 })).toEqual({ perMinute: 10, perUserPerDay: 0, perUserPerWeek: 0 });
     for (const bad of ["ten", "-1", "1.5", "1e3", "0x10"]) {
       expect(() => callLimitsFromEnv({ SUUNTO_CALLS_PER_MINUTE: bad }), bad).toThrow(`SUUNTO_CALLS_PER_MINUTE must be a whole number of 0 or more (0 means no limit), got "${bad}"`);
     }
     expect(() => callLimitsFromEnv({ SUUNTO_CALLS_PER_USER_PER_DAY: "lots" })).toThrow(/SUUNTO_CALLS_PER_USER_PER_DAY must be a whole number/);
-    expect(loadConfig({ ...base, SUUNTO_CALLS_PER_MINUTE: "30", SUUNTO_CALLS_PER_USER_PER_DAY: "500" }).callLimits).toEqual({ perMinute: 30, perUserPerDay: 500 });
+    // The weekly cap per user: 0 (none) unless set, or the web service's default while unset.
+    expect(callLimitsFromEnv({ SUUNTO_CALLS_PER_USER_PER_WEEK: "70" }).perUserPerWeek).toBe(70);
+    expect(callLimitsFromEnv({ SUUNTO_CALLS_PER_USER_PER_WEEK: "" }, { perUserPerWeek: 100 }).perUserPerWeek).toBe(100);
+    expect(callLimitsFromEnv({ SUUNTO_CALLS_PER_USER_PER_WEEK: "0" }, { perUserPerWeek: 100 }).perUserPerWeek).toBe(0);
+    expect(() => callLimitsFromEnv({ SUUNTO_CALLS_PER_USER_PER_WEEK: "x" })).toThrow(/SUUNTO_CALLS_PER_USER_PER_WEEK must be a whole number/);
+    expect(loadConfig({ ...base, SUUNTO_CALLS_PER_MINUTE: "30", SUUNTO_CALLS_PER_USER_PER_DAY: "500" }).callLimits).toEqual({ perMinute: 30, perUserPerDay: 500, perUserPerWeek: 0 });
     expect(() => loadConfig({ ...base, SUUNTO_CALLS_PER_MINUTE: "fast" })).toThrow(/SUUNTO_CALLS_PER_MINUTE/);
   });
 
@@ -403,6 +408,7 @@ describe("command line", () => {
       "SUUNTO_TIMEZONE",
       "SUUNTO_CALLS_PER_MINUTE",
       "SUUNTO_CALLS_PER_USER_PER_DAY",
+      "SUUNTO_CALLS_PER_USER_PER_WEEK",
       "~/.config/suunto-mcp/tokens.json",
       "--login",
       "--check",

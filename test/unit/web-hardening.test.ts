@@ -12,8 +12,11 @@
  *
  * Suunto is the in-process mock: nothing is ever sent to Suunto. Invented data only.
  */
+import { mkdtempSync, rmSync } from "node:fs";
 import { createServer, request, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { ListWorkoutsQuery } from "../../src/activity/types.js";
@@ -401,7 +404,7 @@ describe("a shutdown", () => {
 });
 
 describe("the Suunto call limits", () => {
-  it("are shown on the admin page (10 per minute and 100 per user per day by default)", async () => {
+  it("are shown on the admin page (10 per minute, 100 per user per day and 100 per user in 7 days by default)", async () => {
     const run = await startWeb({ callLimits: undefined });
     setBase(run.base);
     try {
@@ -410,11 +413,44 @@ describe("the Suunto call limits", () => {
       const { html } = await owner.page("/admin");
       expect(html).toContain("10 Suunto requests per minute for the whole server");
       expect(html).toContain("100 requests per user per day");
-      expect(html).toContain("SUUNTO_CALLS_PER_MINUTE");
-      expect(run.web.ctx.pool.limits).toEqual({ perMinute: 10, perUserPerDay: 100 });
+      expect(html).toContain("100 requests per user in any 7 days");
+      expect(html).toContain("SUUNTO_CALLS_PER_USER_PER_WEEK");
+      expect(run.web.ctx.pool.limits).toEqual({ perMinute: 10, perUserPerDay: 100, perUserPerWeek: 100 });
       expect(run.web.ctx.pool.limiter).toBeInstanceOf(CallLimiter);
     } finally {
       await run.stop();
+    }
+  });
+
+  it("keep each user's requests and a stop after Suunto's own limit answer in the database, so a restart does not reset them", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "suunto-mcp-limits-"));
+    const limits = { perMinute: 0, perUserPerDay: 2, perUserPerWeek: 3 };
+    try {
+      const first = await startWeb({ dataDir: dir, callLimits: limits });
+      try {
+        await first.web.ctx.pool.limiter!.acquire("user-a");
+        await first.web.ctx.pool.limiter!.acquire("user-a");
+      } finally {
+        await first.stop();
+      }
+      const second = await startWeb({ dataDir: dir, callLimits: limits });
+      try {
+        // Not a fresh share after the restart.
+        await expect(second.web.ctx.pool.limiter!.acquire("user-a")).rejects.toThrow("You reached this service's daily limit of 2 Suunto requests for your account. Try again tomorrow.");
+        await second.web.ctx.pool.limiter!.acquire("user-b");
+        // Suunto answered with its weekly quota: every user stops, also after a restart.
+        second.web.ctx.pool.limiter!.block(2 * 86_400_000);
+      } finally {
+        await second.stop();
+      }
+      const third = await startWeb({ dataDir: dir, callLimits: { perMinute: 0, perUserPerDay: 0, perUserPerWeek: 0 } });
+      try {
+        await expect(third.web.ctx.pool.limiter!.acquire("user-c")).rejects.toThrow(/^Suunto's call limit for this service is reached\. Try again in (2 days|48 hours)\.$/);
+      } finally {
+        await third.stop();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 
@@ -518,12 +554,40 @@ describe("the connect-time test request", () => {
     await full.acquire("someone");
     const later = await testConnection(ctx({ limiter: full }), result(), "user-3");
     expect(later.check.error).toMatch(/^Suunto's call limit for this service is reached\. Try again in /);
-    // Still waiting for a slot at the cutoff: nothing was sent.
-    const busy = new CallLimiter({ perMinute: 1, maxWaitMs: 120_000, sleep: () => new Promise(() => undefined) });
-    await busy.acquire("someone");
-    const waiting = await testConnection(ctx({ limiter: busy }), result(), "user-3", 50);
-    expect(waiting.check.error).toBe("This service is at its Suunto call limit right now, so the test request was not sent.");
     expect(mock.count("/v3/workouts") - calls).toBe(0);
+  });
+
+  it("never books a slot of the call limiter that it cannot use before its cutoff", async () => {
+    // The limiter would let the check wait 60 s (up to 120 s), but the check stops after 15 s.
+    let now = Date.UTC(2026, 10, 10, 12, 0, 0);
+    const waits: number[] = [];
+    const busy = new CallLimiter({
+      perMinute: 2,
+      perKeyPerDay: 2,
+      maxWaitMs: 120_000,
+      now: () => now,
+      sleep: async (ms) => {
+        waits.push(ms);
+        now += ms;
+      },
+    });
+    await busy.acquire("someone");
+    await busy.acquire("someone");
+    const calls = mock.count("/v3/workouts");
+    const waiting = await testConnection(ctx({ limiter: busy }), result(), "user-3", 15_000);
+    expect(waiting.check.error).toBe("Suunto's call limit for this service is reached. Try again in 60 seconds.");
+    expect(mock.count("/v3/workouts") - calls).toBe(0);
+    expect(waits).toEqual([]);
+    // Nothing was booked: one minute later both slots are free for another user...
+    now += 60_000;
+    await busy.acquire("user-4");
+    await busy.acquire("user-4");
+    expect(waits).toEqual([]);
+    // ...and user-3 still has the whole daily share.
+    now += 60_000;
+    await busy.acquire("user-3");
+    await busy.acquire("user-3");
+    await expect(busy.acquire("user-3")).rejects.toThrow(/daily limit of 2/);
   });
 });
 

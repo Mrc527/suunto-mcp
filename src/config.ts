@@ -61,7 +61,8 @@ export interface AppConfig {
   /** Secrets that must never appear in output (client secret, subscription key, refresh token, HTTP token). */
   secrets: string[];
   /**
-   * The Suunto call limits of this process (SUUNTO_CALLS_PER_MINUTE, SUUNTO_CALLS_PER_USER_PER_DAY).
+   * The Suunto call limits of this process (SUUNTO_CALLS_PER_MINUTE, SUUNTO_CALLS_PER_USER_PER_DAY,
+   * SUUNTO_CALLS_PER_USER_PER_WEEK).
    * Set by loadConfig; single-user mode builds its limiter from them (default DEFAULT_LIMITS).
    */
   callLimits?: CallLimits;
@@ -143,14 +144,16 @@ function limitValue(env: Env, name: string, fallback: number): number {
 
 /**
  * The Suunto call limits (DESIGN.md section 4, call limiter): SUUNTO_CALLS_PER_MINUTE (default
- * 10, Suunto's Developer limit) for the whole process, and SUUNTO_CALLS_PER_USER_PER_DAY (default
- * 0). 0 means no limit, an empty value means unset. The web service passes its own defaults (it
- * caps each user at 100 calls a day unless the variable is set).
+ * 10, Suunto's Developer limit) for the whole process, SUUNTO_CALLS_PER_USER_PER_DAY (default 0)
+ * and SUUNTO_CALLS_PER_USER_PER_WEEK (default 0; any 7 days). 0 means no limit, an empty value
+ * means unset. The web service passes its own defaults (it caps each user at 100 calls a day and
+ * 100 in any 7 days unless the variables are set).
  */
 export function callLimitsFromEnv(env: Env, defaults: Partial<CallLimits> = {}): CallLimits {
   return {
     perMinute: limitValue(env, "SUUNTO_CALLS_PER_MINUTE", defaults.perMinute ?? DEFAULT_LIMITS.perMinute),
     perUserPerDay: limitValue(env, "SUUNTO_CALLS_PER_USER_PER_DAY", defaults.perUserPerDay ?? DEFAULT_LIMITS.perUserPerDay),
+    perUserPerWeek: limitValue(env, "SUUNTO_CALLS_PER_USER_PER_WEEK", defaults.perUserPerWeek ?? DEFAULT_LIMITS.perUserPerWeek ?? 0),
   };
 }
 

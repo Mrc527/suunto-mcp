@@ -178,6 +178,32 @@ describe("a session of an older Suunto connection", () => {
     expect(user().suuntoNeedsReconnect).toBe(false);
   });
 
+  it("gives every user's cache the pool's one memory budget, and sends a scan no more requests than the minute allows", async () => {
+    const { ServicePool } = await import("../../src/web/accounts.js");
+    const { CallLimiter } = await import("../../src/suunto/limiter.js");
+    const { CacheBudget } = await import("../../src/activity/cache.js");
+    store().saveSuuntoSettings(userId, storedConnection(3_000));
+    const pool = new ServicePool(store(), { operator: { SUUNTO_OAUTH_URL: mock.oauthUrl, SUUNTO_API_URL: mock.apiUrl }, keys: mock.keys, cacheBytes: 4096, limiter: new CallLimiter({ perMinute: 7 }) });
+    try {
+      expect(pool.cacheBudget).toBeInstanceOf(CacheBudget);
+      expect(pool.cacheBudget.maxBytes).toBe(4096);
+      const services = pool.get(user())!.services;
+      expect(pool.cacheBudget.size).toBe(1);
+      await services.backend!.listWorkouts(fresh());
+      expect(pool.cacheBudget.bytes).toBeGreaterThan(0);
+      expect((services.activity as unknown as { opts: { maxScanRequests?: number } }).opts.maxScanRequests).toBe(7);
+      // A rebuild for new settings keeps the cache, the budget and the scan limit.
+      pool.rebuild(userId);
+      const rebuilt = pool.get(user())!.services;
+      expect(rebuilt.backend).toBe(services.backend);
+      expect((rebuilt.activity as unknown as { opts: { maxScanRequests?: number } }).opts.maxScanRequests).toBe(7);
+    } finally {
+      await pool.closeAll();
+    }
+    expect(pool.cacheBudget.size).toBe(0);
+    expect(pool.cacheBudget.bytes).toBe(0);
+  });
+
   it("gives real users no services without the operator's app keys, and demo accounts still work", async () => {
     const { ServicePool } = await import("../../src/web/accounts.js");
     const pool = new ServicePool(store(), { operator: {}, demo: web.ctx.demo });
