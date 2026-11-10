@@ -1,0 +1,45 @@
+# Run the multi-user web service with automatic HTTPS (Let's Encrypt) through Caddy.
+#
+#   cd deploy
+#   cp .env.example .env    # set DOMAIN, ADMIN_EMAIL, ADMIN_PASSWORD
+#   docker compose up -d
+#
+# Then open https://$DOMAIN, sign in as the administrator and add https://$DOMAIN/mcp
+# as a custom connector in Claude.
+#
+# The project name keeps this stack apart from other Compose stacks in a folder called "deploy"
+# (for example MCP for iCloud): their containers and volumes would otherwise share names.
+name: padi-mcp
+
+services:
+  padi-mcp:
+    build: ..
+    restart: unless-stopped
+    environment:
+      PUBLIC_URL: https://${DOMAIN}
+      TRUST_PROXY: "1"
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      # MASTER_KEY: optional; otherwise generated once into the data volume (back it up).
+      # Optional: e-mails to administrators about access requests (your own SMTP server).
+      SMTP_URL: ${SMTP_URL:-}
+      NOTIFY_FROM: ${NOTIFY_FROM:-}
+      # Optional: PADI logbook API for every user: proxy (default), direct or auto.
+      PADI_API_MODE: ${PADI_API_MODE:-}
+    volumes:
+      - data:/data
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on: [padi-mcp]
+    ports:
+      - "80:80"
+      - "443:443"
+    command: caddy reverse-proxy --from ${DOMAIN} --to padi-mcp:3000
+    volumes:
+      - caddy-data:/data
+
+volumes:
+  data:
+  caddy-data:

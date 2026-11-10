@@ -1,0 +1,72 @@
+# Production stack used by the CI/CD pipeline (.github/workflows/ci.yml).
+#
+# The pipeline copies this folder (compose.yml, deploy.sh, .env.example) to the server and runs
+# deploy.sh, which pulls the new image, sets PADI_MCP_IMAGE in .env and restarts the service.
+# Your own settings live in .env next to this file; the pipeline only changes its
+# PADI_MCP_IMAGE line.
+#
+# Manual commands, run in this folder on the server as the user that owns it
+# (for example: sudo -iu deploy, then cd padi-mcp). Do not run them as root.
+#   ./deploy.sh status          what runs now and the recent deploys
+#   ./deploy.sh rollback        go back to the version that ran before
+#   ./deploy.sh backup          save a consistent copy of the database
+#   docker compose logs -f      follow the logs
+#
+# Your own settings (how the reverse proxy reaches the service, see below) go in
+# compose.override.yml here. Docker Compose loads it automatically and the pipeline never
+# touches it.
+name: padi-mcp
+
+services:
+  padi-mcp:
+    image: ${PADI_MCP_IMAGE:?PADI_MCP_IMAGE is set by deploy.sh}
+    restart: unless-stopped
+    environment:
+      PUBLIC_URL: https://${DOMAIN:?set DOMAIN in .env}
+      TRUST_PROXY: ${TRUST_PROXY:-1}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      # Optional. If empty, a key is generated once in the data volume (back it up).
+      MASTER_KEY: ${MASTER_KEY:-}
+      # Optional: SMTP server for e-mails to administrators about access requests.
+      SMTP_URL: ${SMTP_URL:-}
+      NOTIFY_FROM: ${NOTIFY_FROM:-}
+      # Optional: PADI logbook API for every user: proxy (default), direct or auto.
+      PADI_API_MODE: ${PADI_API_MODE:-}
+    # No port is published on this machine. Your reverse proxy reaches the service in one of
+    # these ways (setup-server.sh writes the matching compose.override.yml):
+    #   - a proxy in Docker (Traefik, ...): on a Docker network shared with it, at padi-mcp:3000;
+    #   - a proxy installed on this machine (nginx, Caddy): compose.override.yml publishes
+    #     127.0.0.1:HOST_PORT;
+    #   - the bundled Caddy below (COMPOSE_PROFILES=caddy): on the default network.
+    volumes:
+      - data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "5"
+
+  # Optional HTTPS front end for servers without a reverse proxy: set COMPOSE_PROFILES=caddy
+  # in .env. Caddy then answers on ports 80 and 443 and gets a Let's Encrypt certificate.
+  caddy:
+    image: caddy:2
+    profiles: [caddy]
+    restart: unless-stopped
+    depends_on: [padi-mcp]
+    ports:
+      - "80:80"
+      - "443:443"
+    command: caddy reverse-proxy --from ${DOMAIN} --to padi-mcp:3000
+    volumes:
+      - caddy-data:/data
+
+volumes:
+  data:
+  caddy-data:

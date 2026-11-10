@@ -1,28 +1,71 @@
 {
-  "name": "suunto-mcp",
-  "version": "1.0.0",
-  "main": "index.js",
-  "license": "MIT",
-  "devDependencies": {
-    "@types/node": "^24.0.3",
-    "@types/react": "^19.1.8",
-    "@types/react-dom": "^19.1.6",
-    "typescript": "^5.8.3",
-    "pg": "^8.16.2"
+  "name": "padi-mcp",
+  "version": "0.1.0",
+  "description": "MCP for PADI: an unofficial MCP server that lets Claude, ChatGPT and other AI apps read and manage your PADI online dive logbook, as a multi-user web service or locally. Not affiliated with PADI.",
+  "type": "module",
+  "bin": {
+    "padi-mcp": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    ".env.example"
+  ],
+  "engines": {
+    "node": ">=22.13"
   },
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start"
+    "build": "tsc -p tsconfig.json && node scripts/postbuild.mjs",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "check": "node dist/index.js --check",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:unit": "vitest run test/unit",
+    "test:integration": "vitest run test/integration",
+    "prepublishOnly": "npm run build",
+    "prepare": "npm run build",
+    "start:web": "node dist/index.js --web"
   },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "padi",
+    "scuba",
+    "diving",
+    "logbook",
+    "dive-log",
+    "claude",
+    "ai",
+    "chatgpt"
+  ],
+  "author": "Marco Visin",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mrc527/PADI-MCP.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Mrc527/PADI-MCP/issues"
+  },
+  "homepage": "https://github.com/Mrc527/PADI-MCP#readme",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.13.0",
-    "next": "15.3.8",
-    "node-fetch": "^3.3.2",
-    "pg": "^8.16.2",
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0",
-    "sequelize": "^6.37.7",
-    "zod": "^3.25.67"
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "express": "^5.3.0",
+    "express-rate-limit": "^8.7.3",
+    "nodemailer": "^10.3.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.6",
+    "@types/nodemailer": "^8.0.2",
+    "@types/smtp-server": "^3.5.13",
+    "smtp-server": "^3.21.3",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
   }
 }

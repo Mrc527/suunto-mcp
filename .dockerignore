@@ -1,0 +1,14 @@
+node_modules
+dist
+data
+coverage
+.git
+.github
+test
+docs
+deploy
+*.log
+.env
+.env.*
+# The logo sources: the image uses the icons generated into src/web/brand-assets.ts.
+assets

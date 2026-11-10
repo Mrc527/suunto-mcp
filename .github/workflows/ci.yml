@@ -1,0 +1,238 @@
+# CI/CD for padi-mcp.
+#
+# Pull requests: tests, plus a test build of the Docker image for linux/amd64 and linux/arm64.
+# Push to main:  tests, then the image is published to ghcr.io and deployed over SSH to the
+#                server (nebula.visin.ch unless the DEPLOY_HOST variable says otherwise).
+# Run workflow:  "deploy" does the same as a push to main; "rollback" switches the server back
+#                to the version that ran before the last deploy.
+#
+# One-time setup (server, secrets, variables): see "Deploy with GitHub Actions" in README.md.
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "deploy: test, build and deploy main. rollback: switch the server back to the previous version."
+        type: choice
+        options: [deploy, rollback]
+        default: deploy
+
+permissions:
+  contents: read
+
+concurrency:
+  # Pushes and manual deploys of one branch run one after another; a rollback has its own group.
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.action == 'rollback' && 'rollback' || 'run' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # "Run workflow" only deploys or rolls back from main. Fail loudly instead of skipping quietly.
+  branch-check:
+    name: Check branch
+    if: github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "::error title=Wrong branch::Deploy and rollback only run from main. In 'Run workflow', choose main under 'Use workflow from' (you chose $GITHUB_REF_NAME)."
+          exit 1
+
+  test:
+    name: Test (Node ${{ matrix.node }})
+    if: inputs.action != 'rollback'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm run test:unit
+      # Against an in-process mock PADI API: no PADI account and no network needed.
+      - name: Integration tests
+        run: npm run test:integration
+        env:
+          PADI_MCP_IT: "1"
+
+  image:
+    name: Docker image
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    env:
+      PUBLISH: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
+    outputs:
+      image: ${{ steps.name.outputs.image }}
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Image name
+        id: name
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >>"$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # Build each platform into the local Docker engine and start it before anything is published.
+      # The publish step reuses the layers from these builds (same builder). No cache is shared
+      # between runs, so a published image never contains layers written by another job.
+      - name: Build linux/amd64
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: padi-mcp:test-amd64
+      - name: Build linux/arm64
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/arm64
+          load: true
+          tags: padi-mcp:test-arm64
+      - name: Smoke test linux/amd64
+        run: scripts/smoke-test-image.sh padi-mcp:test-amd64 linux/amd64
+      - name: Smoke test linux/arm64 (emulated)
+        run: scripts/smoke-test-image.sh padi-mcp:test-arm64 linux/arm64
+
+      - name: Image tags and labels
+        id: meta
+        if: env.PUBLISH == 'true'
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        env:
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
+        with:
+          images: ${{ steps.name.outputs.image }}
+          tags: |
+            type=sha,format=long
+            type=raw,value=latest
+      - name: Log in to ghcr.io
+        if: env.PUBLISH == 'true'
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish linux/amd64 + linux/arm64
+        id: push
+        if: env.PUBLISH == 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+      - name: Summary
+        if: env.PUBLISH == 'true'
+        env:
+          IMAGE: ${{ steps.name.outputs.image }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          {
+            echo "### Docker image"
+            echo "- \`$IMAGE@$DIGEST\`"
+            echo "- Tags: \`sha-$GITHUB_SHA\`, \`latest\`"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    name: Deploy
+    needs: image
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read
+    environment:
+      name: production
+      url: ${{ steps.deploy.outputs.url }}
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    env:
+      DEPLOY_HOST: ${{ vars.DEPLOY_HOST || 'nebula.visin.ch' }}
+      DEPLOY_USER: ${{ vars.DEPLOY_USER || 'deploy' }}
+      DEPLOY_PORT: ${{ vars.DEPLOY_PORT || '22' }}
+      DEPLOY_PATH: ${{ vars.DEPLOY_PATH || 'padi-mcp' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            .github/scripts
+            deploy/server
+      - name: Set up SSH
+        run: .github/scripts/ssh-deploy.sh setup
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+      - name: Deploy over SSH
+        id: deploy
+        run: .github/scripts/ssh-deploy.sh deploy "$IMAGE" "$GITHUB_SHA"
+        env:
+          IMAGE: ${{ needs.image.outputs.image }}@${{ needs.image.outputs.digest }}
+          # The server pulls with this job's token: it can read this repository and its packages
+          # and expires when the job ends. The server never stores it.
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check the public URL
+        if: steps.deploy.outputs.url != ''
+        run: .github/scripts/ssh-deploy.sh check-url "$URL"
+        env:
+          URL: ${{ steps.deploy.outputs.url }}
+
+  rollback:
+    name: Roll back
+    if: github.event_name == 'workflow_dispatch' && inputs.action == 'rollback' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read
+    environment:
+      name: production
+      url: ${{ steps.rollback.outputs.url }}
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    env:
+      DEPLOY_HOST: ${{ vars.DEPLOY_HOST || 'nebula.visin.ch' }}
+      DEPLOY_USER: ${{ vars.DEPLOY_USER || 'deploy' }}
+      DEPLOY_PORT: ${{ vars.DEPLOY_PORT || '22' }}
+      DEPLOY_PATH: ${{ vars.DEPLOY_PATH || 'padi-mcp' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - name: Set up SSH
+        run: .github/scripts/ssh-deploy.sh setup
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+      - name: Roll back over SSH
+        id: rollback
+        run: .github/scripts/ssh-deploy.sh rollback
+        env:
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}

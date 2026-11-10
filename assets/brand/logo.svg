@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+<title>MCP for PADI</title>
+<defs><linearGradient id="pdm-sea" x1="80" y1="0" x2="432" y2="512" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#22c1e8"/><stop offset=".55" stop-color="#0f7fc9"/><stop offset="1" stop-color="#0a3f8c"/></linearGradient><linearGradient id="pdm-sheen" x1="0" y1="0" x2="0" y2="512" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#fff" stop-opacity=".14"/><stop offset=".55" stop-color="#fff" stop-opacity="0"/></linearGradient><linearGradient id="pdm-page" x1="0" y1="150" x2="0" y2="420" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#e8f4fc"/></linearGradient></defs>
+<path d="M328.8 0c64.13 0 96.19 0 120.68 12.48a114.5 114.5 0 0 1 50.04 50.04c12.48 24.49 12.48 56.56 12.48 120.68L512 328.8c0 64.13 0 96.19 -12.48 120.68a114.5 114.5 0 0 1 -50.04 50.04c-24.49 12.48 -56.56 12.48 -120.68 12.48L183.2 512c-64.13 0 -96.19 0 -120.68 -12.48a114.5 114.5 0 0 1 -50.04 -50.04c-12.48 -24.49 -12.48 -56.56 -12.48 -120.68L0 183.2c0 -64.13 0 -96.19 12.48 -120.68a114.5 114.5 0 0 1 50.04 -50.04c24.49 -12.48 56.56 -12.48 120.68 -12.48Z" fill="url(#pdm-sea)"/>
+<path d="M328.8 0c64.13 0 96.19 0 120.68 12.48a114.5 114.5 0 0 1 50.04 50.04c12.48 24.49 12.48 56.56 12.48 120.68L512 328.8c0 64.13 0 96.19 -12.48 120.68a114.5 114.5 0 0 1 -50.04 50.04c-24.49 12.48 -56.56 12.48 -120.68 12.48L183.2 512c-64.13 0 -96.19 0 -120.68 -12.48a114.5 114.5 0 0 1 -50.04 -50.04c-12.48 -24.49 -12.48 -56.56 -12.48 -120.68L0 183.2c0 -64.13 0 -96.19 12.48 -120.68a114.5 114.5 0 0 1 50.04 -50.04c24.49 -12.48 56.56 -12.48 120.68 -12.48Z" fill="url(#pdm-sheen)"/>
+<path d="M250 214C212 188 162 180 100 186A12 12 0 0 0 89 198V390A12 12 0 0 0 102 402C162 397 210 405 250 430Z" fill="url(#pdm-page)"/>
+<path d="M262 214C300 188 350 180 412 186A12 12 0 0 1 423 198V390A12 12 0 0 1 410 402C350 397 302 405 262 430Z" fill="url(#pdm-page)"/>
+<path d="M126 240C160 236 196 240 226 252M126 274C160 270 196 274 226 286" fill="none" stroke="#9fd2f0" stroke-width="12" stroke-linecap="round"/>
+<path d="M116 344C139 316 162 316 186 344S233 372 256 344S303 316 326 344S373 372 396 344" fill="none" stroke="#0f7fc9" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="350" cy="138" r="20" fill="none" stroke="#fff" stroke-width="11"/>
+<circle cx="386" cy="92" r="13" fill="none" stroke="#fff" stroke-width="9"/>
+<circle cx="410" cy="58" r="7" fill="#fff"/>
+</svg>
