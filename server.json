@@ -1,27 +1,27 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.Mrc527/mcp-for-padi",
-  "title": "MCP for PADI",
-  "description": "Unofficial. Read and log dives in your PADI online logbook. Needs an account at padi.mcp.visin.ch.",
+  "name": "io.github.Mrc527/mcp-for-suunto",
+  "title": "MCP for Suunto",
+  "description": "Read your Suunto workouts, sleep and recovery; add routes. Needs an account at suunto.mcp.visin.ch.",
   "version": "0.1.0",
-  "websiteUrl": "https://padi.mcp.visin.ch",
+  "websiteUrl": "https://suunto.mcp.visin.ch",
   "icons": [
     {
-      "src": "https://padi.mcp.visin.ch/icon-48.png",
+      "src": "https://suunto.mcp.visin.ch/icon-48.png",
       "mimeType": "image/png",
       "sizes": [
         "48x48"
       ]
     },
     {
-      "src": "https://padi.mcp.visin.ch/icon-192.png",
+      "src": "https://suunto.mcp.visin.ch/icon-192.png",
       "mimeType": "image/png",
       "sizes": [
         "192x192"
       ]
     },
     {
-      "src": "https://padi.mcp.visin.ch/icon.svg",
+      "src": "https://suunto.mcp.visin.ch/icon.svg",
       "mimeType": "image/svg+xml",
       "sizes": [
         "any"
@@ -31,7 +31,7 @@
   "remotes": [
     {
       "type": "streamable-http",
-      "url": "https://padi.mcp.visin.ch/mcp"
+      "url": "https://suunto.mcp.visin.ch/mcp"
     }
   ]
 }

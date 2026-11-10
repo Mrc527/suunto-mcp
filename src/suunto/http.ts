@@ -319,6 +319,8 @@ function megabytes(bytes: number): string {
 const KEY_PROBLEM = /subscription key|subscription-key|ocp-apim/i;
 /** Messages of the API gateway when the app's call quota is used up. */
 const QUOTA_PROBLEM = /quota|rate limit|call volume/i;
+/** A 401 that is really a rate limit (seen from the gateway): not a sign-in problem. */
+const RATE_LIMIT_401 = /ratelimitexceeded|rate limit/i;
 
 export class SuuntoHttp {
   private readonly doFetch: typeof fetch;
@@ -355,7 +357,8 @@ export class SuuntoHttp {
       if (value === undefined || value === null) continue;
       params.set(key, String(value));
     }
-    const qs = params.toString();
+    // Lists (extensions, activities) are documented with plain commas: keep them readable.
+    const qs = params.toString().replace(/%2C/gi, ",");
     return `${this.opts.endpoints.apiUrl}${req.path}${qs ? `?${qs}` : ""}`;
   }
 
@@ -367,16 +370,23 @@ export class SuuntoHttp {
     if (res.status === 401) {
       const body = await readText(res);
       if (KEY_PROBLEM.test(body)) throw this.keyRefused();
+      // The gateway sometimes answers a rate limit with 401: a new token would not help.
+      if (RATE_LIMIT_401.test(body)) throw this.busy(401);
       // The token may have expired early or been revoked: refresh once and try once more.
       const fresh = await session.refreshNow(first);
       res = await this.send(req, fresh);
       if (res.status === 401) {
         const again = await readText(res);
         if (KEY_PROBLEM.test(again)) throw this.keyRefused();
+        if (RATE_LIMIT_401.test(again)) throw this.busy(401);
         throw new SuuntoHttpError("http", `Suunto refused the sign-in. ${session.connectAgain ?? "Connect Suunto again."}`, { status: 401 });
       }
     }
     return this.finish(req, res);
+  }
+
+  private busy(status: number): SuuntoHttpError {
+    return new SuuntoHttpError("http", `Suunto is busy or the rate limit is reached (HTTP ${status}). Try again later.`, { status });
   }
 
   private secrets(): string[] {
@@ -511,9 +521,7 @@ export class SuuntoHttp {
         { status },
       );
     }
-    if (status === 429 || (status === 503 && !write)) {
-      return new SuuntoHttpError("http", `Suunto is busy or the rate limit is reached (HTTP ${status}). Try again later.`, { status });
-    }
+    if (status === 429 || (status === 503 && !write)) return this.busy(status);
     if (write && status >= 500) {
       return new UnconfirmedWriteError(
         `Suunto answered HTTP ${status}, so it is not clear whether the change was saved. Check in the Suunto App (or list the routes or points of interest) before you try again.`,

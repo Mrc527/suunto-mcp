@@ -123,6 +123,25 @@ Files of the PADI template that are dropped: `src/padi/**`, `src/logbook/**`,
   the rate limit is reached; try again later". Writes are never retried after the request may have
   reached Suunto: the error says "check before you try again".
 - **Timeouts** 20 s per request (FIT export 60 s).
+- **Rate limits.** The Developer API allows 10 calls per minute and at most 200 calls per week
+  per subscription; Production limits are higher but not published, and Suunto forbids polling.
+  So: (1) every real account's backend is wrapped in a small response cache
+  (`src/activity/cache.ts`, `CachedBackend implements ActivityBackend`, per user, in memory, LRU
+  with at most 200 entries and 20 MB): workout lists 2 minutes, a workout by key and FIT files
+  30 minutes, 247 data and daily statistics 30 minutes for windows that end before the current
+  hour and 2 minutes otherwise, routes and POIs 2 minutes; a successful route import or POI create
+  clears the route or POI entries. The demo is not cached. (2) No call to Suunto when a web page
+  is only shown (the account page shows what was saved at connect time). (3) The gateway answers
+  429 (minute limit, `Retry-After`), 403 with a text such as "Out of call volume quota" (weekly
+  quota), and possibly 401 with "RateLimitExceeded": all three are rate limit errors ("Suunto's
+  call limit for this service is reached; try again in <time>"), never a sign-in problem and never
+  a refresh. A 401 whose body names the subscription key is an operator configuration error.
+- **False invalid_grant.** Suunto has answered `invalid_grant` by mistake during outages and
+  accepted the same refresh token later. So an `invalid_grant` marks the connection
+  `needsReconnect` but keeps the stored tokens, and the session tries the refresh again after a
+  cool-down of 10 minutes (not on every call); a refresh that works again clears
+  `needsReconnect`. Tool calls are not blocked by the flag; they get the session's error
+  ("Your Suunto connection expired. Connect Suunto again at <PUBLIC_URL>/account").
 - **Windows.** 247 endpoints accept at most 28 days per request: the service splits longer ranges.
 - **Units on the wire** (from suunto-api.md): seconds, metres, m/s, kcal for workouts, joules for
   247 energy, kelvin for workout temperatures, SpO2 and recovery balance as 0..1 fractions,
@@ -234,6 +253,9 @@ the token cache, prints the Suunto username and exits. It never opens a browser 
   `store.saveSuuntoTokens(userId, ...)` without changing `service_updated_at` (so the service pool
   is not rebuilt). A refresh refused with `invalid_grant` marks the connection `needsReconnect`;
   tools then answer "Your Suunto connection expired. Connect Suunto again at <PUBLIC_URL>/account".
+- **No Suunto calls on page views.** The account page shows what was saved at connect time
+  (`SuuntoAccountSettings.lastCheck`: when, and the workouts counted in the last 30 days, or the
+  error); it never calls Suunto just to show the page.
 - **DB**: one fresh initial schema (no migrations): column `service_enc`, `service_updated_at`,
   `suunto_needs_reconnect`, table `suunto_oauth_states`, and the template's other tables.
 - **Admin page**: as in PADI (no service checkboxes); user list column "Suunto" (connected / not /
@@ -368,6 +390,9 @@ export function loadConfig(env?: Record<string, string | undefined>, cli?: CliOv
 export function suuntoKeysFromEnv(env: Record<string, string | undefined>): SuuntoAppKeys | undefined;  // undefined unless all three are set; throws ConfigError when only some are
 export function describeConfig(config: AppConfig): Record<string, unknown>;    // no secrets
 
+// src/activity/cache.ts (section 4, rate limits)
+export class CachedBackend implements ActivityBackend { constructor(inner: ActivityBackend, opts?: { now?: () => number; maxEntries?: number; maxBytes?: number }) }
+
 // src/server.ts
 export interface Services { activity?: ActivityService; backend?: ActivityBackend; session?: SuuntoSession }
 export interface CreateServicesOptions {
@@ -385,7 +410,7 @@ export const SERVER_DESCRIPTION: string;
 export function buildInstructions(config: AppConfig): string;
 
 // src/web/store.ts (section 8)
-export interface SuuntoAccountSettings { username: string; refreshToken: string; accessToken?: string; accessTokenExpiresAt?: number; clientId: string; units: UnitChoice; readOnly: boolean; timeZone?: string; connectedAt: number }
+export interface SuuntoAccountSettings { username: string; refreshToken: string; accessToken?: string; accessTokenExpiresAt?: number; clientId: string; units: UnitChoice; readOnly: boolean; timeZone?: string; connectedAt: number; lastCheck?: { at: number; workouts?: number; error?: string } }
 // User gets: hasSuunto: boolean; suuntoNeedsReconnect: boolean (instead of hasPadi / padiNeedsReconnect)
 // Store gets: getSuuntoSettings, readSuuntoSettings, saveSuuntoSettings, saveSuuntoTokens(userId, tokens, connectedAt?),
 //   saveSuuntoPreferences, setSuuntoNeedsReconnect, createOAuthState(userId, next?), consumeOAuthState(state, userId) -> { next? } | undefined

@@ -1,6 +1,8 @@
 node_modules/
 dist/
 coverage/
+# The web service's local data (SQLite database and the generated encryption key).
+data/
 *.log
 .env
 .env.*

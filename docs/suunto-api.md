@@ -153,10 +153,10 @@ Status codes named in the docs:
 | 400 | all, OAuth token and deauthorize too | bad request; 247: "Something is wrong with the parameters." |
 | 401 | 247, routes, OAuth | "Authentication failed." FAQ: "bad client credentials" with wrong credentials |
 | 403 | workouts, workout description, routes, POI, upload, guides | forbidden (no text for most). Also, likely, the Azure quota answer (1.3) |
-| 429 | none | not in the docs. Likely the Azure rate-limit answer (1.3) |
 | 404 | FIT export, routes, POI get, upload status, guides | not found |
 | 409 | route update, guide create/update | revision conflict; duplicate guide `externalId` |
 | 422 | upload | "On wrong parameters (e.g. unsupported data type)" |
+| 429 | none | not in the docs. Likely the Azure rate-limit answer (1.3) |
 | 500 | many | FAQ: a 500 "internal server error" from the workout API often means a wrong workout key. Workout key format: "hexadecimal string, key length - 12 bytes" (24 hex characters). |
 | 503 | 247 | "Service capacity exceeded. Try again later." |
 
@@ -328,19 +328,23 @@ All calls below need the two headers of section 1.2. Paths are relative to the b
 Common rules (documented for all four operations):
 
 - "Data is stored into and fetched from the API using UTC time."
-- Maximum interval **28 days**. Suunto advises fetching once every 24 hours. One third party says
-  a window of exactly 28 days is rejected on daily statistics (unverified). Stay below 28 days.
-- The documented example call `/247samples/activity?from=1672524000000&to=1690837200000` spans
-  212 days. Follow the 28-day rule, not the example.
-- `from` and `to` must be epoch-ms **integers** (documented type). ISO strings give 400 "Type
-  mismatch" (unverified; jb381). They are UTC instants: the window filters on instants, so a
-  window that starts at UTC midnight cuts a local day at the UTC offset, for example at 02:00 for a
-  user at UTC+2 (likely; googlarz). Build windows from the user's local midnight.
-- Returned timestamps are ISO 8601 with the wearer's local offset (for example `+02:00`, webhook
-  examples); the doc examples also use `Z` (documented).
+- Maximum interval **28 days**. Suunto advises fetching once every 24 hours.
 - Headers: `Authorization` ("JWT access token"). The activity, sleep and recovery operations also
   list a required `Content-Type: application/json` header, although they are GETs. Send it.
 - Errors: 400, 401, 500, 503 (section 1.5).
+- Returned timestamps are ISO 8601 with the wearer's local offset (for example `+02:00` in the
+  webhook examples); the doc examples also use `Z`.
+
+Other notes:
+
+- The documented example call `/247samples/activity?from=1672524000000&to=1690837200000` spans
+  212 days. Follow the 28-day rule, not the example. One third party says a window of exactly 28
+  days is rejected on daily statistics (unverified). Stay below 28 days.
+- `from` and `to` (activity, sleep, recovery) must be epoch-ms **integers** (documented type).
+  ISO strings give 400 "Type mismatch" (unverified; jb381). They are UTC instants and the window
+  filters on instants, so a window that starts at UTC midnight cuts a local day at the UTC offset,
+  for example at 02:00 for a user at UTC+2 (likely; googlarz). Build windows from the user's local
+  midnight.
 - Subscriptions: one third party says sleep, recovery and activity may need extra API Zone
   subscriptions, and that recovery may answer 404 without one (unverified; googlarz). The home
   page says the Development API "includes all the endpoints".
@@ -541,10 +545,10 @@ key, FAQ).
 
 `workoutIdOrKey`: "Workout identifier (workoutKey)". Answer: `application/octet-stream`, "User
 workout data in Garmin FIT format". Errors: 400, 403, 404. A key that does not exist gives 403,
-not 404 (unverified; googlarz). The FAQ: "Fit files has most
-comprehensive dataset from each workout", with all samples, laps and summary values. The FIT
-content is described on `/fit-description` (session, lap, record, length, event, dive messages and
-Suunto developer fields). MCP for Suunto v1 does not parse FIT.
+not 404 (unverified; googlarz). The FAQ: "Fit files has most comprehensive dataset from each
+workout", with all samples, laps and summary values. The FIT content is described on
+`/fit-description` (session, lap, record, length, event, dive messages and Suunto developer
+fields). MCP for Suunto v1 does not parse FIT.
 
 #### 3.4.3 Workout object (`LimitedWorkout`)
 
@@ -564,8 +568,8 @@ Same schema in v2 and v3 (the two schema files are identical).
 | `totalDistance` | double | **metres** |
 | `totalAscent`, `totalDescent` | double | unit not documented (example `88.75`); metres (likely) |
 | `maxAltitude`, `minAltitude` | float | unit not documented; metres (likely); barometer or GPS |
-| `avgSpeed`, `maxSpeed` | double / float | The schema text says **km/h**. Both examples fit **m/s**: 3900 m in 2686.03 s is 1.45, the value given; webhook: 10000 m in 3600 s, `avgSpeed` 2.78. Treat as m/s (unverified). |
-| `avgPace` | double | unit not documented. Example `11.48` matches minutes per km for 1.45 m/s (unverified). |
+| `avgSpeed`, `maxSpeed` | double / float | The schema text says **km/h**. Both examples fit **m/s**: 3900 m in 2686.03 s is 1.45, the value given; webhook: 10000 m in 3600 s, `avgSpeed` 2.78. Treat as m/s (likely; open-wearables reads m/s too). |
+| `avgPace` | double | unit not documented. Example `11.48` matches minutes per km for 1.45 m/s (1000 / 1.452 / 60 = 11.48) (likely). |
 | `energyConsumption` | int32 | **kcal** (schema) |
 | `recoveryTime`, `cumulativeRecoveryTime` | int64 | seconds |
 | `stepCount` | int32 | no description; a step count (likely) |
@@ -786,10 +790,10 @@ fields from imported files (see `/fit-description`). Not used by MCP for Suunto 
   `fileModificationTime` descending. **Only guides created by your app are returned.**
 - Update replaces only the content; `pinned`, `username` and `id` stay. Both modification times
   change.
-- Errors on create, update, download and delete: 400 invalid guide
+- Errors: create and update: 400 invalid guide
   (`{"error": {"description": "Invalid step type: 'notfication'"}, "payload": null, "metadata": {"ts": "1621925931041"}}`),
-  403, 404 (does not exist, other user, or created by another partner), 409 (the user already has
-  a guide with the same `externalId`). List: 403.
+  403, 409 (the user already has a guide with the same `externalId`). Update, download and
+  delete: 404 (does not exist, other user, or created by another partner), 403. List: 403.
 - The `owner` field in `guide.json` "should match your application name in OAuth settings".
 
 Guide metadata (`GuideSuuntoplusPlugin`): `id`, `username`, `modificationTime` and
@@ -984,21 +988,28 @@ These need a real account and a real call.
    `metadata.until`; does the list include `extensions`?
 9. **Q9 Units.** `avgSpeed`/`maxSpeed` (km/h or m/s), `avgPace`, `totalAscent`, altitudes,
    `created`, route `averageSpeed` and `totalDistance`, POI `creation`.
-10. **Q10 Extensions.** Defaults of `GET /v3/workouts/{key}`; JSON format and units of every
-    extension, stream point format, `extensionTypes` to name mapping.
+10. **Q10 Extensions.** Defaults of `GET /v3/workouts/{key}`; check the third-party shapes of 5.2
+    (stream `points`, `locationPoints`, `pauseMarkers`); HR stream unit (bpm or Hz); are stream
+    timestamps absolute epoch ms; does the partner API serve `DiveHeaderExtension`, and in which
+    units; `extensionTypes` to name mapping; does an unknown name really give 400?
 11. **Q11 v2 location points.** How do they appear in `/v2/workouts/{key}`?
-12. **Q12 247 samples.** Interval; per-sample or cumulative `StepCount`/`EnergyConsumption`;
-    missing fields; day boundaries of daily statistics (local or UTC); `Value` number or string?
+12. **Q12 247 samples.** Interval (likely 10 minutes for activity, 30 for recovery);
+    per-sample `StepCount`/`EnergyConsumption` (likely); missing fields; day boundaries and time
+    stamps of daily statistics (start-date based or local noon); is exactly 28 days refused;
+    `Value` number or string; do sleep and recovery need extra subscriptions?
 13. **Q13 Sleep.** Which date a sleep belongs to; meaning of `SleepId`, `BodyResourcesInsightId`.
 14. **Q14 `/247` versus `/247samples`.** Same daily statistics data?
 15. **Q15 addinfo.** Request body of `POST /v1/workouts/addinfo/{workoutId}`; key or numeric id?
-16. **Q16 Routes.** Import answer body; `sort` field; maximum `size`; values of `visibility`.
+16. **Q16 Routes.** Import answer body (`{"items": [{"id": ...}]}`?); import size limits;
+    `<ele>` or `<elevation>`; `sort` field; maximum `size`; values of `visibility`.
 17. **Q17 POI.** List defaults and maximum; meaning of `errorCode`; any way to delete.
 18. **Q18 Upload.** Validity of the upload URL; is `privacy` accepted?
 19. **Q19 Error bodies.** Shape of 400, 401, 403 and 500 answers per API; does an expired
     access token give 401 or 403?
 20. **Q20 Workout ids.** Relation of `workoutKey`, `key` and `workoutId`; does FIT export accept
-    the numeric id ("workoutIdOrKey")?
+    the numeric id ("workoutIdOrKey")? Does an unknown key on `/fit` give 403 or 404?
+21. **Q21 Developer API users.** Can any Suunto App user authorize an app on the Developer API,
+    or only the developer's testers? No document limits it.
 
 ---
 
@@ -1034,3 +1045,27 @@ id 89 is not listed; ids 92 to 94 exist in the Suunto App only, not on watches):
 
 Unknown ids must be shown as "activity <id>", not guessed. The PDF also maps each id to a FIT
 `sport`/`sub_sport`; FIT files use those, not these ids.
+
+---
+
+## 9. Appendix: outside sources
+
+Short names used in the labels above. None of these is official Suunto documentation. The code
+was read only to learn facts; nothing was copied.
+
+| Short name | Source |
+| --- | --- |
+| home page | https://apizone.suunto.com/ (Suunto's own portal home page, fetched 2026-11-10) |
+| googlarz | github.com/googlarz/suunto-mcp (`src/auth.ts`, `src/api.ts`, `README`) |
+| jb381 | github.com/jb381/suunto-mcp (`CHANGELOG.md`) |
+| open-wearables | github.com/the-momentum/open-wearables (Suunto provider docs, OAuth and workout import code) |
+| quantified-self | github.com/jimmykane/quantified-self (`functions/src/suunto/auth/*`, `docs/suunto-integration.md`, `functions/src/service-auth-lifecycle.ts`) |
+| c2c_tracking | github.com/c2corg/c2c_tracking (`src/server/suunto/*`) |
+| CubeTrek | github.com/r-follador/CubeTrek (`SuuntocloudController.java`) |
+| hicso21 | github.com/hicso21/Runners-API (Suunto partner API controllers) |
+| workout-tracker | github.com/silte/workout-tracker (internal sports-tracker API, not the partner API) |
+| submersion | github.com/submersion-app/submersion (test fixture from the internal sports-tracker API) |
+| open-health-sync | github.com/soma-intelligence/open-health-sync (`docs/connectors/suunto.md`) |
+| Azure docs | learn.microsoft.com, API Management `rate-limit-policy` and `quota-policy` |
+| Suunto forum | forum.suunto.com posts 53397, 60250 and 123407 |
+| intervals.icu forum | forum.intervals.icu thread 130829 (Suunto wellness sync) |

@@ -1,4 +1,4 @@
-# Multi-user web service (claude.ai custom connector). Build: docker build -t padi-mcp .
+# Multi-user web service (claude.ai custom connector). Build: docker build -t suunto-mcp .
 #
 # The build stage always runs on the platform of the build machine. Its output is plain
 # JavaScript (no native modules), so multi-platform images (linux/amd64, linux/arm64) build

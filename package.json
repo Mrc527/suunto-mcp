@@ -1,10 +1,10 @@
 {
-  "name": "padi-mcp",
+  "name": "suunto-mcp",
   "version": "0.1.0",
-  "description": "MCP for PADI: an unofficial MCP server that lets Claude, ChatGPT and other AI apps read and manage your PADI online dive logbook, as a multi-user web service or locally. Not affiliated with PADI.",
+  "description": "MCP for Suunto: an MCP server that lets Claude, ChatGPT and other AI apps read your Suunto workouts, sleep and recovery and add routes, through the official Suunto Cloud API, as a multi-user web service or locally. Not affiliated with Suunto.",
   "type": "module",
   "bin": {
-    "padi-mcp": "dist/index.js"
+    "suunto-mcp": "dist/index.js"
   },
   "main": "dist/index.js",
   "files": [
@@ -32,11 +32,13 @@
   "keywords": [
     "mcp",
     "model-context-protocol",
-    "padi",
-    "scuba",
-    "diving",
-    "logbook",
-    "dive-log",
+    "suunto",
+    "workouts",
+    "fitness",
+    "sleep",
+    "recovery",
+    "gps-watch",
+    "running",
     "claude",
     "ai",
     "chatgpt"
@@ -45,12 +47,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Mrc527/PADI-MCP.git"
+    "url": "git+https://github.com/Mrc527/suunto-mcp.git"
   },
   "bugs": {
-    "url": "https://github.com/Mrc527/PADI-MCP/issues"
+    "url": "https://github.com/Mrc527/suunto-mcp/issues"
   },
-  "homepage": "https://github.com/Mrc527/PADI-MCP#readme",
+  "homepage": "https://github.com/Mrc527/suunto-mcp#readme",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
     "express": "^5.3.0",
