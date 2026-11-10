@@ -11,37 +11,55 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { CATALOGS, type MessageKey } from "../../src/web/i18n/index.js";
 import { en } from "../../src/web/i18n/en/index.js";
 import { createWebApp, type WebApp } from "../../src/web/server.js";
-import { MOCK_ACCOUNT, startMockPadi, type MockPadi } from "../helpers/mock-padi.js";
-import { Browser, setBase } from "../helpers/web-client.js";
+import { MOCK_USERNAME, startMockSuunto, type MockSuunto } from "../helpers/mock-suunto.js";
+import { Browser, connectSuunto, setBase } from "../helpers/web-client.js";
 
 let web: WebApp;
 let server: Server;
-let mock: MockPadi;
+let mock: MockSuunto;
 let base = "";
 const PASSWORD = "correct horse battery";
 const admin = new Browser();
 const saved = CATALOGS.it;
+/** Closed local ports: a server set up with these never reaches real Suunto. */
+const NO_SUUNTO = { SUUNTO_OAUTH_URL: "http://127.0.0.1:1", SUUNTO_API_URL: "http://127.0.0.1:1" };
+
+/** A web app on its own local port. */
+async function startWeb(operator: Record<string, string>): Promise<{ web: WebApp; server: Server; base: string }> {
+  const server = createServer();
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const web = await createWebApp({ publicUrl: new URL(base), host: "127.0.0.1", port: 0, dataDir: ":memory:", operator, log: () => {} });
+  server.on("request", web.app);
+  return { web, server, base };
+}
+
+async function stopWeb(app: { web: WebApp; server: Server }): Promise<void> {
+  await new Promise<void>((r) => app.server.close(() => r()));
+  await app.web.close();
+}
 
 beforeAll(async () => {
   const marked: Partial<Record<MessageKey, string>> = {};
   for (const [key, text] of Object.entries(en)) marked[key as MessageKey] = `⟦${text}⟧`;
   CATALOGS.it = marked;
-  mock = await startMockPadi();
+  // Listen first: the mock accepts only the redirect URI of this server, as Suunto does.
   server = createServer();
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   setBase(base);
+  mock = await startMockSuunto({ redirectUris: [`${base}/suunto/callback`] });
   web = await createWebApp({
     publicUrl: new URL(base),
     host: "127.0.0.1",
     port: 0,
     dataDir: ":memory:",
-    // The mock PADI: nothing is ever sent to PADI.
+    // The mock Suunto (its hosts and app keys): nothing is ever sent to Suunto.
     operator: mock.env(),
     log: () => {},
   });
   server.on("request", web.app);
-  admin.jar.set("pdm_lang", "it");
+  admin.jar.set("sum_lang", "it");
   expect((await admin.signup("admin@example.com", PASSWORD)).status).toBe(303);
 });
 
@@ -55,7 +73,8 @@ afterAll(async () => {
 /** Texts that are the same in every language. */
 const ALLOWED = [
   /^[\s\d.,:;!?()[\]{}<>/\\|+*=#%&@'"`~^_·-]*$/, // numbers and punctuation (· in page titles)
-  /^\s*(PADI|MCP for PADI|MCP|OAuth|HTTP|JSON|YAML|SMTP|UTC|ms|ok)\s*$/,
+  // Product and brand names, and technical names
+  /^\s*(MCP for Suunto|Suunto|Suunto App|Suunto API|Suunto Cloud API|Suunto API Zone|MCP|OAuth|FIT|GPX|HTTP|JSON|YAML|SMTP|UTC|ms|ok)\s*$/,
   /^\s*(English|Italiano|Deutsch|Français|Español|简体中文)\s*$/, // the language menu names each language in itself
   // Names of AI apps (not translated)
   /^\s*(Claude|Claude Code|ChatGPT|Gemini|Gemini CLI|Le Chat \(Mistral\)|Perplexity|Codex|Cursor|VS Code|VS Code Insiders|Visual Studio|GitHub Copilot CLI|Windsurf \(Devin Desktop\)|Zed|Kiro|Cline|Warp|Raycast|LM Studio|Goose|Jan|Msty Studio|Open WebUI|LibreChat|n8n|JetBrains IDEs)\s*$/,
@@ -69,7 +88,7 @@ const ALLOWED = [
   /^\s*\d{4}-\d\d-\d\d \d\d:\d\d( UTC)?\s*$/, // dates
   /^\s*[A-Z][A-Za-z_]+(\/[A-Za-z0-9_+-]+)+\s*$/, // time zones (Europe/Rome)
   /^\s*(UTC|GMT)\s*$/,
-  /^\s*River Tester\s*$/, // the diver's name from (mock) PADI: data, not a text
+  new RegExp(`^\\s*${MOCK_USERNAME}\\s*$`), // the Suunto username from the (mock) Suunto: data, not a text
 ];
 
 /** Visible text runs and text attributes that are not inside ⟦ ⟧. */
@@ -115,16 +134,18 @@ async function check(browser: Browser, path: string): Promise<string[]> {
   return unmarked(html);
 }
 
+const adminId = () => web.ctx.store.getUserByEmail("admin@example.com")!.id;
+
 describe("every visible text is translated", () => {
   it("start, sign-in, sign-up and error pages", async () => {
     const visitor = new Browser();
-    visitor.jar.set("pdm_lang", "it");
+    visitor.jar.set("sum_lang", "it");
     for (const path of ["/", "/login", "/signup", "/does-not-exist"]) expect(await check(visitor, path), path).toEqual([]);
   });
 
   it("privacy policy and terms of use", async () => {
     const visitor = new Browser();
-    visitor.jar.set("pdm_lang", "it");
+    visitor.jar.set("sum_lang", "it");
     for (const path of ["/privacy", "/terms"]) {
       expect(await check(visitor, path), path).toEqual([]);
       // Signed in, the page also has the menu.
@@ -133,24 +154,47 @@ describe("every visible text is translated", () => {
   });
 
   it("account pages", async () => {
-    // Not connected yet: the sign-in form.
+    // Not connected yet: the "Connect Suunto" button.
     expect(await check(admin, "/account")).toEqual([]);
-    // A form error.
-    const { csrf } = await admin.page("/account");
-    const missing = await admin.post("/account/padi", { _csrf: csrf, email: MOCK_ACCOUNT.email, password: "" });
-    expect(missing.status).toBe(400);
-    expect(unmarked(await missing.text())).toEqual([]);
-    // Connected with "Save and test" (more of the page is shown: the dive count, settings, reconnect).
-    const saved = await admin.post("/account/padi", { _csrf: csrf, email: MOCK_ACCOUNT.email, password: MOCK_ACCOUNT.password });
-    expect(saved.headers.get("location")).toBe("/account?m=connected");
-    for (const path of ["/account", "/account?m=connected", "/account?m=logbookfailed", "/account?m=saved", "/account?m=removed", "/account/connections", "/account/security"]) {
+    // A form error (an expired form).
+    const expired = await admin.post("/account/suunto/connect", { _csrf: "expired-form", timeZone: "" });
+    expect(expired.status).toBe(400);
+    expect(unmarked(await expired.text())).toEqual([]);
+    // Connected with "Connect Suunto" (more of the page is shown: the username, the workout
+    // count, settings, reconnect), and every message after Suunto sends the browser back.
+    expect((await connectSuunto(admin)).res.headers.get("location")).toBe("/account?m=connected");
+    for (const path of [
+      "/account",
+      "/account?m=connected",
+      "/account?m=checkfailed",
+      "/account?m=denied",
+      "/account?m=connectfailed",
+      "/account?m=stateexpired",
+      "/account?m=notconfigured",
+      "/account?m=saved",
+      "/account?m=removed",
+      "/account/connections",
+      "/account/security",
+    ]) {
       expect(await check(admin, path), path).toEqual([]);
     }
-    // The sign-in expired.
-    const id = web.ctx.store.getUserByEmail("admin@example.com")!.id;
-    web.ctx.store.setPadiNeedsReconnect(id, true);
+    // Suunto refused the saved connection: "connect again".
+    web.ctx.store.setSuuntoNeedsReconnect(adminId(), true);
     expect(await check(admin, "/account")).toEqual([]);
-    web.ctx.store.setPadiNeedsReconnect(id, false);
+    web.ctx.store.setSuuntoNeedsReconnect(adminId(), false);
+  });
+
+  it("account page after a failed test request", async () => {
+    mock.failNext("/v3/workouts", 403, { statusCode: 403, message: "Access denied" });
+    expect((await connectSuunto(admin)).res.headers.get("location")).toBe("/account?m=checkfailed");
+    const reason = web.ctx.store.getSuuntoSettings(adminId())?.lastCheck?.error;
+    expect(reason).toBeTruthy();
+    // The reason itself comes from the Suunto client, in English like the errors AI apps get.
+    const words = (s: string) => s.replace(/&[a-z#0-9]+;|[^\p{L}\p{N}]+/giu, " ").trim();
+    const others = (await check(admin, "/account")).filter((text) => !words(reason!).includes(words(text)));
+    expect(others).toEqual([]);
+    // Connect again: the test request works this time.
+    expect((await connectSuunto(admin)).res.headers.get("location")).toBe("/account?m=connected");
   });
 
   it("admin page", async () => {
@@ -166,7 +210,7 @@ describe("every visible text is translated", () => {
     // The list of demo accounts (with and without data in memory) and the users table.
     expect(await check(admin, "/admin")).toEqual([]);
     const reviewer = new Browser();
-    reviewer.jar.set("pdm_lang", "it");
+    reviewer.jar.set("sum_lang", "it");
     expect((await reviewer.login("reviewer@example.com", password)).status).toBe(303);
     for (const path of ["/account", "/account?m=saved"]) expect(await check(reviewer, path), path).toEqual([]);
     const id = web.ctx.store.getUserByEmail("reviewer@example.com")!.id;
@@ -181,9 +225,10 @@ describe("every visible text is translated", () => {
     const query = new URLSearchParams({ client_id, redirect_uri: "https://claude.ai/api/mcp/auth_callback", response_type: "code", code_challenge: "x".repeat(43), code_challenge_method: "S256", resource: `${base}/mcp` });
     const consent = (await reviewer.fetch(`/authorize?${query}`)).headers.get("location")!;
     expect(await check(reviewer, consent)).toEqual([]);
-    // A demo account's attempt to connect a PADI account (the error page).
+    // A demo account's attempt to connect Suunto (the account page with an error).
     const page = await reviewer.page("/account");
-    const refused = await reviewer.post("/account/padi", { _csrf: page.csrf, email: "x@example.com", password: "invented-password" });
+    const refused = await reviewer.post("/account/suunto/connect", { _csrf: page.csrf, timeZone: "" });
+    expect(refused.status).toBe(403);
     expect(unmarked(await refused.text())).toEqual([]);
     web.ctx.demo.forget(id);
   });
@@ -202,6 +247,16 @@ describe("every visible text is translated", () => {
     const consent = res.headers.get("location")!;
     expect(consent).toMatch(/^\/oauth\/consent\?request=/);
     expect(await check(admin, consent)).toEqual([]);
+
+    // Without a Suunto connection, the page offers to connect it first.
+    const connection = web.ctx.store.getSuuntoSettings(adminId());
+    expect(connection).toBeDefined();
+    web.ctx.store.saveSuuntoSettings(adminId(), undefined);
+    try {
+      expect(await check(admin, consent)).toEqual([]);
+    } finally {
+      web.ctx.store.saveSuuntoSettings(adminId(), connection);
+    }
 
     // An unknown app that uses a well-known name (warning and box), and an app on this device.
     for (const redirect of ["https://app.example.org/cb", "http://127.0.0.1:8765/callback"]) {
@@ -227,9 +282,23 @@ describe("every visible text is translated", () => {
 
   it("form errors", async () => {
     const visitor = new Browser();
-    visitor.jar.set("pdm_lang", "it");
+    visitor.jar.set("sum_lang", "it");
     const { csrf } = await visitor.page("/login");
     const res = await visitor.post("/login", { _csrf: csrf, email: "nobody@example.com", password: "wrong password!!" });
     expect(unmarked(await res.text())).toEqual([]);
+  });
+
+  it("a server without Suunto app keys: account page and admin page", async () => {
+    const bare = await startWeb(NO_SUUNTO);
+    setBase(bare.base);
+    try {
+      const owner = new Browser();
+      owner.jar.set("sum_lang", "it");
+      expect((await owner.signup("owner@example.com", PASSWORD)).status).toBe(303);
+      for (const path of ["/account", "/account?m=notconfigured", "/admin"]) expect(await check(owner, path), path).toEqual([]);
+    } finally {
+      setBase(base);
+      await stopWeb(bare);
+    }
   });
 });

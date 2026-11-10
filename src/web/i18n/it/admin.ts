@@ -2,29 +2,33 @@ import type en from "../en/admin.js";
 
 /** Translations (it): admin. Every key of ../en/admin.ts, the same placeholders and markup. */
 export default {
+  // Page
   "admin.title": "Amministrazione",
   "admin.heading": "Amministrazione",
   "admin.intro": "Chi può usare questo server, a cosa può accedere e quali app sono collegate.",
 
+  // A secret shown once (new invite code, temporary password)
   "admin.secret.inviteCode": "Nuovo codice di invito",
   "admin.secret.tempPassword": "Password temporanea per {email}",
   "admin.secret.demoPassword": "Password dell'account demo {email}",
   "admin.secret.copyNow": "Copia subito questo valore: non verrà più mostrato.",
   "admin.secret.copy": "Copia",
 
+  // Overview
   "admin.overview.title": "Panoramica",
   "admin.overview.mcpUrl": "Indirizzo del server MCP",
   "admin.overview.publicUrl": "URL pubblico",
   "admin.overview.version": "Versione",
   "admin.overview.users": "Utenti",
-  "admin.overview.userCount": "{n} ({padi} con PADI collegato)",
+  "admin.overview.userCount": "{n} ({suunto} con Suunto collegato)",
   "admin.overview.requests": "Richieste di accesso",
   "admin.overview.requestsWaiting.one": "{n} in attesa",
   "admin.overview.requestsWaiting.other": "{n} in attesa",
   "admin.overview.noRequests": "nessuna",
-  "admin.overview.activeConnections": "Logbook in uso (ultimi 10 minuti)",
+  "admin.overview.activeConnections": "Account in uso (ultimi 10 minuti)",
   "admin.overview.platform": "Piattaforma host",
 
+  // Public setup check
   "admin.selfTest.button": "Verifica la configurazione pubblica",
   "admin.selfTest.hint": "Scarica i documenti di discovery dall'URL pubblico, come fa un'app di IA.",
   "admin.selfTest.badgeOk": "OK",
@@ -35,12 +39,24 @@ export default {
   "admin.selfTest.httpsRequired": "Le app di IA si collegano solo a server https://",
   "admin.selfTest.mcpReachable": "Endpoint MCP raggiungibile",
   "admin.selfTest.mcpDiscovery": "L'endpoint MCP risponde con 401 e l'header di discovery",
-  "admin.selfTest.padi": "Server PADI",
-  // {mode} is the API mode (proxy, direct or auto).
-  "admin.selfTest.padiDefault": "i server PADI su internet, modalità API {mode}",
-  // {list} names the settings, for example PADI_LOGBOOK_URL.
-  "admin.selfTest.padiCustom": "server personalizzati per i test ({list}), modalità API {mode}",
+  "admin.selfTest.suunto": "Server Suunto",
+  "admin.selfTest.suuntoDefault": "i server Suunto su internet",
+  // {list} names the settings, for example SUUNTO_API_URL.
+  "admin.selfTest.suuntoCustom": "server personalizzati per i test ({list})",
 
+  // The Suunto API (the operator's app keys, from the environment)
+  "admin.suunto.title": "Suunto API",
+  "admin.suunto.keys": "Chiavi dell'app Suunto",
+  "admin.suunto.keysSet": "impostate",
+  "admin.suunto.keysMissing": "mancanti",
+  "admin.suunto.keysHint": "SUUNTO_CLIENT_ID, SUUNTO_CLIENT_SECRET e SUUNTO_SUBSCRIPTION_KEY, prese dall'ambiente. I loro valori non vengono mai mostrati.",
+  "admin.suunto.missingWarning": "Le chiavi dell'app Suunto non sono impostate, quindi nessuno può collegare Suunto (gli account demo funzionano). Imposta SUUNTO_CLIENT_ID, SUUNTO_CLIENT_SECRET e SUUNTO_SUBSCRIPTION_KEY con i valori della tua app nella Suunto API Zone, poi riavvia il server.",
+  "admin.suunto.redirectUri": "URI di reindirizzamento",
+  "admin.suunto.redirectUriHint": "Registra esattamente questo indirizzo come URI di reindirizzamento della tua app nella Suunto API Zone. Puoi cambiarlo con SUUNTO_REDIRECT_URI.",
+  "admin.suunto.servers": "Server Suunto",
+  "admin.suunto.plan": "Un abbonamento Developer della Suunto API consente 10 chiamate al minuto e 200 chiamate a settimana per l'intero server: abbastanza per provarlo, non per molti utenti. Chiedi a Suunto l'accesso Production prima di invitare altre persone. Quando si raggiunge il limite, le app di IA ricevono un errore che indica quando riprovare.",
+
+  // Settings
   "admin.settings.title": "Impostazioni",
   "admin.settings.registration.label": "Chi può creare un account",
   "admin.settings.registration.approval": "Su richiesta (approvata da un amministratore)",
@@ -50,7 +66,7 @@ export default {
   "admin.settings.domains.label": "Domini e-mail consentiti per la registrazione",
   "admin.settings.domains.hint": "Vuoto = qualsiasi dominio. Gli indirizzi non vengono verificati, quindi questa impostazione non dimostra l'identità di nessuno: usa i codici di invito per controllare chi si registra.",
   "admin.settings.readOnly.label": "Sola lettura per tutti",
-  "admin.settings.readOnly.hint": "Nessuno può aggiungere, modificare o eliminare immersioni tramite questo server.",
+  "admin.settings.readOnly.hint": "Le app di IA non possono aggiungere percorsi o punti di interesse tramite questo server.",
   "admin.settings.connections": "Connessioni",
   "admin.settings.redirectHosts.label": "App di IA consentite (host di reindirizzamento)",
   "admin.settings.redirectHosts.hint": "Vuoto = qualsiasi client OAuth. Usa <code>claude.ai claude.com</code> per consentire solo Claude.",
@@ -64,6 +80,7 @@ export default {
   "admin.settings.defaultTimeZone": "Fuso orario predefinito per i nuovi utenti",
   "admin.settings.save": "Salva impostazioni",
 
+  // Access requests
   "admin.requests.title": "Richieste di accesso",
   "admin.requests.intro": "Persone che hanno chiesto un account. Possono accedere dopo la tua approvazione, ma non ricevono alcuna notifica automatica. Le richieste senza risposta vengono eliminate dopo 30 giorni.",
   "admin.requests.warning": "<strong>Indirizzi e-mail e messaggi non vengono verificati:</strong> chiunque può digitare qualsiasi indirizzo. Prima di approvare, verifica con la persona tramite un altro canale che la richiesta sia davvero sua, ad esempio chiedendole cosa ha scritto nel messaggio. Se la richiesta arriva dalla persona sbagliata, rifiutala e invia un codice di invito al vero titolare dell'indirizzo.",
@@ -78,24 +95,29 @@ export default {
   "admin.requests.confirmRejectAll.one": "Vuoi rifiutare ed eliminare la richiesta aperta?",
   "admin.requests.confirmRejectAll.other": "Vuoi rifiutare ed eliminare tutte le {n} richieste aperte?",
   "admin.requests.none": "Nessuna richiesta aperta.",
+  // Shown when the registration mode is not "Request access": both sentences in one message.
   "admin.requests.noneHowToEnable": "Nessuna richiesta aperta. Le persone possono richiedere l'accesso solo quando “{setting}” è impostato su “{value}”.",
 
+  // E-mails to the administrator about new access requests (sent through the operator's mail server)
   "admin.notices.title": "Notifiche via e-mail",
   "admin.notices.label": "Inviami un'e-mail quando qualcuno richiede l'accesso",
   "admin.notices.hint": "Inviata all'indirizzo con cui accedi: {address}. Le richieste ravvicinate arrivano in un'unica e-mail.",
   "admin.notices.cannotSend": "Al momento non è possibile inviare e-mail: {reason}.",
+  // {date} is a date and time
   "admin.notices.lastSent": "Ultima e-mail inviata: {date}.",
   "admin.notices.lastFailed": "Non è stato possibile inviare l'ultima e-mail ({date}): {reason}.",
   "admin.notices.save": "Salva",
   "admin.notices.test": "Invia un'e-mail di prova",
   "admin.notices.testSent": "E-mail di prova inviata a {address}. Può volerci un minuto prima che arrivi.",
   "admin.notices.testFailed": "Non è stato possibile inviare l'e-mail di prova: {reason}.",
+  // {reason} in the sentences above
   "admin.notices.problem.noSmtp": "per questo servizio non è configurato alcun server di posta (SMTP_URL)",
   "admin.notices.problem.invalid": "l'indirizzo con cui accedi non è un indirizzo e-mail valido",
   "admin.notices.problem.auth": "il server di posta ha rifiutato l'accesso (controlla SMTP_URL)",
   "admin.notices.problem.network": "il server di posta non ha risposto (riprova più tardi)",
   "admin.notices.problem.rejected": "il server di posta non ha accettato l'e-mail",
   "admin.notices.problem.other": "un errore imprevisto",
+  // The e-mail itself (plain text). {site} is the server's address, e.g. suunto.example.com.
   "admin.notices.mail.subject.one": "Nuova richiesta di accesso a {app}",
   "admin.notices.mail.subject.other": "{n} nuove richieste di accesso a {app}",
   "admin.notices.mail.intro.one": "Qualcuno ha chiesto un account su {site}:",
@@ -108,6 +130,7 @@ export default {
   "admin.notices.test.subject": "E-mail di prova da {app}",
   "admin.notices.test.text": "Questa è una prova. Quando qualcuno richiede l'accesso su {site}, riceverai un'e-mail come questa a questo indirizzo.",
 
+  // Invites
   "admin.invites.title": "Inviti",
   "admin.invites.note": "Nota (per chi è)",
   "admin.invites.days": "Valido per (giorni)",
@@ -121,8 +144,9 @@ export default {
   "admin.invites.delete": "Elimina",
   "admin.invites.none": "Nessun invito.",
 
+  // Demo accounts (sample data built into the server, for app reviewers)
   "admin.demo.title": "Account demo per i revisori delle app",
-  "admin.demo.intro": "Un account demo ha un logbook PADI di esempio integrato in questo server, così i revisori delle app (ad esempio per la Claude Connectors Directory) possono provare tutti gli strumenti senza un account PADI. Nulla è reale: non viene inviato nulla a PADI o a un PADI Pro e ogni modifica viene conservata solo in memoria. I dati di esempio vengono ripristinati ogni giorno alle 04:00 (ora svizzera) e a ogni riavvio del server.",
+  "admin.demo.intro": "Un account demo ha dati Suunto di esempio integrati in questo server (allenamenti, sonno, recupero, attività giornaliera, percorsi e punti di interesse), così i revisori delle app (ad esempio per la Claude Connectors Directory) possono provare tutti gli strumenti senza un account Suunto. Nulla è reale: non viene inviato nulla a Suunto e ogni modifica viene conservata solo in memoria. I dati di esempio vengono ripristinati ogni giorno alle 04:00 (ora svizzera) e a ogni riavvio del server.",
   "admin.demo.email": "E-mail per l'accesso",
   "admin.demo.emailHint": "Serve solo come nome per l'accesso. Questo server non invia mai posta a questo indirizzo.",
   "admin.demo.create": "Crea account demo",
@@ -139,10 +163,11 @@ export default {
   "admin.demo.flash.reset": "Dati demo ripristinati: l'account ha nuovi dati di esempio.",
   "admin.demo.error.exists": "Esiste già un account con questa e-mail. Per trasformare un utente in un account demo, usa “Rendi account demo” nell'elenco degli utenti.",
 
+  // Users
   "admin.users.title": "Utenti",
   "admin.users.col.email": "E-mail",
   "admin.users.col.status": "Stato",
-  "admin.users.col.padi": "PADI",
+  "admin.users.col.suunto": "Suunto",
   "admin.users.col.lastSignIn": "Ultimo accesso",
   "admin.users.col.toolCalls": "Chiamate agli strumenti (7 giorni)",
   "admin.users.col.actions": "Azioni",
@@ -150,10 +175,10 @@ export default {
   "admin.users.admin": "admin",
   "admin.users.disabled": "disattivato",
   "admin.users.demo": "demo",
-  "admin.users.padiConnected": "collegato",
-  "admin.users.padiMissing": "non collegato",
-  "admin.users.padiReconnect": "da ricollegare",
-  "admin.users.padiDemo": "dati di esempio",
+  "admin.users.suuntoConnected": "collegato",
+  "admin.users.suuntoMissing": "non collegato",
+  "admin.users.suuntoReconnect": "da ricollegare",
+  "admin.users.suuntoDemo": "dati di esempio",
   "admin.users.makeAdmin": "Rendi admin",
   "admin.users.removeAdmin": "Revoca admin",
   "admin.users.enable": "Attiva",
@@ -162,12 +187,13 @@ export default {
   "admin.users.resetPassword": "Reimposta password",
   "admin.users.confirmResetPassword": "Vuoi generare una nuova password temporanea per questo utente?",
   "admin.users.makeDemo": "Rendi account demo",
-  "admin.users.confirmMakeDemo": "Vuoi trasformare {email} in un account demo? Il suo collegamento con PADI verrà eliminato e da ora in poi le app collegate vedranno il logbook di esempio.",
+  "admin.users.confirmMakeDemo": "Vuoi trasformare {email} in un account demo? Il suo collegamento con Suunto verrà eliminato (questo server chiede a Suunto di revocare il suo accesso) e da ora in poi le app collegate vedranno i dati di esempio.",
   "admin.users.makeNormal": "Rendi account normale",
-  "admin.users.confirmMakeNormal": "Vuoi riportare {email} a un account normale? I dati demo verranno eliminati e l'utente potrà collegare il proprio account PADI.",
+  "admin.users.confirmMakeNormal": "Vuoi riportare {email} a un account normale? I dati demo verranno eliminati e l'utente potrà collegare il proprio account Suunto.",
   "admin.users.delete": "Elimina",
-  "admin.users.confirmDelete": "Vuoi eliminare {email} e tutti i suoi dati su questo server?",
+  "admin.users.confirmDelete": "Vuoi eliminare {email} e tutti i suoi dati su questo server? Questo server chiede anche a Suunto di revocare il suo accesso.",
 
+  // OAuth clients
   "admin.clients.title": "Client OAuth",
   "admin.clients.showing": "Visualizzati {shown} client su {total} (prima quelli collegati).",
   "admin.clients.col.client": "Client",
@@ -181,6 +207,7 @@ export default {
   "admin.clients.confirmRemove": "Vuoi rimuovere questo client e scollegare tutti i suoi utenti?",
   "admin.clients.none": "Nessun client si è ancora collegato.",
 
+  // Errors shown on the page
   "admin.error.formExpired": "Il modulo è scaduto. Riprova.",
   "admin.error.unknownTimeZone": "Fuso orario “{tz}” sconosciuto.",
 } satisfies Record<keyof typeof en, string>;

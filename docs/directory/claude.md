@@ -97,7 +97,7 @@ The form asks you to confirm that you ran every tool. Do it with the demo accoun
 
 ## Step 2: Tools
 
-Nothing to type: the tools sync from the server. Check that all **14 tools** appear with a title and that none is flagged. The server also offers two prompts, "Training review" and "Sleep and recovery". There are no resources. (The titles below are the intended ones; the form shows the titles the live server reports.)
+Nothing to type: the tools sync from the server. Check that all **14 tools** appear with a title and that none is flagged. The server also offers two prompts, "Training review" and "Sleep and recovery". There are no resources. The titles below are the ones the server reports (src/server.ts and src/activity/tools.ts).
 
 | Tool | Title | readOnlyHint | destructiveHint | Talks to other people (openWorldHint) |
 | --- | --- | --- | --- | --- |
@@ -113,7 +113,7 @@ Nothing to type: the tools sync from the server. Check that all **14 tools** app
 | `suunto_list_routes` | List routes | true | false | false |
 | `suunto_get_route` | Get route | true | false | false |
 | `suunto_list_pois` | List points of interest | true | false | false |
-| `suunto_import_route` | Import route | false | false | false |
+| `suunto_import_route` | Add route | false | false | false |
 | `suunto_create_poi` | Add point of interest | false | false | false |
 
 12 tools only read, and 2 add things to the user's own Suunto App (a route, a point of interest). Nothing deletes or changes existing data, and nothing reaches other people. The server tells Claude to ask before it adds a route or a point of interest, unless the user asked for exactly that.

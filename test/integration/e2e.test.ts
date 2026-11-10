@@ -1,56 +1,71 @@
 /**
- * End-to-end tests against the in-process mock PADI API (test/helpers/mock-padi.ts): Cognito, the
- * PADI auth API, the logbook GraphQL API (proxy and direct) and the REST endpoints around it.
- * Nothing is ever sent to PADI.
+ * End-to-end tests against the in-process mock Suunto Cloud API (test/helpers/mock-suunto.ts):
+ * Suunto's OAuth host and its data host. Nothing is ever sent to Suunto.
  *
- * - "in process": the real services and MCP server, with a client over an in-memory transport;
- * - "built server": dist/index.js over stdio and with --http.
+ * - "built server": dist/index.js with --login, --check, over stdio and with --http, sharing one
+ *   token cache file (SUUNTO_TOKEN_CACHE), as a single user runs it;
+ * - "in process": the real services and MCP server with a client over an in-memory transport, for
+ *   the cases that need failures on cue (call limits, a refused refresh token).
  *
  *   npm run build
- *   PADI_MCP_IT=1 npm run test:integration
+ *   SUUNTO_MCP_IT=1 npm run test:integration
  */
+import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, readFileSync, statSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawn, type ChildProcess } from "node:child_process";
+import type { Stream } from "node:stream";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadConfig } from "../../src/config.js";
 import { closeServices, createMcpServer, createServices, type Services } from "../../src/server.js";
-import { MOCK_ACCOUNT, startMockPadi, type MockPadi } from "../helpers/mock-padi.js";
+import { addDays, todayInZone } from "../../src/util/dates.js";
+import { MOCK_CLIENT_ID, MOCK_CLIENT_SECRET, MOCK_SUBSCRIPTION_KEY, MOCK_USERNAME, startMockSuunto, type MockSuunto } from "../helpers/mock-suunto.js";
 
-const enabled = process.env.PADI_MCP_IT === "1";
+const enabled = process.env.SUUNTO_MCP_IT === "1";
 
-let mock: MockPadi;
+const ZONE = "Europe/Zurich";
+const DAY_MS = 86_400_000;
+
+/** Every tool of the server (DESIGN.md section 6). */
+const READ_TOOLS = [
+  "suunto_account_info",
+  "suunto_activity_samples",
+  "suunto_daily_activity",
+  "suunto_export_workout_fit",
+  "suunto_get_route",
+  "suunto_get_workout",
+  "suunto_list_pois",
+  "suunto_list_routes",
+  "suunto_list_workouts",
+  "suunto_recovery",
+  "suunto_sleep",
+  "suunto_workout_stats",
+];
+const WRITE_TOOLS = ["suunto_create_poi", "suunto_import_route"];
+const ALL_TOOLS = [...READ_TOOLS, ...WRITE_TOOLS].sort();
+
+/** An invented route (three points on an invented ridge). */
+const GPX = `<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="suunto-mcp integration test" xmlns="http://www.topografix.com/GPX/1/1">
+  <rte><name>Integration ridge</name>
+    <rtept lat="46.9861" lon="9.0712"><ele>1210</ele></rtept>
+    <rtept lat="46.9902" lon="9.0811"><ele>1620</ele></rtept>
+    <rtept lat="46.9944" lon="9.0868"><ele>2014</ele></rtept>
+  </rte>
+</gpx>
+`;
+
+let mock: MockSuunto;
+let dir = "";
+let cache = "";
 const opened: Services[] = [];
 
-function baseEnv(extra: Record<string, string> = {}): Record<string, string> {
-  return {
-    PADI_EMAIL: MOCK_ACCOUNT.email,
-    PADI_PASSWORD: MOCK_ACCOUNT.password,
-    PADI_TIMEZONE: "Europe/Zurich",
-    ...mock.env(),
-    ...extra,
-  };
-}
-
-/** A client of the real MCP server (in process) for a configuration. */
-async function inProcess(extra: Record<string, string> = {}): Promise<{ client: Client; services: Services }> {
-  const config = loadConfig(baseEnv(extra));
-  const services = createServices(config);
-  opened.push(services);
-  const server = createMcpServer(config, services, () => {});
-  const client = new Client({ name: "it", version: "1.0.0" });
-  const [ct, st] = InMemoryTransport.createLinkedPair();
-  await Promise.all([client.connect(ct), server.connect(st)]);
-  return { client, services };
-}
-
-type Content = Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
+type Content = Array<{ type: string; text?: string; resource?: { uri: string; mimeType?: string; blob?: string } }>;
 
 async function call<T = Record<string, unknown>>(client: Client, name: string, args: Record<string, unknown> = {}): Promise<T> {
   const res = await client.callTool({ name, arguments: args });
@@ -59,50 +74,87 @@ async function call<T = Record<string, unknown>>(client: Client, name: string, a
   return JSON.parse(content[0]!.text!) as T;
 }
 
-async function callError(client: Client, name: string, args: Record<string, unknown>): Promise<string> {
+async function callError(client: Client, name: string, args: Record<string, unknown> = {}): Promise<string> {
   const res = await client.callTool({ name, arguments: args });
-  expect(res.isError, `${name} should fail`).toBe(true);
-  return (res.content as Content).map((c) => c.text).join(" ");
+  const text = (res.content as Content).map((c) => c.text).join(" ");
+  expect(res.isError, `${name} should fail: ${text}`).toBe(true);
+  return text;
 }
 
-interface Summary {
-  id: number;
-  title: string;
-  date: string;
-  type: string;
-  status: string;
-  locked: boolean;
+/** The environment of the built server: the mock's hosts and app keys, and the token cache. */
+function cliEnv(extra: Record<string, string> = {}): Record<string, string> {
+  return { ...mock.env(), SUUNTO_TOKEN_CACHE: cache, SUUNTO_TIMEZONE: ZONE, PATH: process.env.PATH ?? "", ...extra };
 }
 
-/**
- * logbook_list_dives with a log type or a status (filtered by PADI): the total and the dives are
- * exactly those of the mock's logbook, so a filter that is declared but not applied is seen.
- */
-async function expectFiltered(client: Client): Promise<void> {
-  const stored = [...mock.account.store.logs.values()];
-  const cases: Array<[Record<string, string>, (d: (typeof stored)[number]) => boolean]> = [
-    [{ log_type: "Training" }, (d) => d.log_type === "Training"],
-    [{ log_type: "Recreational" }, (d) => d.log_type === "Recreational"],
-    [{ status: "Verified" }, (d) => d.status === "Verified"],
-    [{ status: "Draft" }, (d) => d.status === "Draft"],
+/** Every secret the mock knows of: app keys, tokens and codes. */
+function secrets(m: MockSuunto = mock): string[] {
+  return [
+    MOCK_CLIENT_SECRET,
+    MOCK_SUBSCRIPTION_KEY,
+    ...m.state.accessTokens.map((t) => t.token),
+    ...m.state.refreshTokens.map((t) => t.token),
+    ...m.state.codes.map((c) => c.code),
   ];
-  for (const [filter, keep] of cases) {
-    const want = stored.filter(keep).map((d) => d.id).sort((a, b) => a - b);
-    const label = JSON.stringify(filter);
-    // Each filter keeps some dives but not all of them, so the check means something.
-    expect(want.length, label).toBeGreaterThan(0);
-    expect(want.length, label).toBeLessThan(stored.length);
-    const page = await call<{ total: number; dives: Summary[] }>(client, "logbook_list_dives", { ...filter, limit: 100 });
-    expect(page.total, label).toBe(want.length);
-    expect(page.dives.map((d) => d.id).sort((a, b) => a - b), label).toEqual(want);
-    if (filter.log_type) expect(page.dives.every((d) => d.type === filter.log_type), label).toBe(true);
-    if (filter.status) expect(page.dives.every((d) => d.status === filter.status), label).toBe(true);
-  }
 }
 
-describe.skipIf(!enabled)("against a mock PADI API", () => {
+/** No secret and nothing shaped like a JWT (header.payload) in a text. */
+function expectNoSecrets(text: string, label: string, extra: string[] = []): void {
+  for (const secret of [...secrets(), ...extra]) {
+    expect(text.includes(secret), `${label} holds a secret starting ${secret.slice(0, 4)}...`).toBe(false);
+  }
+  expect(text, label).not.toMatch(/eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}/);
+}
+
+/** Workouts of the mock that started in the last 30 days (what the connection check counts). */
+function recentWorkouts(): number {
+  const now = Date.now();
+  return mock.state.workouts.filter((w) => Number(w.startTime) >= now - 30 * DAY_MS && Number(w.startTime) < now).length;
+}
+
+/** The mock's workouts, newest first. */
+function newestFirst() {
+  return [...mock.state.workouts].sort((a, b) => Number(b.startTime) - Number(a.startTime));
+}
+
+interface CacheFile {
+  refreshToken: string;
+  accessToken?: string;
+  accessTokenExpiresAt?: number;
+  clientId: string;
+  username?: string;
+}
+
+function readCache(): CacheFile {
+  return JSON.parse(readFileSync(cache, "utf8")) as CacheFile;
+}
+
+/** The refresh token the mock still accepts (it rotates them: only the newest works). */
+function liveRefreshToken(m: MockSuunto = mock): string | undefined {
+  return m.state.refreshTokens.filter((t) => !t.revoked).at(-1)?.token;
+}
+
+/** Collects a child's output. */
+function collect(stream: Stream | null | undefined): { text: () => string } {
+  let out = "";
+  stream?.on("data", (chunk: Buffer) => (out += chunk.toString()));
+  return { text: () => out };
+}
+
+/** Run the built CLI to the end. */
+function runCli(args: string[], env: Record<string, string>): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, ["dist/index.js", ...args], { env, stdio: ["ignore", "pipe", "pipe"] });
+    const stdout = collect(child.stdout);
+    const stderr = collect(child.stderr);
+    child.on("exit", (code) => resolve({ code, stdout: stdout.text(), stderr: stderr.text() }));
+  });
+}
+
+describe.skipIf(!enabled)("against a mock Suunto API", () => {
   beforeAll(async () => {
-    mock = await startMockPadi();
+    mock = await startMockSuunto();
+    dir = mkdtempSync(join(tmpdir(), "suunto-mcp-it-"));
+    cache = join(dir, "tokens.json");
   });
 
   afterAll(async () => {
@@ -110,382 +162,9 @@ describe.skipIf(!enabled)("against a mock PADI API", () => {
     await mock?.close();
   });
 
-  beforeEach(() => {
-    mock.violations.length = 0;
-  });
-
-  describe("the mock itself (raw requests, as the PADI web app sends them)", () => {
-    async function signIn(): Promise<{ idToken: string; refreshToken: string }> {
-      const res = await fetch(`${mock.url}/cognito/`, {
-        method: "POST",
-        headers: { "content-type": "application/x-amz-json-1.1", "x-amz-target": "AWSCognitoIdentityProviderService.InitiateAuth" },
-        body: JSON.stringify({ AuthFlow: "USER_PASSWORD_AUTH", ClientId: mock.clientId, AuthParameters: { USERNAME: MOCK_ACCOUNT.email, PASSWORD: MOCK_ACCOUNT.password } }),
-      });
-      expect(res.status).toBe(200);
-      const body = (await res.json()) as { AuthenticationResult: { IdToken: string; RefreshToken: string } };
-      return { idToken: body.AuthenticationResult.IdToken, refreshToken: body.AuthenticationResult.RefreshToken };
-    }
-
-    async function gql(path: string, token: string, query: string, variables: Record<string, unknown> = {}, headers: Record<string, string> = {}) {
-      const res = await fetch(`${mock.url}${path}`, {
-        method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${token}`, "x-platform": "web", ...headers },
-        body: JSON.stringify({ query, variables }),
-      });
-      return { status: res.status, body: res.status === 200 ? ((await res.json()) as { data?: Record<string, unknown>; errors?: Array<{ message: string; extensions: { code: string } }> }) : undefined };
-    }
-
-    it("signs in, refreshes, and refuses wrong passwords", async () => {
-      const { idToken, refreshToken } = await signIn();
-      expect(idToken.split(".")).toHaveLength(3);
-      const claims = JSON.parse(Buffer.from(idToken.split(".")[1]!, "base64url").toString());
-      expect(claims).toMatchObject({ "custom:affiliate_id": MOCK_ACCOUNT.affiliateId, aud: mock.clientId, email: MOCK_ACCOUNT.email });
-      expect(claims.exp - claims.iat).toBe(3600);
-      const refreshed = await fetch(`${mock.url}/cognito/`, {
-        method: "POST",
-        headers: { "content-type": "application/x-amz-json-1.1", "x-amz-target": "AWSCognitoIdentityProviderService.InitiateAuth" },
-        body: JSON.stringify({ AuthFlow: "REFRESH_TOKEN_AUTH", ClientId: mock.clientId, AuthParameters: { REFRESH_TOKEN: refreshToken } }),
-      });
-      const result = ((await refreshed.json()) as { AuthenticationResult: Record<string, unknown> }).AuthenticationResult;
-      expect(result.IdToken).toBeTruthy();
-      expect(result).not.toHaveProperty("RefreshToken");
-      const wrong = await fetch(`${mock.url}/cognito/`, {
-        method: "POST",
-        headers: { "content-type": "application/x-amz-json-1.1", "x-amz-target": "AWSCognitoIdentityProviderService.InitiateAuth" },
-        body: JSON.stringify({ AuthFlow: "USER_PASSWORD_AUTH", ClientId: mock.clientId, AuthParameters: { USERNAME: MOCK_ACCOUNT.email, PASSWORD: "nope" } }),
-      });
-      expect(wrong.status).toBe(400);
-      expect(await wrong.json()).toMatchObject({ __type: "NotAuthorizedException" });
-      const login = await fetch(`${mock.url}/auth/api/oauth/login`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ username: MOCK_ACCOUNT.email, password: MOCK_ACCOUNT.password, clientId: mock.clientId, extraData: "" }),
-      });
-      expect(((await login.json()) as { tokens: { idToken: string } }).tokens.idToken).toBeTruthy();
-    });
-
-    it("answers the logbook queries and mutations of the PADI web app", async () => {
-      const { idToken } = await signIn();
-      const aff = Number(MOCK_ACCOUNT.affiliateId);
-      const headers = { "affiliate-id": MOCK_ACCOUNT.affiliateId };
-      const list = await gql(
-        "/api/Logbook",
-        idToken,
-        "query logbook_logs($affiliate_id: Int!, $limit: Int, $offset: Int) { logbook_logs(where: { affiliate_id: { _eq: $affiliate_id } } order_by: { dive_date: desc, id: desc } limit: $limit offset: $offset) { id log_type log_course log_number dive_title dive_date dive_location status } }",
-        { affiliate_id: aff, limit: 15, offset: 0 },
-        headers,
-      );
-      const rows = list.body!.data!.logbook_logs as Array<Record<string, unknown>>;
-      expect(rows).toHaveLength(15);
-      expect(Object.keys(rows[0]!)).toEqual(["id", "log_type", "log_course", "log_number", "dive_title", "dive_date", "dive_location", "status"]);
-      const deep = await gql(
-        "/api/Logbook",
-        idToken,
-        "query logbook_logs($affiliate_id: Int!, $status: status, $limit: Int, $offset: Int) { logbook_logs(where: { affiliate_id: { _eq: $affiliate_id }, status: { _eq: $status } }, order_by: { depth_times_aggregate: { max: { max_depth: desc } } }, limit: $limit, offset: $offset) { id depth_times { max_depth } } }",
-        { affiliate_id: String(aff), status: "Verified", limit: 1, offset: 0 },
-        headers,
-      );
-      expect((deep.body!.data!.logbook_logs as Array<{ depth_times: Array<{ max_depth: number }> }>)[0]!.depth_times[0]!.max_depth).toBe(38.2);
-      const count = await gql("/api/Logbook", idToken, "query logbook_logs_aggregate($affiliate_id: Int!) { logbook_logs_aggregate(where: { affiliate_id: { _eq: $affiliate_id } }) { aggregate { count } } }", { affiliate_id: aff }, headers);
-      expect(count.body!.data).toEqual({ logbook_logs_aggregate: { aggregate: { count: 25 } } });
-      const sum = await gql(
-        "/api/Logbook",
-        idToken,
-        "query logbook_depth_time_aggregate($affiliate_id: Int!) { logbook_depth_time_aggregate(where: { log: { affiliate_id: { _eq: $affiliate_id } } }) { aggregate { sum { bottom_time } } } }",
-        { affiliate_id: aff },
-        headers,
-      );
-      expect((sum.body!.data as { logbook_depth_time_aggregate: { aggregate: { sum: { bottom_time: number } } } }).logbook_depth_time_aggregate.aggregate.sum.bottom_time).toBeGreaterThan(500);
-
-      const insert = await gql(
-        "/api/Logbook",
-        idToken,
-        "mutation insert_logbook_logs($general: [logbook_logs_insert_input!]!) { insert_logbook_logs(objects: $general) { affected_rows returning { id affiliate_id dive_title dive_date status } } }",
-        {
-          general: {
-            affiliate_id: MOCK_ACCOUNT.affiliateId,
-            log_type: "Recreational",
-            log_course: null,
-            log_number: null,
-            created_date: "2026-11-09T19:40:00",
-            update_date: "2026-11-09T19:40:00",
-            dive_type: "BeachShore",
-            dive_title: "Raw reef",
-            dive_location: "Anchor Rock",
-            dive_date: "11/09/2026",
-            status: "Publish",
-            memsys_member_number: null,
-            depth_times: { data: { bottom_time: "42", max_depth: "28" } },
-            conditions: { data: { water_type: "Salt", current: "SomeCurrent", surge: null } },
-            equipment: { data: { additional_equipment: "{Hood,Boots}", gas_mixture: "Enriched_32", oxygen: "32", nitrogen: "68", helium: "0" } },
-            experiences: { data: { feeling: "Amazing", notes: "", buddies: "Kim Demo", dive_center: "" } },
-          },
-        },
-        headers,
-      );
-      const inserted = insert.body!.data!.insert_logbook_logs as { affected_rows: number; returning: Array<{ id: number; dive_date: string }> };
-      expect(inserted.affected_rows).toBe(5);
-      expect(inserted.returning[0]!.dive_date).toBe("2026-11-09T00:00:00");
-      const id = inserted.returning[0]!.id;
-
-      const update = await gql(
-        "/api/Logbook",
-        idToken,
-        "mutation UpdateRecreationalDiveLog($id: Int!, $general: logbook_logs_set_input!, $depthTime: logbook_depth_time_set_input!, $conditions: logbook_conditions_set_input!, $equipment: logbook_equipment_set_input!, $experience: logbook_experience_set_input!) { update_logbook_logs(where: { id: { _eq: $id } }, _set: $general) { affected_rows } update_logbook_depth_time(where: { logs_id: { _eq: $id } }, _set: $depthTime) { affected_rows } update_logbook_conditions(where: { logs_id: { _eq: $id } }, _set: $conditions) { affected_rows } update_logbook_equipment(where: { logs_id: { _eq: $id } }, _set: $equipment) { affected_rows } update_logbook_experience(where: { logs_id: { _eq: $id } }, _set: $experience) { affected_rows } }",
-        { id, general: { dive_title: "Raw reef 2" }, depthTime: { max_depth: 30 }, conditions: { weather: "Sunny" }, equipment: {}, experience: { notes: "x" } },
-        headers,
-      );
-      expect(update.body!.data).toMatchObject({ update_logbook_logs: { affected_rows: 1 }, update_logbook_depth_time: { affected_rows: 1 } });
-      const bad = await gql("/api/Logbook", idToken, "mutation m($id: Int!, $general: logbook_logs_set_input!) { update_logbook_logs(where: { id: { _eq: $id } }, _set: $general) { affected_rows } }", { id, general: { dive_type: "Shore" } }, headers);
-      expect(bad.body!.errors![0]).toMatchObject({ extensions: { code: "data-exception" }, message: 'invalid input value for enum dive_type: "Shore"' });
-
-      const onlyLog = await gql("/api/Logbook", idToken, "mutation d($id: Int!) { delete_logbook_logs(where: { id: { _eq: $id } }) { affected_rows } }", { id }, headers);
-      expect(onlyLog.body!.errors![0]!.message).toMatch(/foreign key/i);
-      const del = await gql(
-        "/api/Logbook",
-        idToken,
-        "mutation delete_logbook_logs($id: Int) { delete_logbook_depth_time(where: { logs_id: { _eq: $id } }) { affected_rows returning { id } } delete_logbook_skills(where: { logs_id: { _eq: $id } }) { affected_rows } delete_logbook_conditions(where: { logs_id: { _eq: $id } }) { affected_rows } delete_logbook_experience(where: { logs_id: { _eq: $id } }) { affected_rows } delete_logbook_equipment(where: { logs_id: { _eq: $id } }) { affected_rows } delete_logbook_logs(where: { id: { _eq: $id } }) { affected_rows returning { id } } }",
-        { id },
-        headers,
-      );
-      expect(del.body!.data).toMatchObject({ delete_logbook_logs: { affected_rows: 1, returning: [{ id }] }, delete_logbook_skills: { affected_rows: 0 } });
-
-      const sites = await gql("/api/Logbook", idToken, "query logbook_logs($name: String!) { logbook_dive_site(where: { name: { _ilike: $name } }) { id name } }", { name: "%reef%" }, headers);
-      expect((sites.body!.data!.logbook_dive_site as Array<{ name: string }>).map((s) => s.name)).toEqual(["Lantern Reef", "Lumen Bay House Reef"]);
-      const units = await gql(
-        "/api/Logbook",
-        idToken,
-        "mutation insert_logbook_units_settings($affiliate_id: Int!, $unit: units!) { insert_logbook_units_settings(objects: { affiliate_id: $affiliate_id, unit: $unit } on_conflict: { constraint: units_settings_pkey, update_columns: unit }) { returning { affiliate_id unit } } }",
-        { affiliate_id: aff, unit: "Imperial" },
-        headers,
-      );
-      expect(units.body!.data).toEqual({ insert_logbook_units_settings: { returning: [{ affiliate_id: aff, unit: "Imperial" }] } });
-      mock.account.store.units = "Metric";
-      expect(mock.violations).toEqual([]);
-    });
-
-    it("answers like the real transports when something is wrong", async () => {
-      const { idToken } = await signIn();
-      const unscoped = await gql("/api/Logbook", idToken, "query { logbook_logs(limit: 1) { id } }", {}, { "affiliate-id": MOCK_ACCOUNT.affiliateId });
-      expect(unscoped.status).toBe(200);
-      expect(mock.violations.join(" ")).toMatch(/not filtered by affiliate_id/);
-      mock.violations.length = 0;
-      expect((await gql("/api/Logbook", "eyJ.bad.token", "query { logbook_logs { id } }")).status).toBe(401);
-      const direct = await gql("/v1/graphql", "eyJ.bad.token", "query { logbook_logs { id } }");
-      expect(direct.body!.errors![0]!.extensions.code).toBe("invalid-jwt");
-      const other = await gql("/api/Logbook", idToken, "query q($affiliate_id: Int!) { logbook_logs(where: { affiliate_id: { _eq: $affiliate_id } }) { id } }", { affiliate_id: 1 });
-      expect(other.body!.errors![0]!.extensions.code).toBe("permission-error");
-      const pro = await fetch(`${mock.url}/api/Logbook/instructor/900001`, { headers: { authorization: `Bearer ${idToken}` } });
-      expect(await pro.json()).toEqual({ results: [{ memberNumber: 900001, firstName: "Robin", middleInitial: "", lastName: "Example" }] });
-      const nobody = await fetch(`${mock.url}/instructor/42`, { headers: { authorization: `Bearer ${idToken}` } });
-      expect(((await nobody.json()) as { results: Array<{ memberNumber: number }> }).results[0]!.memberNumber).toBe(-1);
-      const ecards = await fetch(`${mock.url}/api/eCard/GeteCardListConsumer`, { headers: { authorization: `Bearer ${idToken}` } });
-      const cards = (await ecards.json()) as { affiliateSummary: { affiliateID: number }; eCardInfo: Array<{ certDate: string }> };
-      expect(cards.affiliateSummary.affiliateID).toBe(Number(MOCK_ACCOUNT.affiliateId));
-      expect(cards.eCardInfo[0]!.certDate).toMatch(/^\d{2}-[A-Z]{3}-\d{4}$/);
-      mock.failNext("proxy", 503);
-      expect((await gql("/api/Logbook", idToken, "query { logbook_logs { id } }")).status).toBe(503);
-    });
-  });
-
-  describe("in process (proxy mode)", () => {
-    let client: Client;
-    /** Requests of this client only (the mock also served the tests above). */
-    let first = 0;
-    let firstGql = 0;
-    const requests = () => mock.requests.slice(first);
-
-    beforeAll(async () => {
-      first = mock.requests.length;
-      firstGql = mock.graphql.length;
-      ({ client } = await inProcess());
-    });
-
-    it("signs in once with Cognito and reports the account", async () => {
-      const info = await call(client, "padi_account_info", { check: true });
-      expect(info).toMatchObject({ name: "River Tester", email: MOCK_ACCOUNT.email, affiliate_id: MOCK_ACCOUNT.affiliateId, demo: false, api_mode: "proxy" });
-      expect(info.check).toMatchObject({ ok: true, dives: 25 });
-      const signIns = requests().filter((r) => r.path.startsWith("/cognito") && r.body.includes("USER_PASSWORD_AUTH"));
-      expect(signIns).toHaveLength(1);
-      expect(JSON.parse(signIns[0]!.body).AuthParameters.USERNAME).toBe(MOCK_ACCOUNT.email);
-      // Every logbook request carries the ID token, the affiliate id and x-platform.
-      const gql = mock.graphql.slice(firstGql);
-      expect(gql.length).toBeGreaterThan(0);
-      for (const g of gql) {
-        expect(String(g.headers.authorization)).toMatch(/^Bearer eyJ/);
-        expect(g.headers["affiliate-id"]).toBe(MOCK_ACCOUNT.affiliateId);
-        expect(g.headers["x-platform"]).toBe("web");
-      }
-      expect(mock.violations).toEqual([]);
-    });
-
-    it("lists, reads and counts the dives", async () => {
-      const page = await call<{ total: number; dives: Summary[]; next_offset?: number }>(client, "logbook_list_dives", {});
-      expect(page.total).toBe(25);
-      expect(page.dives).toHaveLength(15);
-      expect(page.next_offset).toBe(15);
-      expect(page.dives[0]!.status).toBe("Draft");
-      const dive = await call<Record<string, unknown>>(client, "logbook_get_dive", { dive_id: page.dives[1]!.id });
-      expect(dive).toMatchObject({ id: page.dives[1]!.id, units: { depth: "m" } });
-      expect(String(dive.web_url)).toContain("learning.padi.com");
-      const deep = await call<{ dives: Summary[] }>(client, "logbook_list_dives", { sort: "max_depth", limit: 5 });
-      expect(deep.dives.length).toBeGreaterThan(0);
-      const stats = await call<{ count: number; total_bottom_time: string }>(client, "logbook_stats", { group_by: "year" });
-      expect(stats.count).toBe(25);
-      expect(stats.total_bottom_time).toMatch(/^\d+:\d{2}$/);
-      await expectFiltered(client);
-      expect(mock.violations).toEqual([]);
-    });
-
-    it("creates, updates, submits and deletes dives, writing what PADI expects", async () => {
-      const created = await call<Record<string, unknown> & { id: number }>(client, "logbook_create_dive", {
-        title: "Integration reef",
-        date: "2026-11-01",
-        location: "Anchor Rock",
-        dive_type: "shore",
-        max_depth: 21.5,
-        bottom_time_min: 44,
-        weather: "Partly Cloudy",
-        gas: "Enriched_32",
-        equipment: ["Hood", "Dive Light"],
-        buddies: "Sam Example",
-      });
-      expect(created).toMatchObject({ title: "Integration reef", dive_type: "BeachShore", status: "Publish", max_depth: 21.5, oxygen_pct: 32 });
-      const stored = mock.account.store.logs.get(created.id)!;
-      expect(stored).toMatchObject({ dive_date: "2026-11-01T00:00:00", affiliate_id: Number(MOCK_ACCOUNT.affiliateId), log_type: "Recreational" });
-      expect(stored.equipment![0]!.additional_equipment).toEqual(["Hood", "Dive Light"]);
-
-      const updated = await call<Record<string, unknown>>(client, "logbook_update_dive", { dive_id: created.id, max_depth: 22, notes: "Edited" });
-      expect(updated).toMatchObject({ max_depth: 22, bottom_time_min: 44, notes: "Edited", weather: "Partly Cloudy", buddies: "Sam Example" });
-      // The update never sends log_type (the store refuses it) and keeps the other columns.
-      expect(mock.account.store.logs.get(created.id)!.log_type).toBe("Recreational");
-
-      expect(await callError(client, "logbook_submit_for_verification", { dive_id: created.id, instructor_number: "123456", confirm: true })).toMatch(/123456|not found|unknown/i);
-      const sent = await call<{ dive: { status: string; locked: boolean }; instructor: { name: string } }>(client, "logbook_submit_for_verification", {
-        dive_id: created.id,
-        instructor_number: "900001",
-        confirm: true,
-      });
-      expect(sent).toMatchObject({ dive: { status: "Pending", locked: true }, instructor: { name: "Robin Example" } });
-      expect(mock.account.store.logs.get(created.id)).toMatchObject({ status: "Pending", memsys_member_number: 900001 });
-      expect(await callError(client, "logbook_delete_dive", { dive_id: created.id, confirm_title: "Integration reef" })).toMatch(/lock|Pending/i);
-
-      const victim = [...mock.account.store.logs.values()].find((d) => d.status === "Publish" && d.id !== created.id)!;
-      expect(await callError(client, "logbook_delete_dive", { dive_id: victim.id, confirm_title: "not the title" })).toMatch(/title/i);
-      const deleted = await call<{ deleted: boolean; dive: { title: string } }>(client, "logbook_delete_dive", { dive_id: victim.id, confirm_title: ` ${victim.dive_title!.toUpperCase()} ` });
-      expect(deleted).toMatchObject({ deleted: true, dive: { title: victim.dive_title } });
-      expect(mock.account.store.logs.has(victim.id)).toBe(false);
-      expect(mock.violations).toEqual([]);
-    });
-
-    it("searches sites, looks up PADI Pros, lists eCards and photos, and sets the units", async () => {
-      const sites = await call<{ sites: Array<{ name: string }> }>(client, "logbook_search_dive_sites", { query: "reef" });
-      expect(sites.sites.map((s) => s.name)).toEqual(expect.arrayContaining(["Lantern Reef"]));
-      expect(await call(client, "logbook_lookup_instructor", { member_number: "900001" })).toMatchObject({ found: true, name: "Robin Example" });
-      expect(await call(client, "logbook_lookup_instructor", { member_number: "123" })).toMatchObject({ found: false });
-      const cards = await call<{ count: number; certifications: Array<{ title: string }> }>(client, "padi_list_certifications");
-      expect(cards.count).toBe(3);
-
-      const diveId = [...mock.account.store.logs.keys()][0]!;
-      const png = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c6360000002000154a24f5d0000000049454e44ae426082", "hex");
-      mock.account.photos.set(diveId, [{ id: "img-1", mimeType: "image/png", data: png }]);
-      const photos = await client.callTool({ name: "logbook_get_photos", arguments: { dive_id: diveId } });
-      expect(photos.isError).toBeFalsy();
-      const content = photos.content as Content;
-      expect(content.map((c) => c.type)).toEqual(["text", "image"]);
-      expect(content[1]).toMatchObject({ mimeType: "image/png", data: png.toString("base64") });
-
-      const exported = await client.callTool({ name: "logbook_export_dives", arguments: { format: "csv" } });
-      const parts = exported.content as Content;
-      expect(JSON.parse(parts[0]!.text!).count).toBeGreaterThan(20);
-      expect(parts[1]!.text!.split("\n").length).toBeGreaterThan(20);
-
-      await call(client, "logbook_set_units", { units: "imperial" });
-      expect(mock.account.store.units).toBe("Imperial");
-      const page = await call<{ units: { depth: string } }>(client, "logbook_list_dives", { limit: 1 });
-      expect(page.units.depth).toBe("ft");
-      await call(client, "logbook_set_units", { units: "metric" });
-      expect(mock.violations).toEqual([]);
-    });
-
-    it("refreshes an expired ID token with the stored refresh token", async () => {
-      const before = requests().filter((r) => r.body.includes("REFRESH_TOKEN_AUTH")).length;
-      mock.expireIdTokens();
-      const page = await call<{ total: number }>(client, "logbook_list_dives", { limit: 1 });
-      expect(page.total).toBeGreaterThan(20);
-      const refreshes = requests().filter((r) => r.body.includes("REFRESH_TOKEN_AUTH")).length;
-      expect(refreshes - before).toBeGreaterThanOrEqual(1);
-      // The refresh token is used, not the password again.
-      expect(requests().filter((r) => r.body.includes("USER_PASSWORD_AUTH"))).toHaveLength(1);
-    });
-  });
-
-  describe("sign-in rules", () => {
-    it("never retries a wrong password, and never shows it", async () => {
-      const before = mock.requests.length;
-      const { client } = await inProcess({ PADI_PASSWORD: "wrong-password-value" });
-      const text = await callError(client, "padi_account_info", {});
-      expect(text).toMatch(/password/i);
-      expect(text).not.toContain("wrong-password-value");
-      const sent = mock.requests.slice(before);
-      expect(sent.filter((r) => r.path.startsWith("/cognito"))).toHaveLength(1);
-      // auto mode does not fall back to the PADI auth API after "wrong e-mail or password".
-      expect(sent.filter((r) => r.path.startsWith("/auth/api"))).toHaveLength(0);
-      await callError(client, "padi_account_info", {});
-      expect(mock.requests.slice(before).filter((r) => r.path.startsWith("/cognito"))).toHaveLength(1);
-    });
-
-    it("signs in with the PADI auth API and saves a rotated refresh token to the cache file", async () => {
-      const dir = mkdtempSync(join(tmpdir(), "padi-mcp-it-"));
-      const cache = join(dir, "token.json");
-      mock.rotateRefreshTokens = true;
-      try {
-        const { client } = await inProcess({ PADI_LOGIN_METHOD: "padi", PADI_TOKEN_CACHE: cache });
-        expect((await call(client, "padi_account_info", {})).affiliate_id).toBe(MOCK_ACCOUNT.affiliateId);
-        const first = JSON.parse(readFileSync(cache, "utf8")) as { refreshToken: string; loginMethod: string };
-        expect(first.loginMethod).toBe("padi");
-        expect(statSync(cache).mode & 0o777).toBe(0o600);
-        mock.expireIdTokens();
-        await call(client, "logbook_list_dives", { limit: 1 });
-        const second = JSON.parse(readFileSync(cache, "utf8")) as { refreshToken: string };
-        expect(second.refreshToken).not.toBe(first.refreshToken);
-
-        // A later run starts from the cache alone (no password).
-        const config = loadConfig({ ...mock.env(), PADI_TOKEN_CACHE: cache, PADI_TIMEZONE: "Europe/Zurich" });
-        const services = createServices(config);
-        opened.push(services);
-        expect((await services.logbook!.account()).affiliateId).toBe(MOCK_ACCOUNT.affiliateId);
-      } finally {
-        mock.rotateRefreshTokens = false;
-      }
-    });
-
-    it("explains a sign-in challenge (MFA) instead of failing silently", async () => {
-      mock.challenge = "SOFTWARE_TOKEN_MFA";
-      const { client } = await inProcess();
-      expect(await callError(client, "padi_account_info", {})).toMatch(/challenge|MFA|code|verification/i);
-      mock.challenge = undefined;
-    });
-  });
-
-  describe("direct mode", () => {
-    it("talks to the Hasura endpoint without affiliate-id, and with x-hasura-role on writes", async () => {
-      const before = mock.graphql.length;
-      const { client } = await inProcess({ PADI_API_MODE: "direct" });
-      const page = await call<{ total: number; dives: Summary[] }>(client, "logbook_list_dives", { limit: 3 });
-      expect(page.total).toBeGreaterThan(20);
-      await expectFiltered(client);
-      const created = await call<{ id: number }>(client, "logbook_create_dive", { title: "Direct dive", date: "2026-10-30", location: "Eel Garden", dive_type: "Boat", status: "Draft" });
-      expect(mock.account.store.logs.get(created.id)!.status).toBe("Draft");
-      const calls = mock.graphql.slice(before);
-      expect(calls.length).toBeGreaterThan(0);
-      expect(calls.every((c) => c.mode === "direct" && c.headers["affiliate-id"] === undefined)).toBe(true);
-      expect(mock.violations).toEqual([]);
-    });
-  });
-
   describe("built server (dist/index.js)", () => {
     let stdio: Client | undefined;
+    let stdioErr: { text: () => string } | undefined;
     let http: ChildProcess | undefined;
 
     afterAll(async () => {
@@ -493,68 +172,342 @@ describe.skipIf(!enabled)("against a mock PADI API", () => {
       http?.kill();
     });
 
-    it("--check signs in, counts the dives and names the account", async () => {
-      const result = await new Promise<{ code: number | null; stdout: string }>((resolve) => {
-        const child = spawn(process.execPath, ["dist/index.js", "--check"], { env: { ...baseEnv(), PATH: process.env.PATH ?? "" }, stdio: ["ignore", "pipe", "ignore"] });
-        let stdout = "";
-        child.stdout!.on("data", (c: Buffer) => (stdout += c.toString()));
-        child.on("exit", (code) => resolve({ code, stdout }));
-      });
-      expect(result.code).toBe(0);
-      const out = JSON.parse(result.stdout);
-      expect(out.logbook).toMatchObject({ ok: true });
-      expect(out.logbook.dives).toBeGreaterThan(20);
-      expect(out.account).toMatchObject({ name: "River Tester", affiliate_id: MOCK_ACCOUNT.affiliateId });
-      expect(result.stdout).not.toContain(MOCK_ACCOUNT.password);
+    it("refuses to serve without a sign-in, and says how to get one", async () => {
+      const { code, stdout, stderr } = await runCli([], cliEnv());
+      expect(code).toBe(1);
+      expect(stdout).toBe("");
+      expect(stderr).toContain(`The token cache ${cache} (SUUNTO_TOKEN_CACHE) does not exist yet. Run suunto-mcp --login`);
+      expectNoSecrets(stderr, "stderr");
     });
 
-    it("serves the logbook over stdio", async () => {
-      const transport = new StdioClientTransport({
-        command: process.execPath,
-        args: ["dist/index.js"],
-        env: { ...baseEnv(), PATH: process.env.PATH ?? "" },
-        stderr: "pipe",
+    it("--login signs in through Suunto's page and saves the tokens (mode 0600)", async () => {
+      const port = await freePort();
+      const redirect = `http://127.0.0.1:${port}/callback`;
+      const tokenCalls = mock.count("/oauth/token");
+      const child = spawn(process.execPath, ["dist/index.js", "--login"], { env: cliEnv({ SUUNTO_REDIRECT_URI: redirect }), stdio: ["ignore", "ignore", "pipe"] });
+      const exited = new Promise<number | null>((resolve) => child.on("exit", (code) => resolve(code)));
+      let stderr = "";
+      // The authorize URL is printed on a line of its own once the local server listens.
+      const authorize = await new Promise<URL>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`--login printed no address: ${stderr}`)), 20_000);
+        child.stderr!.on("data", (chunk: Buffer) => {
+          stderr += chunk.toString();
+          const line = stderr.split("\n").find((l) => l.startsWith(`${mock.oauthUrl}/oauth/authorize?`));
+          if (line && stderr.includes("Waiting for Suunto")) {
+            clearTimeout(timer);
+            resolve(new URL(line.trim()));
+          }
+        });
+        void exited.then((code) => reject(new Error(`--login exited with ${code}: ${stderr}`)));
       });
+      expect(Object.fromEntries(authorize.searchParams)).toMatchObject({ response_type: "code", client_id: MOCK_CLIENT_ID, redirect_uri: redirect });
+      expect(authorize.searchParams.get("state")).toMatch(/^[A-Za-z0-9_-]{20,}$/);
+
+      // A callback with another state is not this sign-in: refused, and the wait goes on.
+      expect((await fetch(`${redirect}?code=invented&state=not-this-one`)).status).toBe(400);
+      // Suunto's sign-in page (the mock approves at once) sends the browser back with a code.
+      const signIn = await fetch(authorize, { redirect: "manual" });
+      expect(signIn.status).toBe(302);
+      const callback = new URL(signIn.headers.get("location")!);
+      expect(callback.origin + callback.pathname).toBe(redirect);
+      const page = await fetch(callback);
+      expect(page.status).toBe(200);
+      expect(page.headers.get("referrer-policy")).toBe("no-referrer");
+      expect(await page.text()).toContain(`Signed in to Suunto as ${MOCK_USERNAME}.`);
+      expect(await exited).toBe(0);
+
+      expect(mock.count("/oauth/token") - tokenCalls).toBe(1);
+      expect(stderr).toContain(`Signed in to Suunto as ${MOCK_USERNAME}. The tokens are saved in ${cache}`);
+      expect(stderr).toContain("Ignored a callback with a state that does not belong to this sign-in.");
+      const saved = readCache();
+      expect(saved).toMatchObject({ clientId: MOCK_CLIENT_ID, username: MOCK_USERNAME, refreshToken: liveRefreshToken() });
+      expect(saved.accessToken).toBe(mock.state.accessTokens.at(-1)!.token);
+      expect(saved.accessTokenExpiresAt).toBeGreaterThan(Date.now());
+      expect(statSync(cache).mode & 0o777).toBe(0o600);
+      expectNoSecrets(stderr, "--login output");
+    });
+
+    it("--check uses the token cache, counts the workouts and prints no secret", async () => {
+      const tokenCalls = mock.count("/oauth/token");
+      const { code, stdout, stderr } = await runCli(["--check"], cliEnv());
+      expect(code, stderr).toBe(0);
+      const out = JSON.parse(stdout) as { version: string; config: Record<string, unknown>; account: Record<string, unknown> };
+      expect(out.config).toMatchObject({ app_keys: "set", sign_in: "token cache", token_cache: cache, units: "metric", read_only: false, time_zone: ZONE });
+      expect(out.config.custom_endpoints).toEqual(expect.arrayContaining(["SUUNTO_OAUTH_URL", "SUUNTO_API_URL"]));
+      expect(out.account).toMatchObject({ username: MOCK_USERNAME, connected: true, demo: false, time_zone: ZONE, check: { ok: true, workouts_last_30_days: recentWorkouts() } });
+      // The cached access token is still valid: no refresh.
+      expect(mock.count("/oauth/token")).toBe(tokenCalls);
+      expect(stderr).toContain("Using custom Suunto endpoints");
+      expectNoSecrets(stdout + stderr, "--check output");
+      expect(stdout).not.toContain(MOCK_CLIENT_ID);
+    });
+
+    it("serves every tool and both prompts over stdio", async () => {
+      const transport = new StdioClientTransport({ command: process.execPath, args: ["dist/index.js"], env: cliEnv(), stderr: "pipe" });
+      stdioErr = collect(transport.stderr);
       stdio = new Client({ name: "it-stdio", version: "1.0.0" });
       await stdio.connect(transport);
-      expect(stdio.getServerVersion()).toMatchObject({ name: "padi-mcp", title: "MCP for PADI (dive logbook)" });
-      const info = await call(stdio, "padi_account_info", { check: true });
-      expect(info.check).toMatchObject({ ok: true });
-      const created = await call<{ id: number; title: string }>(stdio, "logbook_create_dive", {
-        title: "Stdio dive",
-        date: "2026-11-02",
-        location: "Sandy Slope",
-        dive_type: "Boat",
-        max_depth: 12,
-        bottom_time_min: 50,
+      const client = stdio;
+      expect(client.getServerVersion()).toMatchObject({ name: "suunto-mcp", title: "MCP for Suunto (workouts, sleep, recovery)" });
+      expect(client.getInstructions()).toContain(`user's time zone, ${ZONE}`);
+
+      const tools = (await client.listTools()).tools;
+      expect(tools.map((t) => t.name).sort()).toEqual(ALL_TOOLS);
+      for (const tool of tools) {
+        const write = WRITE_TOOLS.includes(tool.name);
+        expect(tool.annotations, tool.name).toMatchObject({ readOnlyHint: !write, destructiveHint: false, idempotentHint: !write });
+      }
+      const prompts = (await client.listPrompts()).prompts;
+      expect(prompts.map((p) => p.name).sort()).toEqual(["sleep_and_recovery", "training_review"]);
+      expect(prompts.find((p) => p.name === "training_review")!.arguments?.map((a) => a.name)).toEqual(["period"]);
+      expect(prompts.find((p) => p.name === "sleep_and_recovery")!.arguments?.map((a) => a.name)).toEqual(["days"]);
+      const review = await client.getPrompt({ name: "training_review", arguments: { period: "last week" } });
+      expect(JSON.stringify(review.messages)).toContain("suunto_workout_stats");
+      const recovery = await client.getPrompt({ name: "sleep_and_recovery", arguments: { days: "3" } });
+      expect(JSON.stringify(recovery.messages)).toContain("the last 3 days");
+
+      const today = todayInZone(ZONE);
+      const requestsBefore = mock.requests.length;
+
+      // Read tools, each once.
+      const info = await call(client, "suunto_account_info", { check: true });
+      expect(info).toMatchObject({ username: MOCK_USERNAME, connected: true, demo: false, read_only: false, time_zone: ZONE, today, check: { ok: true } });
+      expect(Date.parse(String(info.token_expires_at))).toBeGreaterThan(Date.now());
+
+      const list = await call<{ count: number; workouts: Array<{ workout_key: string; start: string }>; units: { distance: string } }>(client, "suunto_list_workouts");
+      expect(list.count).toBe(recentWorkouts());
+      expect(list.workouts.map((w) => w.workout_key)).toEqual(newestFirst().slice(0, list.count).map((w) => w.workoutKey));
+      expect(list.units.distance).toBe("km");
+      const key = list.workouts[0]!.workout_key;
+
+      const workout = await call<{ workout_key: string; samples: Record<string, { unit: string; original_points: number; points: unknown[] }>; available_data: string[] }>(client, "suunto_get_workout", {
+        workout_key: key,
+        samples: ["heart_rate", "location"],
+        max_points: 20,
       });
-      expect(mock.account.store.logs.has(created.id)).toBe(true);
-      await call(stdio, "logbook_delete_dive", { dive_id: created.id, confirm_title: "Stdio dive" });
-      expect(mock.account.store.logs.has(created.id)).toBe(false);
+      expect(workout.workout_key).toBe(key);
+      expect(workout.available_data).toEqual(expect.arrayContaining(["heart_rate", "location"]));
+      expect(workout.samples.heart_rate!.unit).toBe("bpm");
+      expect(workout.samples.heart_rate!.original_points).toBeGreaterThan(20);
+      expect(workout.samples.heart_rate!.points.length).toBeGreaterThan(1);
+      expect(workout.samples.heart_rate!.points.length).toBeLessThanOrEqual(20);
+      expect(workout.samples.location!.points[0]).toMatchObject({ lat: expect.any(Number), lon: expect.any(Number) });
+
+      const stats = await call<{ count: number; groups: Array<{ key: string; count: number }> }>(client, "suunto_workout_stats", { group_by: "sport" });
+      expect(stats.count).toBe(mock.state.workouts.length);
+      expect(stats.groups.reduce((n, g) => n + g.count, 0)).toBe(mock.state.workouts.length);
+      expect(stats.groups.map((g) => g.key)).toContain("Running");
+
+      const fit = await client.callTool({ name: "suunto_export_workout_fit", arguments: { workout_key: key } });
+      expect(fit.isError).toBeFalsy();
+      const parts = fit.content as Content;
+      const file = Buffer.from(parts[1]!.resource!.blob!, "base64");
+      expect(parts[1]!.resource).toMatchObject({ uri: `suunto://workouts/${key}.fit`, mimeType: "application/vnd.ant.fit" });
+      expect(file.subarray(8, 12).toString("ascii")).toBe(".FIT");
+      expect(JSON.parse(parts[0]!.text!)).toMatchObject({ workout_key: key, bytes: file.length });
+
+      const daily = await call<{ days: Array<{ date: string }>; totals: { steps: number } }>(client, "suunto_daily_activity", { from: addDays(today, -6), to: today });
+      expect(daily.days.map((d) => d.date)).toEqual(Array.from({ length: 7 }, (_, i) => addDays(today, i - 6)));
+      expect(daily.totals.steps).toBeGreaterThan(0);
+
+      const samples = await call<{ resolution: string; count: number }>(client, "suunto_activity_samples", { from: addDays(today, -1), to: today });
+      expect(samples.resolution).toBe("hour");
+      expect(samples.count).toBeGreaterThan(0);
+      expect(samples.count).toBeLessThanOrEqual(48);
+
+      const sleep = await call<{ count: number; sleeps: Array<{ date: string; is_nap: boolean }> }>(client, "suunto_sleep", { from: addDays(today, -6), to: today });
+      expect(sleep.sleeps.filter((s) => !s.is_nap).length).toBeGreaterThanOrEqual(5);
+      for (const s of sleep.sleeps) expect(s.date >= addDays(today, -6) && s.date <= today, s.date).toBe(true);
+
+      const rec = await call<{ resolution: string; count: number; summary: { balance_pct_avg: number } }>(client, "suunto_recovery", { from: addDays(today, -2), to: today });
+      expect(rec.resolution).toBe("day");
+      expect(rec.count).toBeGreaterThan(0);
+      expect(rec.summary.balance_pct_avg).toBeGreaterThan(0);
+      expect(rec.summary.balance_pct_avg).toBeLessThanOrEqual(100);
+
+      const routes = await call<{ count: number; routes: Array<{ route_id: string; name: string }> }>(client, "suunto_list_routes");
+      expect(routes.count).toBe(mock.state.routes.length);
+      expect(routes.routes[0]!.name).toBe("Test summit path");
+      const gpx = await call<{ format: string; gpx: string }>(client, "suunto_get_route", { route_id: routes.routes[0]!.route_id, format: "gpx" });
+      expect(gpx.format).toBe("gpx");
+      expect(gpx.gpx).toContain("<rte><name>Test summit path</name>");
+
+      const pois = await call<{ count: number; pois: Array<{ name: string; type: string }> }>(client, "suunto_list_pois");
+      expect(pois.count).toBe(mock.state.pois.length);
+      expect(pois.pois.map((p) => p.type)).toContain("Peak");
+
+      // The two write tools.
+      const routeCount = mock.state.routes.length;
+      const imported = await call<{ added: boolean; route: { name: string; sports: string[] } }>(client, "suunto_import_route", { gpx: GPX, sports: ["Hiking"] });
+      expect(imported).toMatchObject({ added: true, route: { name: "Integration ridge", sports: ["Hiking"] } });
+      expect(mock.state.routes).toHaveLength(routeCount + 1);
+      const sent = mock.requests.filter((r) => r.path === "/v2/route/import").at(-1)!;
+      expect(sent.headers["content-type"]).toMatch(/^application\/gpx\+xml/);
+      expect(sent.query.activities).toBe("11");
+      expect(sent.body).toBe(GPX);
+
+      const poiCount = mock.state.pois.length;
+      const poi = await call<{ added: boolean; poi: Record<string, unknown> }>(client, "suunto_create_poi", {
+        name: "Integration hut",
+        latitude: 46.9902,
+        longitude: 9.0811,
+        altitude_m: 1620,
+        type: "Mountain",
+        sport: "Hiking",
+      });
+      expect(poi).toMatchObject({ added: true, poi: { name: "Integration hut", type: "Mountain", type_id: 16, altitude: 1620, sport: "Hiking" } });
+      expect(mock.state.pois).toHaveLength(poiCount + 1);
+      expect(mock.state.pois.at(-1)).toMatchObject({ point: { x: 9.0811, y: 46.9902, z: 1620, name: "Integration hut", type: 16 }, activityId: 11, watchEnabled: true });
+      // A write clears the cached lists: the new route and point show at once.
+      expect((await call<{ count: number }>(client, "suunto_list_routes")).count).toBe(routeCount + 1);
+      expect((await call<{ count: number }>(client, "suunto_list_pois")).count).toBe(poiCount + 1);
+
+      // Every request carried the subscription key, a Bearer token and the User-Agent.
+      const sentNow = mock.requests.slice(requestsBefore).filter((r) => r.host === "api");
+      expect(sentNow.length).toBeGreaterThan(10);
+      for (const r of sentNow) expect(r.headers).toMatchObject({ authorization: "Bearer ***", "ocp-apim-subscription-key": "***" });
+      expect(mock.state.violations).toEqual([]);
     });
 
-    it("serves the logbook over HTTP with a bearer token", async () => {
+    it("never shows a token or key that Suunto echoes in an error", async () => {
+      const client = stdio!;
+      const access = mock.state.accessTokens.at(-1)!.token;
+      mock.failNext("/v3/workouts", 400, { message: `Rejected Bearer ${access} with key ${MOCK_SUBSCRIPTION_KEY} and secret ${MOCK_CLIENT_SECRET}` });
+      const text = await callError(client, "suunto_list_workouts", { limit: 3 });
+      expect(text).toContain("Suunto says the request is not valid");
+      expect(text).toContain("Rejected Bearer ***");
+      expectNoSecrets(text, "the tool error");
+      // A workout key Suunto does not know: a clear "not found".
+      expect(await callError(client, "suunto_get_workout", { workout_key: "0123456789abcdef01234567" })).toBe("Suunto has no workout with the key 0123456789abcdef01234567.");
+      // Wrong arguments are refused before anything is sent.
+      const before = mock.requests.length;
+      expect(await callError(client, "suunto_list_workouts", { limit: 101 })).toMatch(/limit/);
+      expect(await callError(client, "suunto_list_workouts", { occurrence: 1 })).toMatch(/occurrence|unrecognized/i);
+      expect(mock.requests.length).toBe(before);
+    });
+
+    it("refreshes an expired access token and saves the new refresh token to the cache", async () => {
+      const client = stdio!;
+      const before = readCache();
+      const tokenCalls = mock.count("/oauth/token");
+      // Suunto ends the access token early: the next request gets 401 and the session refreshes once.
+      mock.expireAccessTokens();
+      const page = await call<{ count: number }>(client, "suunto_list_workouts", { limit: 2 });
+      expect(page.count).toBe(2);
+      expect(mock.count("/oauth/token") - tokenCalls).toBe(1);
+      const after = readCache();
+      // The mock rotates refresh tokens: the cache holds the one that works now.
+      expect(after.refreshToken).not.toBe(before.refreshToken);
+      expect(after.refreshToken).toBe(liveRefreshToken());
+      expect(after.accessToken).toBe(mock.state.accessTokens.at(-1)!.token);
+      expect(after).toMatchObject({ clientId: MOCK_CLIENT_ID, username: MOCK_USERNAME });
+      expect(statSync(cache).mode & 0o777).toBe(0o600);
+      // The next call needs no refresh.
+      await call(client, "suunto_list_workouts", { limit: 1 });
+      expect(mock.count("/oauth/token") - tokenCalls).toBe(1);
+      // Nothing the server logged holds a secret.
+      expect(stdioErr!.text()).toContain("Tool suunto_list_workouts failed");
+      expectNoSecrets(stdioErr!.text(), "stdio stderr");
+    });
+
+    it("serves the tools over HTTP with a bearer token", async () => {
       const port = await freePort();
-      const token = "it-http-token-0123456789";
+      const token = "it-http-token-0123456789abcdef";
       http = spawn(process.execPath, ["dist/index.js", "--http", "--port", String(port)], {
-        env: { ...baseEnv(), MCP_HTTP_TOKEN: token, PATH: process.env.PATH ?? "" },
+        env: cliEnv({ MCP_HTTP_TOKEN: token }),
         stdio: ["ignore", "ignore", "pipe"],
       });
+      const stderr = collect(http.stderr);
       await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error("the HTTP server did not start")), 20_000);
-        http!.stderr!.on("data", (chunk: Buffer) => {
-          if (chunk.toString().includes("listening")) {
+        const timer = setTimeout(() => reject(new Error(`the HTTP server did not start: ${stderr.text()}`)), 20_000);
+        http!.stderr!.on("data", () => {
+          if (stderr.text().includes("listening")) {
             clearTimeout(timer);
             resolve();
           }
         });
-        http!.on("exit", (code) => reject(new Error(`the HTTP server exited with ${code}`)));
+        http!.on("exit", (code) => reject(new Error(`the HTTP server exited with ${code}: ${stderr.text()}`)));
       });
+      const url = `http://127.0.0.1:${port}/mcp`;
+      const anonymous = await fetch(url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) });
+      expect(anonymous.status).toBe(401);
+
       const client = new Client({ name: "it-http", version: "1.0.0" });
-      await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
-      const page = await call<{ total: number }>(client, "logbook_list_dives", { limit: 2 });
-      expect(page.total).toBeGreaterThan(20);
+      await client.connect(new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
+      expect((await client.listTools()).tools.map((t) => t.name).sort()).toEqual(ALL_TOOLS);
+      expect(await call(client, "suunto_account_info")).toMatchObject({ username: MOCK_USERNAME, connected: true });
+      const page = await call<{ count: number; workouts: Array<{ workout_key: string }> }>(client, "suunto_list_workouts", { limit: 2 });
+      expect(page.workouts.map((w) => w.workout_key)).toEqual(newestFirst().slice(0, 2).map((w) => w.workoutKey));
+      const rec = await call<{ count: number }>(client, "suunto_recovery", { from: addDays(todayInZone(ZONE), -1), to: todayInZone(ZONE), resolution: "hour" });
+      expect(rec.count).toBeGreaterThan(0);
       await client.close();
+      expectNoSecrets(stderr.text(), "HTTP stderr", [token]);
+    });
+  });
+
+  describe("in process", () => {
+    /** A client of the real MCP server (in process), signed in with a fresh refresh token. */
+    async function inProcess(m: MockSuunto, logs: string[] = []): Promise<Client> {
+      const config = loadConfig({ ...m.env(), SUUNTO_REFRESH_TOKEN: m.issueTokens().refreshToken, SUUNTO_TIMEZONE: ZONE });
+      const services = createServices(config, { log: (line) => void logs.push(line) });
+      opened.push(services);
+      const server = createMcpServer(config, services, (line) => void logs.push(line));
+      const client = new Client({ name: "it", version: "1.0.0" });
+      const [ct, st] = InMemoryTransport.createLinkedPair();
+      await Promise.all([client.connect(ct), server.connect(st)]);
+      return client;
+    }
+
+    it("serves a repeated read from memory, and reports Suunto's call limits without a refresh", async () => {
+      const client = await inProcess(mock);
+      await call(client, "suunto_account_info");
+      const lists = mock.count("/v3/workouts");
+      const first = await call(client, "suunto_list_workouts", { limit: 4 });
+      expect(await call(client, "suunto_list_workouts", { limit: 4 })).toEqual(first);
+      expect(mock.count("/v3/workouts") - lists).toBe(1);
+
+      const tokenCalls = mock.count("/oauth/token");
+      // The minute limit: 429 with a Retry-After longer than this server waits.
+      mock.failNext("/v3/workouts", 429, { statusCode: 429, message: "Rate limit is exceeded. Try again in 60 seconds." }, { "retry-after": "60" });
+      expect(await callError(client, "suunto_list_workouts", { limit: 5 })).toContain("Suunto's call limit for this service is reached (HTTP 429). Try again in 60 seconds.");
+      // The weekly quota: 403 with Azure's quota text.
+      mock.failNext("/v3/workouts", 403, { statusCode: 403, message: "Out of call volume quota. Quota will be replenished in 2.03:04:05." });
+      expect(await callError(client, "suunto_list_workouts", { limit: 6 })).toMatch(/^Suunto's call limit for this service is reached \(HTTP 403\)\. Try again in \d+ (days|hours)\./);
+      // A call limit is never a sign-in problem.
+      expect(mock.count("/oauth/token")).toBe(tokenCalls);
+      expect((await call<{ count: number }>(client, "suunto_list_workouts", { limit: 6 })).count).toBe(6);
+    });
+
+    it("says to sign in again when Suunto refuses the refresh token, and waits before trying again", async () => {
+      // A mock of its own: revoking every token here leaves the other tests alone.
+      const other = await startMockSuunto();
+      const logs: string[] = [];
+      try {
+        const client = await inProcess(other, logs);
+        expect(await call(client, "suunto_account_info")).toMatchObject({ username: MOCK_USERNAME, connected: true });
+        other.revokeAll();
+        other.expireAccessTokens();
+        const text = await callError(client, "suunto_list_workouts");
+        expect(text).toContain("Your Suunto connection expired. Run suunto-mcp --login again");
+        // During the cool-down, calls fail at once without asking Suunto again.
+        const tokenCalls = other.count("/oauth/token");
+        expect(await callError(client, "suunto_daily_activity", { from: addDays(todayInZone(ZONE), -1), to: todayInZone(ZONE) })).toContain("Your Suunto connection expired.");
+        expect(other.count("/oauth/token")).toBe(tokenCalls);
+        // check=true still answers: not connected, and why.
+        const info = await call<{ connected: boolean; check: { ok: boolean; error: string } }>(client, "suunto_account_info", { check: true });
+        expect(info).toMatchObject({ connected: false, check: { ok: false } });
+        expect(info.check.error).toContain("Your Suunto connection expired.");
+        // The mock echoes the refused refresh token in its error: it never reaches the answer or the log.
+        const tokens = [...other.state.refreshTokens, ...other.state.accessTokens].map((t) => t.token);
+        for (const t of tokens) {
+          expect(text.includes(t)).toBe(false);
+          expect(logs.join("\n").includes(t)).toBe(false);
+        }
+        expect(logs.join("\n")).toContain("Run suunto-mcp --login again");
+        expect(logs.join("\n")).not.toMatch(/eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}/);
+      } finally {
+        await other.close();
+      }
     });
   });
 });

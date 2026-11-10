@@ -7,6 +7,7 @@ import { readFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { CACHE_MAX_BYTES, LONG_TTL_MS, SHORT_TTL_MS } from "../../src/activity/cache.js";
 import { hashPassword } from "../../src/web/crypto.js";
 import authEn from "../../src/web/i18n/en/auth.js";
 import commonEn from "../../src/web/i18n/en/common.js";
@@ -351,6 +352,12 @@ describe("what the privacy policy states matches the code", () => {
     expect(html).toContain("Suunto Oy is an independent controller of the data in your Suunto account");
     expect(html).toContain("Your workouts and health data are not stored");
     expect(html).toContain("<strong>Your explicit consent</strong> (Art. 9(2)(a) GDPR) for health data");
+  });
+
+  it("states how long recent Suunto answers stay in memory, as the response cache keeps them", async () => {
+    const { html } = await get("/privacy");
+    expect(html).toContain(`recent answers are kept in the server's memory for ${SHORT_TTL_MS / 60_000} to ${LONG_TTL_MS / 60_000} minutes (at most ${CACHE_MAX_BYTES / (1024 * 1024)} MB per user)`);
+    expect(html).toContain("the result of the test request made then (how many workouts you had in the last 30 days, or why the request failed)");
   });
 
   it("has no place in the database for IP addresses, workouts or health data", () => {

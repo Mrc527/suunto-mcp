@@ -85,8 +85,8 @@ describe("pages", () => {
       host: "127.0.0.1",
       port: 0,
       dataDir: ":memory:",
-      // Never reach real PADI from tests: closed local ports.
-      operator: { PADI_COGNITO_URL: "http://127.0.0.1:1/", PADI_AUTH_URL: "http://127.0.0.1:1/auth/api", PADI_LOGBOOK_URL: "http://127.0.0.1:1/api/Logbook" },
+      // Never reach real Suunto from tests: closed local ports, and no app keys.
+      operator: { SUUNTO_OAUTH_URL: "http://127.0.0.1:1", SUUNTO_API_URL: "http://127.0.0.1:1" },
       log: (m) => logs.push(m),
     });
     server.on("request", web.app);
@@ -106,8 +106,8 @@ describe("pages", () => {
   it("switch with ?lang= and remember the choice in a cookie", async () => {
     const res = await fetch(`${base}/login?lang=zh`, { headers: { "accept-language": "en" } });
     expect(await res.text()).toContain('<html lang="zh-Hans">');
-    const cookie = res.headers.getSetCookie().find((c) => c.startsWith("pdm_lang="))!;
-    expect(cookie).toContain("pdm_lang=zh");
+    const cookie = res.headers.getSetCookie().find((c) => c.startsWith("sum_lang="))!;
+    expect(cookie).toContain("sum_lang=zh");
     expect(cookie).toContain("SameSite=Lax");
     const again = await fetch(`${base}/login`, { headers: { cookie: cookie.split(";")[0]!, "accept-language": "fr" } });
     expect(await again.text()).toContain('<html lang="zh-Hans">');
@@ -116,7 +116,7 @@ describe("pages", () => {
   it("ignore unknown languages", async () => {
     const res = await fetch(`${base}/login?lang=xx`, { headers: { "accept-language": "es" } });
     expect(await res.text()).toContain('<html lang="es">');
-    expect(res.headers.getSetCookie().some((c) => c.startsWith("pdm_lang="))).toBe(false);
+    expect(res.headers.getSetCookie().some((c) => c.startsWith("sum_lang="))).toBe(false);
   });
 
   it("offer every language in the footer, linking to the same page", async () => {
@@ -166,10 +166,10 @@ describe("pages", () => {
 
     const user = new Browser();
     expect((await user.signup("links@example.com", "correct horse battery")).status).toBe(303);
-    const account = await user.page(`/account?next=${encodeURIComponent(consent)}`);
-    const padi = await user.post("/account/padi", { _csrf: account.csrf, email: "diver.test@example.com", next: consent });
-    expect(padi.status).toBe(400);
-    expect(languageHrefs(await padi.text())).toContain(`/account?next=${encodeURIComponent(consent)}&amp;lang=de`);
+    // "Connect Suunto" with an expired form: the account page again, with the error.
+    const expired = await user.post("/account/suunto/connect", { _csrf: "expired-form", timeZone: "", next: consent });
+    expect(expired.status).toBe(400);
+    expect(languageHrefs(await expired.text())).toContain(`/account?next=${encodeURIComponent(consent)}&amp;lang=de`);
 
     const security = await user.page("/account/security");
     const password = await user.post("/account/password", { _csrf: security.csrf, current: "wrong", password: "x", password2: "x" });

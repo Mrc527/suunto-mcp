@@ -1,30 +1,37 @@
 /**
- * Web mode end to end: a user signs up, connects their PADI account with "Save and test" (against
- * the in-process mock PADI API through operator overrides), connects like Claude over OAuth and
- * uses the logbook tools with their own account. A second user gets their own logbook. Nothing is
- * ever sent to PADI.
+ * Web mode end to end: a user signs up, connects their Suunto account through Suunto's OAuth
+ * pages (the in-process mock Suunto API, through the operator overrides), connects like Claude
+ * over this server's OAuth and uses the tools with their own connection. A demo account gets the
+ * built-in sample data and never reaches Suunto. Nothing is ever sent to Suunto.
  *
- *   PADI_MCP_IT=1 npm run test:integration
+ *   SUUNTO_MCP_IT=1 npm run test:integration
  */
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { DEMO_USERNAME, DemoRegistry } from "../../src/demo/index.js";
 import { addDays, todayInZone } from "../../src/util/dates.js";
 import { createWebApp, type WebApp } from "../../src/web/server.js";
-import { MOCK_ACCOUNT, startMockPadi, type MockPadi } from "../helpers/mock-padi.js";
-import { Browser, connectMcp, setBase, TestOAuthClient } from "../helpers/web-client.js";
+import { MOCK_CLIENT_ID, MOCK_CLIENT_SECRET, MOCK_SUBSCRIPTION_KEY, MOCK_USERNAME, startMockSuunto, type MockSuunto } from "../helpers/mock-suunto.js";
+import { Browser, connectMcp, connectSuunto, setBase, TestOAuthClient } from "../helpers/web-client.js";
 
-const enabled = process.env.PADI_MCP_IT === "1";
+const enabled = process.env.SUUNTO_MCP_IT === "1";
 
-/** A second diver of the mock (invented). */
-const SECOND = { email: "lee.sample@example.com", password: "invented-password-3", affiliateId: "20000003", givenName: "Lee", familyName: "Sample" };
+const PASSWORD = "correct horse battery";
+const ZONE = "Europe/Zurich";
+const DAY_MS = 86_400_000;
 
 let server: Server;
+let base = "";
 let web: WebApp;
-let mock: MockPadi;
+let mock: MockSuunto;
+const demo = new DemoRegistry();
 /** Every line the web service logged. */
 const logs: string[] = [];
+/** E-mail addresses used below (they must never reach the log). */
+const emails: string[] = ["admin@example.com"];
+const admin = new Browser();
 
 async function call<T = Record<string, unknown>>(client: Client, name: string, args: Record<string, unknown> = {}): Promise<T> {
   const res = await client.callTool({ name, arguments: args });
@@ -33,30 +40,51 @@ async function call<T = Record<string, unknown>>(client: Client, name: string, a
   return JSON.parse(text) as T;
 }
 
-/** Sign up, connect PADI with "Save and test", connect like Claude. */
-async function diver(email: string, padi: { email: string; password: string }): Promise<{ browser: Browser; client: Client }> {
+/** Workouts of the mock that started in the last 30 days (what the connection check counts). */
+function recentWorkouts(): number {
+  const now = Date.now();
+  return mock.state.workouts.filter((w) => Number(w.startTime) >= now - 30 * DAY_MS && Number(w.startTime) < now).length;
+}
+
+const userId = (email: string) => web.ctx.store.getUserByEmail(email)!.id;
+
+/** Sign up, connect Suunto through its OAuth pages, then connect like Claude. */
+async function athlete(email: string): Promise<{ browser: Browser; client: Client }> {
+  emails.push(email);
   const browser = new Browser();
-  expect((await browser.signup(email, "correct horse battery")).status).toBe(303);
-  const { csrf } = await browser.page("/account");
-  const saved = await browser.post("/account/padi", { _csrf: csrf, email: padi.email, password: padi.password, units: "metric" });
-  expect(saved.headers.get("location")).toBe("/account?m=connected");
+  expect((await browser.signup(email, PASSWORD)).status).toBe(303);
+  const before = await browser.page("/account");
+  expect(before.html).toContain("Connect Suunto");
+  const tokenCalls = mock.count("/oauth/token");
+  const run = await connectSuunto(browser, { timeZone: ZONE });
+  // Suunto's sign-in page of the operator's app, with this server's redirect URI and a state.
+  expect(run.authorize.origin + run.authorize.pathname).toBe(`${mock.oauthUrl}/oauth/authorize`);
+  expect(Object.fromEntries(run.authorize.searchParams)).toMatchObject({ response_type: "code", client_id: MOCK_CLIENT_ID, redirect_uri: `${base}/suunto/callback` });
+  expect(run.callback.searchParams.get("state")).toBe(run.authorize.searchParams.get("state"));
+  expect(run.res.headers.get("location")).toBe("/account?m=connected");
+  expect(mock.count("/oauth/token") - tokenCalls).toBe(1);
   const page = await browser.page("/account?m=connected");
-  expect(page.html).toContain("Connected to PADI.");
-  expect(page.html).not.toContain(padi.password);
+  expect(page.html).toContain("Suunto is connected. Your AI apps can use your Suunto data now.");
+  expect(page.html).toContain(`<dt>Suunto username</dt><dd>${MOCK_USERNAME}</dd>`);
+  const settings = web.ctx.store.getSuuntoSettings(userId(email))!;
+  expect(settings).toMatchObject({ username: MOCK_USERNAME, clientId: MOCK_CLIENT_ID, timeZone: ZONE, lastCheck: { workouts: recentWorkouts() } });
+  expect(page.html).not.toContain(settings.refreshToken);
   return { browser, client: await connectMcp(new TestOAuthClient(browser)) };
 }
 
-describe.skipIf(!enabled)("web mode against a mock PADI API", () => {
+describe.skipIf(!enabled)("web mode against a mock Suunto API", () => {
   beforeAll(async () => {
-    mock = await startMockPadi({ accounts: [MOCK_ACCOUNT, SECOND] });
+    // Listen first, so the public URL and the redirect URI hold the real port.
     server = createServer();
     await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
-    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
     setBase(base);
-    web = await createWebApp({ publicUrl: new URL(base), host: "127.0.0.1", port: 0, dataDir: ":memory:", operator: mock.env(), log: (m) => void logs.push(m) });
+    // The mock accepts only the redirect URI registered for this server, as Suunto does.
+    mock = await startMockSuunto({ redirectUris: [`${base}/suunto/callback`] });
+    web = await createWebApp({ publicUrl: new URL(base), host: "127.0.0.1", port: 0, dataDir: ":memory:", operator: mock.env(), demo, log: (m) => void logs.push(m) });
     server.on("request", web.app);
     // The first account is the administrator; the others sign up freely.
-    expect((await new Browser().signup("admin@example.com", "correct horse battery")).status).toBe(303);
+    expect((await admin.signup("admin@example.com", PASSWORD)).status).toBe(303);
     web.ctx.store.saveSettings({ ...web.ctx.store.getSettings(), registration: "open" });
   });
 
@@ -64,91 +92,155 @@ describe.skipIf(!enabled)("web mode against a mock PADI API", () => {
     await new Promise<void>((r) => server.close(() => r()));
     await web.close();
     await mock.close();
+    demo.clear();
   });
 
-  it("lets a signed-up user manage their own PADI logbook through Claude", async () => {
-    const { client } = await diver("river@example.com", MOCK_ACCOUNT);
-    const info = await call(client, "padi_account_info", { check: true });
-    expect(info).toMatchObject({ affiliate_id: MOCK_ACCOUNT.affiliateId, read_only: false });
+  it("lets a signed-up user connect Suunto and use their data through Claude", async () => {
+    const { client } = await athlete("river@example.com");
+    const names = (await client.listTools()).tools.map((t) => t.name);
+    expect(names).toEqual(expect.arrayContaining(["suunto_account_info", "suunto_list_workouts", "suunto_sleep", "suunto_import_route", "suunto_create_poi"]));
+    expect(names).toHaveLength(14);
 
-    const before = await call<{ total: number }>(client, "logbook_list_dives", { limit: 5 });
-    expect(before.total).toBe(mock.account.store.sorted().length);
-    const date = addDays(todayInZone("Europe/Zurich"), -1);
-    const created = await call<{ id: number; title: string }>(client, "logbook_create_dive", {
-      title: "Web reef",
-      date,
-      location: "House reef",
-      dive_type: "shore",
-      max_depth: 18,
-      bottom_time_min: 45,
-    });
-    expect(created.title).toBe("Web reef");
-    expect((await call<{ total: number }>(client, "logbook_list_dives", { limit: 5 })).total).toBe(before.total + 1);
-    const updated = await call<Record<string, unknown>>(client, "logbook_update_dive", { dive_id: created.id, max_depth: 20, notes: "Changed through the web service" });
-    expect(updated).toMatchObject({ max_depth: 20 });
-    await call(client, "logbook_delete_dive", { dive_id: created.id, confirm_title: "Web reef" });
-    expect((await call<{ total: number }>(client, "logbook_list_dives", { limit: 5 })).total).toBe(before.total);
+    const today = todayInZone(ZONE);
+    const info = await call(client, "suunto_account_info", { check: true });
+    expect(info).toMatchObject({ username: MOCK_USERNAME, connected: true, demo: false, read_only: false, time_zone: ZONE, today, check: { ok: true, workouts_last_30_days: recentWorkouts() } });
+    const list = await call<{ count: number; workouts: Array<{ workout_key: string }> }>(client, "suunto_list_workouts", { limit: 5 });
+    expect(list.count).toBe(Math.min(5, recentWorkouts()));
+    const workout = await call<{ workout_key: string; sport: string }>(client, "suunto_get_workout", { workout_key: list.workouts[0]!.workout_key });
+    expect(workout).toMatchObject({ workout_key: list.workouts[0]!.workout_key, sport: "Running" });
+    const sleep = await call<{ count: number }>(client, "suunto_sleep", { from: addDays(today, -3), to: today });
+    expect(sleep.count).toBeGreaterThan(0);
+    const daily = await call<{ days: unknown[] }>(client, "suunto_daily_activity", { from: addDays(today, -3), to: today });
+    expect(daily.days).toHaveLength(4);
 
-    // Every query was scoped to this diver.
-    expect(mock.violations).toEqual([]);
-    const id = web.ctx.store.getUserByEmail("river@example.com")!.id;
-    expect(web.ctx.store.recentActivity(id).map((a) => a.tool)).toEqual(expect.arrayContaining(["logbook_create_dive", "logbook_delete_dive"]));
+    const pois = mock.state.pois.length;
+    const poi = await call<{ added: boolean; poi: { name: string; type: string } }>(client, "suunto_create_poi", { name: "Web test spring", latitude: 47.3741, longitude: 8.5689, type: "WaterPoint" });
+    expect(poi).toMatchObject({ added: true, poi: { name: "Web test spring", type: "WaterPoint" } });
+    expect(mock.state.pois).toHaveLength(pois + 1);
+    const routes = mock.state.routes.length;
+    const gpx = `<?xml version="1.0"?><gpx version="1.1" creator="test" xmlns="http://www.topografix.com/GPX/1/1"><trk><name>Web test loop</name><trkseg><trkpt lat="47.37" lon="8.54"/><trkpt lat="47.38" lon="8.55"/></trkseg></trk></gpx>`;
+    const imported = await call<{ added: boolean; route: { name: string } }>(client, "suunto_import_route", { gpx });
+    expect(imported).toMatchObject({ added: true, route: { name: "Web test loop" } });
+    expect(mock.state.routes).toHaveLength(routes + 1);
+    expect((await call<{ count: number }>(client, "suunto_list_routes")).count).toBe(routes + 1);
+
+    expect(mock.state.violations).toEqual([]);
+    expect(web.ctx.store.recentActivity(userId("river@example.com")).map((a) => a.tool)).toEqual(expect.arrayContaining(["suunto_create_poi", "suunto_import_route", "suunto_account_info"]));
     await client.close();
   });
 
-  it("keeps each user's logbook apart", async () => {
-    const first = await diver("lee@example.com", SECOND);
-    const dives = await call<{ total: number }>(first.client, "logbook_list_dives", { limit: 5 });
-    expect(dives.total).toBe(mock.accounts[1]!.store.sorted().length);
-    const info = await call(first.client, "padi_account_info");
-    expect(info.affiliate_id).toBe(SECOND.affiliateId);
-    expect(mock.violations).toEqual([]);
-    await first.client.close();
+  it("keeps each user's connection and settings apart", async () => {
+    const lee = await athlete("lee@example.com");
+    const river = web.ctx.store.getSuuntoSettings(userId("river@example.com"))!;
+    const own = web.ctx.store.getSuuntoSettings(userId("lee@example.com"))!;
+    expect(own.refreshToken).not.toBe(river.refreshToken);
+    expect(own.connectedAt).toBeGreaterThanOrEqual(river.connectedAt);
+    // Read-only for this user only: the write tools are gone for them.
+    const { csrf } = await lee.browser.page("/account");
+    expect((await lee.browser.post("/account/suunto/settings", { _csrf: csrf, units: "imperial", readOnly: "on", timeZone: "Asia/Tokyo" })).headers.get("location")).toBe("/account?m=saved");
+    const names = (await lee.client.listTools()).tools.map((t) => t.name);
+    expect(names).not.toContain("suunto_import_route");
+    expect(names).not.toContain("suunto_create_poi");
+    expect(await call(lee.client, "suunto_account_info")).toMatchObject({ username: MOCK_USERNAME, read_only: true, units: "imperial", time_zone: "Asia/Tokyo" });
+    expect((await call<{ units: { distance: string } }>(lee.client, "suunto_list_workouts", { limit: 1 })).units.distance).toBe("mi");
+    expect(web.ctx.store.getSuuntoSettings(userId("river@example.com"))).toMatchObject({ readOnly: false, units: "metric", timeZone: ZONE });
+    await lee.client.close();
   });
 
-  it("asks the user to sign in again once PADI ends the sign-in", async () => {
-    const { browser, client } = await diver("again@example.com", MOCK_ACCOUNT);
-    mock.revokeRefreshTokens();
-    mock.expireIdTokens();
-    // The call that finds the dead sign-in, and the calls after it, say where to sign in again.
-    const expired = /Your PADI sign-in expired\. Sign in again at http:\/\/127\.0\.0\.1:\d+\/account/;
-    await expect(call(client, "logbook_list_dives")).rejects.toThrow(expired);
-    await expect(call(client, "logbook_list_dives")).rejects.toThrow(expired);
-    const id = web.ctx.store.getUserByEmail("again@example.com")!.id;
-    expect(web.ctx.store.getUser(id)!.padiNeedsReconnect).toBe(true);
-    // The administrator sees it too.
-    const { csrf, html } = await browser.page("/account");
-    expect(html).toContain("Your PADI sign-in expired or was ended");
-    const again = await browser.post("/account/padi", { _csrf: csrf, email: MOCK_ACCOUNT.email, password: MOCK_ACCOUNT.password, keep: "settings" });
-    expect(again.headers.get("location")).toBe("/account?m=connected");
-    expect((await call<{ total: number }>(client, "logbook_list_dives", { limit: 1 })).total).toBeGreaterThan(0);
+  it("asks the user to connect again once Suunto refuses the sign-in", async () => {
+    const { browser, client } = await athlete("again@example.com");
+    mock.revokeAll();
+    mock.expireAccessTokens();
+    // The call that finds the refused sign-in, and the calls after it, say where to connect again.
+    const expired = `Your Suunto connection expired. Connect Suunto again at ${base}/account.`;
+    await expect(call(client, "suunto_list_workouts")).rejects.toThrow(expired);
+    await expect(call(client, "suunto_list_routes")).rejects.toThrow(expired);
+    const id = userId("again@example.com");
+    expect(web.ctx.store.getUser(id)!.suuntoNeedsReconnect).toBe(true);
+    // The stored tokens are kept (Suunto has refused good ones during outages).
+    expect(web.ctx.store.getSuuntoSettings(id)!.refreshToken).toBeTruthy();
+    const { html } = await browser.page("/account");
+    expect(html).toContain("Suunto refused your saved connection");
+    // Connecting again through Suunto's pages fixes it.
+    expect((await connectSuunto(browser)).res.headers.get("location")).toBe("/account?m=connected");
+    expect(web.ctx.store.getUser(id)!.suuntoNeedsReconnect).toBe(false);
+    expect((await call<{ count: number }>(client, "suunto_list_workouts", { limit: 1 })).count).toBe(1);
     await client.close();
   });
 
-  it("never writes PADI passwords, tokens or e-mail addresses to the log", async () => {
-    // A wrong password on the account page, and a tool call that fails.
-    const browser = new Browser();
-    expect((await browser.signup("wrong@example.com", "correct horse battery")).status).toBe(303);
+  it("removes the connection, tells Suunto, and then explains the setup", async () => {
+    const { browser, client } = await athlete("leaving@example.com");
+    const calls = mock.state.deauthorizeCalls;
     const { csrf } = await browser.page("/account");
-    const wrong = await browser.post("/account/padi", { _csrf: csrf, email: SECOND.email, password: "wrong-password-value" });
-    expect(wrong.status).toBe(400);
-    const { client } = await diver("tool@example.com", SECOND);
-    await expect(call(client, "logbook_get_dive", { dive_id: 999_999_999 })).rejects.toThrow(/not found/);
+    expect((await browser.post("/account/suunto/remove", { _csrf: csrf })).headers.get("location")).toBe("/account?m=removed");
+    expect(mock.state.deauthorizeCalls).toBe(calls + 1);
+    expect(web.ctx.store.getUser(userId("leaving@example.com"))!.hasSuunto).toBe(false);
+    const res = await client.callTool({ name: "suunto_list_workouts", arguments: {} });
+    expect(res.isError).toBe(true);
+    expect(JSON.stringify(res.content)).toContain(`Connect your Suunto account first at ${base}/account`);
+    await client.close();
+  });
+
+  it("gives a demo account sample data, and it never reaches Suunto", async () => {
+    const page = await admin.page("/admin");
+    const created = await admin.post("/admin/demo", { _csrf: page.csrf, email: "reviewer@example.com" });
+    expect(created.status).toBe(200);
+    emails.push("reviewer@example.com");
+    const password = (await created.text()).match(/<code id="secret">([^<]+)<\/code>/)![1]!;
+    const reviewer = new Browser();
+    expect((await reviewer.login("reviewer@example.com", password)).status).toBe(303);
+    expect((await reviewer.page("/account")).html).toContain("This is a demo account.");
+
+    const requests = mock.requests.length;
+    const client = await connectMcp(new TestOAuthClient(reviewer));
+    const info = await call(client, "suunto_account_info", { check: true });
+    expect(info).toMatchObject({ username: DEMO_USERNAME, connected: true, demo: true, time_zone: "Europe/Zurich", check: { ok: true } });
+    const list = await call<{ count: number; workouts: Array<{ workout_key: string }> }>(client, "suunto_list_workouts", { limit: 10 });
+    expect(list.count).toBeGreaterThan(5);
+    const fit = await client.callTool({ name: "suunto_export_workout_fit", arguments: { workout_key: list.workouts[0]!.workout_key } });
+    expect(fit.isError).toBeFalsy();
+    const poi = await call<{ added: boolean }>(client, "suunto_create_poi", { name: "Demo viewpoint", latitude: 46.5, longitude: 8.1 });
+    expect(poi.added).toBe(true);
+    expect((await call<{ pois: Array<{ name: string }> }>(client, "suunto_list_pois")).pois.map((p) => p.name)).toContain("Demo viewpoint");
+    // Nothing went to Suunto (the mock), and nothing changed there.
+    expect(mock.requests.length).toBe(requests);
+    expect(mock.state.pois.some((p) => p.point?.name === "Demo viewpoint")).toBe(false);
+    await client.close();
+  });
+
+  it("never writes Suunto tokens, codes, app keys or e-mail addresses to the log", async () => {
+    // A code exchange that fails (the mock echoes the code in its error) and a tool call that fails.
+    const browser = new Browser();
+    emails.push("tool@example.com");
+    expect((await browser.signup("tool@example.com", PASSWORD)).status).toBe(303);
+    const state = web.ctx.store.createOAuthState(userId("tool@example.com"));
+    const failed = await browser.fetch(`/suunto/callback?${new URLSearchParams({ code: "invented-code-value", state })}`);
+    expect(failed.headers.get("location")).toBe("/account?m=connectfailed");
+    const { client } = await athlete("tool2@example.com");
+    await expect(call(client, "suunto_get_workout", { workout_key: "0123456789abcdef01234567" })).rejects.toThrow("Suunto has no workout with the key 0123456789abcdef01234567.");
     await client.close();
 
     const all = logs.join("\n");
     // The flows above did log (else this test would check nothing).
-    expect(all).toContain("PADI sign-in on the account page failed");
-    expect(all).toContain("PADI connection saved for a user");
-    expect(all).toMatch(/Tool logbook_list_dives failed/);
-    expect(all).toMatch(/Tool logbook_get_dive failed/);
-    const users = ["river@example.com", "lee@example.com", "again@example.com", "wrong@example.com", "tool@example.com"];
-    const refreshTokens = users.map((u) => web.ctx.store.getPadiSettings(web.ctx.store.getUserByEmail(u)!.id)?.refreshToken).filter((t): t is string => !!t);
-    expect(refreshTokens.length).toBeGreaterThan(0);
-    for (const secret of [MOCK_ACCOUNT.password, SECOND.password, "wrong-password-value", MOCK_ACCOUNT.email, SECOND.email, "admin@example.com", ...users, ...refreshTokens]) {
-      expect(all.includes(secret), `the log holds ${secret.slice(0, 6)}...`).toBe(false);
-    }
-    // ID tokens, and refresh tokens shaped like a JWT.
-    expect(all).not.toMatch(/eyJ[A-Za-z0-9_-]{10,}/);
+    expect(all).toContain("Suunto code exchange failed");
+    expect(all).toContain("Suunto connection saved for a user");
+    expect(all).toContain("Tool suunto_list_workouts failed");
+    expect(all).toContain("Tool suunto_get_workout failed");
+    const stored = emails.map((e) => web.ctx.store.getUserByEmail(e)).flatMap((u) => (u ? [web.ctx.store.getSuuntoSettings(u.id)] : []));
+    const storedTokens = stored.flatMap((s) => (s ? [s.refreshToken, s.accessToken ?? ""] : [])).filter((t) => t);
+    expect(storedTokens.length).toBeGreaterThan(0);
+    const secrets = [
+      MOCK_CLIENT_SECRET,
+      MOCK_SUBSCRIPTION_KEY,
+      "invented-code-value",
+      ...mock.state.accessTokens.map((t) => t.token),
+      ...mock.state.refreshTokens.map((t) => t.token),
+      ...mock.state.codes.map((c) => c.code),
+      ...storedTokens,
+      ...emails,
+    ];
+    for (const secret of secrets) expect(all.includes(secret), `the log holds ${secret.slice(0, 4)}...`).toBe(false);
+    // Nothing shaped like a JWT (header.payload).
+    expect(all).not.toMatch(/eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}/);
   });
 });

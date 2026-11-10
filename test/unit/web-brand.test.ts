@@ -44,7 +44,7 @@ afterAll(async () => {
 });
 
 /** Invented Suunto app keys for single-user mode (no refresh token: no connection to Suunto). */
-const SINGLE_USER_ENV = { SUUNTO_CLIENT_ID: "test-client-id", SUUNTO_CLIENT_SECRET: "test-client-secret", SUUNTO_SUBSCRIPTION_KEY: "test-subscription-key" };
+const SINGLE_USER_ENV = { SUUNTO_CLIENT_ID: "test-client-id", SUUNTO_CLIENT_SECRET: "test-client-secret", SUUNTO_SUBSCRIPTION_KEY: "test-subscription-key", SUUNTO_REFRESH_TOKEN: "test-refresh-token" };
 
 /** Width and height from a PNG's IHDR chunk. */
 const pngSize = (b: Buffer) => [b.readUInt32BE(16), b.readUInt32BE(20)];
