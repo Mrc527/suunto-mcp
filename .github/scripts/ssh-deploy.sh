@@ -15,6 +15,9 @@
 #   SUUNTO_CLIENT_ID, SUUNTO_CLIENT_SECRET, SUUNTO_SUBSCRIPTION_KEY
 #                                        (optional secrets) the Suunto app keys; deploy.sh writes
 #                                        them to .env on the server. All three or none.
+#   SETUP_DOMAIN, SETUP_ADMIN_EMAIL, SETUP_ADMIN_PASSWORD
+#                                        (optional) first deploy only: deploy.sh creates .env
+#                                        with them when the server has none yet
 set -euo pipefail
 
 IMAGE_RE='^[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}$'
@@ -170,8 +173,9 @@ cmd_deploy() {
   echo "Running deploy.sh on the server"
   log=$(mktemp)
   # Secrets travel on stdin, never on a command line: registry login, then the Suunto app keys.
-  printf '%s\n%s\n%s\n%s\n%s\n' "${REGISTRY_USER:-}" "${REGISTRY_TOKEN:-}" \
-    "${SUUNTO_CLIENT_ID:-}" "${SUUNTO_CLIENT_SECRET:-}" "${SUUNTO_SUBSCRIPTION_KEY:-}" |
+  printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "${REGISTRY_USER:-}" "${REGISTRY_TOKEN:-}" \
+    "${SUUNTO_CLIENT_ID:-}" "${SUUNTO_CLIENT_SECRET:-}" "${SUUNTO_SUBSCRIPTION_KEY:-}" \
+    "${SETUP_DOMAIN:-}" "${SETUP_ADMIN_EMAIL:-}" "${SETUP_ADMIN_PASSWORD:-}" |
     run_untrusted ssh_target "cd -- '$dir' && bash ./deploy.sh deploy '$image' '$revision'" 2>&1 | tee "$log" || rc=$?
   summary "### Deploy to $DEPLOY_HOST" "- Image: \`$image\`" "- Revision: \`$revision\`"
   if [ "$SUUNTO_KEYS_SET" -eq 3 ]; then

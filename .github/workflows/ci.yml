@@ -9,7 +9,8 @@
 # One-time setup (server, secrets, variables): see "Deploy with GitHub Actions" in README.md.
 # Secrets: DEPLOY_SSH_KEY and DEPLOY_KNOWN_HOSTS (required for deploys), and optionally
 # SUUNTO_CLIENT_ID, SUUNTO_CLIENT_SECRET and SUUNTO_SUBSCRIPTION_KEY: when set, every deploy
-# writes them to .env on the server. Tests never need them.
+# writes them to .env on the server. SUUNTO_ADMIN_EMAIL and SUUNTO_ADMIN_PASSWORD (optional) let
+# the first deploy set up a server that has no .env yet. Tests never need them.
 name: CI/CD
 
 on:
@@ -204,6 +205,12 @@ jobs:
           SUUNTO_CLIENT_ID: ${{ secrets.SUUNTO_CLIENT_ID || vars.SUUNTO_CLIENT_ID }}
           SUUNTO_CLIENT_SECRET: ${{ secrets.SUUNTO_CLIENT_SECRET }}
           SUUNTO_SUBSCRIPTION_KEY: ${{ secrets.SUUNTO_SUBSCRIPTION_KEY }}
+          # Optional, first deploy only: when the server has no .env yet, deploy.sh creates it
+          # with this host name and administrator, and copies the Traefik routing of a container
+          # Traefik already routes there. An existing .env is never changed by these.
+          SETUP_DOMAIN: ${{ vars.SUUNTO_DOMAIN || 'suunto.mcp.visin.ch' }}
+          SETUP_ADMIN_EMAIL: ${{ secrets.SUUNTO_ADMIN_EMAIL }}
+          SETUP_ADMIN_PASSWORD: ${{ secrets.SUUNTO_ADMIN_PASSWORD }}
       - name: Check the public URL
         if: steps.deploy.outputs.url != ''
         run: .github/scripts/ssh-deploy.sh check-url "$URL"

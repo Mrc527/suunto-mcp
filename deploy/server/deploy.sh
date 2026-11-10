@@ -40,6 +40,10 @@ REG_TOKEN=""
 NEW_CLIENT_ID=""
 NEW_CLIENT_SECRET=""
 NEW_SUBSCRIPTION_KEY=""
+# First deploy only (no .env yet): the service's host name and administrator, from the pipeline.
+NEW_DOMAIN=""
+NEW_ADMIN_EMAIL=""
+NEW_ADMIN_PASSWORD=""
 REG_CONFIG=""
 REG_HOST=""
 
@@ -68,6 +72,96 @@ EOF
 
 compose() { docker compose "$@"; }
 
+# Settings of a container Traefik already routes on this server (for example MCP for PADI or MCP
+# for iCloud): the Docker network, entrypoint and certificate resolver this service then uses too.
+# Prints "network entrypoint resolver" (resolver may be "-"), or nothing when there is no Traefik.
+traefik_settings() {
+  local traefik routed="" id labels net entrypoint resolver
+  traefik=$(docker ps --format '{{.ID}} {{.Image}}' | awk '$2 ~ /(^|\/)traefik(:|@|$)/ { print $1; exit }')
+  [ -n "$traefik" ] || return 0
+  for id in $(docker ps -q --filter label=traefik.enable=true); do
+    labels=$(docker inspect --format '{{range $k, $v := .Config.Labels}}{{$k}}={{$v}}{{"\n"}}{{end}}' "$id")
+    if grep -qE '^traefik\.http\.routers\.[^.=]+\.rule=.*Host\(' <<<"$labels"; then
+      routed=$id
+      break
+    fi
+  done
+  [ -n "$routed" ] || return 0
+  net=$(sed -n 's/^traefik\.docker\.network=//p' <<<"$labels" | head -n 1)
+  if [ -z "$net" ]; then
+    # The network Traefik and the routed container share (other than the default ones).
+    net=$(comm -12 \
+      <(docker inspect --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}' "$traefik" | grep -vxE 'bridge|host|none' | sort) \
+      <(docker inspect --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}' "$routed" | sort) | head -n 1)
+  fi
+  entrypoint=$(sed -n 's/^traefik\.http\.routers\.[^.=]*\.entrypoints=//p' <<<"$labels" | head -n 1)
+  resolver=$(sed -n 's/^traefik\.http\.routers\.[^.=]*\.tls\.certresolver=//p' <<<"$labels" | head -n 1)
+  [[ $net =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || return 0
+  [[ $entrypoint =~ ^[A-Za-z0-9_.,-]+$ ]] || return 0
+  [[ -z $resolver || $resolver =~ ^[A-Za-z0-9_.-]+$ ]] || return 0
+  printf '%s %s %s\n' "$net" "$entrypoint" "${resolver:--}"
+}
+
+# The first deploy to a server without .env: create it (host name and administrator from the
+# GitHub secrets) and, unless the proxy is already set up, the Traefik routing in
+# compose.override.yml, with the settings of a container Traefik already routes here. The same as
+# setup-server.sh, without logging in to the server. An existing .env is never touched.
+first_setup() {
+  local settings net entrypoint resolver tmp
+  if [ -z "$NEW_DOMAIN" ] || [ -z "$NEW_ADMIN_EMAIL" ] || [ -z "$NEW_ADMIN_PASSWORD" ]; then
+    die "$PWD/.env does not exist. Set the GitHub secrets SUUNTO_ADMIN_EMAIL and SUUNTO_ADMIN_PASSWORD (the next deploy then sets this server up by itself), or run setup-server.sh on this server once (see 'One-time setup' in README.md). Then deploy again."
+  fi
+  [[ $NEW_DOMAIN =~ ^[A-Za-z0-9.-]+$ ]] || die "the service's host name is not valid: $NEW_DOMAIN"
+  [[ $NEW_ADMIN_EMAIL =~ ^[^[:space:]@\']+@[^[:space:]@\']+\.[^[:space:]@\']+$ ]] || die "the GitHub secret SUUNTO_ADMIN_EMAIL is not an e-mail address"
+  if [ "${#NEW_ADMIN_PASSWORD}" -lt 10 ] || [ "${#NEW_ADMIN_PASSWORD}" -gt 200 ] || [[ $NEW_ADMIN_PASSWORD == *"'"* ]] || [[ ! $NEW_ADMIN_PASSWORD =~ ^[[:print:]]+$ ]]; then
+    die "the GitHub secret SUUNTO_ADMIN_PASSWORD must have 10 to 200 characters, without the ' character"
+  fi
+  if [ ! -f compose.override.yml ] && [ -z "${COMPOSE_FILE:-}" ]; then
+    settings=$(traefik_settings)
+    [ -n "$settings" ] || die "first deploy: no Traefik on this server routes another container, so the routing for $NEW_DOMAIN cannot be copied. Run setup-server.sh on this server once, then deploy again."
+    read -r net entrypoint resolver <<<"$settings"
+    docker network inspect "$net" >/dev/null 2>&1 || die "first deploy: the Docker network $net of Traefik does not exist"
+    tmp=$(mktemp compose.override.XXXXXX)
+    {
+      echo "# Written by the first deploy (deploy.sh), like setup-server.sh. Traefik (in Docker) routes"
+      echo "# https://$NEW_DOMAIN to the service over the Docker network $net. No port is published here."
+      echo "services:"
+      echo "  suunto-mcp:"
+      echo "    networks: [default, proxy]"
+      echo "    labels:"
+      echo "      - traefik.enable=true"
+      echo "      - traefik.docker.network=$net"
+      echo "      - traefik.http.routers.suunto-mcp.rule=Host(\`$NEW_DOMAIN\`)"
+      echo "      - traefik.http.routers.suunto-mcp.entrypoints=$entrypoint"
+      if [ "$resolver" != "-" ]; then
+        echo "      - traefik.http.routers.suunto-mcp.tls.certresolver=$resolver"
+      else
+        echo "      - traefik.http.routers.suunto-mcp.tls=true"
+      fi
+      echo "      - traefik.http.services.suunto-mcp.loadbalancer.server.port=3000"
+      echo "networks:"
+      echo "  proxy:"
+      echo "    external: true"
+      echo "    name: $net"
+    } >"$tmp"
+    chmod 640 "$tmp"
+    mv -f "$tmp" compose.override.yml
+    log "first deploy: wrote compose.override.yml (Traefik on network $net, entrypoint $entrypoint$([ "$resolver" != "-" ] && echo ", certificate resolver $resolver"))"
+  fi
+  tmp=$(mktemp .env.XXXXXX)
+  {
+    echo "# Settings of MCP for Suunto on this server, written by the first deploy (deploy.sh)."
+    echo "# Edit them as you like (see .env.example). Deploys only change SUUNTO_MCP_IMAGE and, when"
+    echo "# they are GitHub secrets, the Suunto app keys."
+    echo "DOMAIN=$NEW_DOMAIN"
+    echo "TRUST_PROXY=1"
+    echo "ADMIN_EMAIL=$NEW_ADMIN_EMAIL"
+    echo "ADMIN_PASSWORD='$NEW_ADMIN_PASSWORD'"
+  } >"$tmp"
+  mv -f "$tmp" .env
+  log "first deploy: created .env for https://$NEW_DOMAIN with the administrator from the GitHub secrets"
+}
+
 preflight() {
   local owner
   if [ ! -O . ]; then
@@ -78,7 +172,7 @@ preflight() {
   docker info >/dev/null 2>&1 || die "cannot reach the Docker daemon. Is the user $(id -un) in the docker group?"
   docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is missing (install the docker-compose-plugin package)"
   [ -f compose.yml ] || die "compose.yml is missing in $PWD"
-  [ -f .env ] || die "$PWD/.env does not exist. Run setup-server.sh on this server once (see 'One-time setup' in README.md), or create .env from .env.example (set DOMAIN), then deploy again."
+  [ -f .env ] || first_setup
   # compose.yml publishes no port: compose.override.yml (or the bundled Caddy) connects the proxy.
   if [ ! -f compose.override.yml ] && [ -z "${COMPOSE_FILE:-}" ] && ! grep -qsE '^(COMPOSE_FILE=|COMPOSE_PROFILES=.*caddy)' .env; then
     log "warning: there is no compose.override.yml, so your reverse proxy cannot reach the service. Run setup-server.sh (or see step 4 of 'One-time setup' in README.md)."
@@ -155,12 +249,18 @@ read_credentials() {
     IFS= read -r NEW_CLIENT_ID || true
     IFS= read -r NEW_CLIENT_SECRET || true
     IFS= read -r NEW_SUBSCRIPTION_KEY || true
+    IFS= read -r NEW_DOMAIN || true
+    IFS= read -r NEW_ADMIN_EMAIL || true
+    IFS= read -r NEW_ADMIN_PASSWORD || true
   fi
   REG_USER=${REG_USER%$'\r'}
   REG_TOKEN=${REG_TOKEN%$'\r'}
   NEW_CLIENT_ID=${NEW_CLIENT_ID%$'\r'}
   NEW_CLIENT_SECRET=${NEW_CLIENT_SECRET%$'\r'}
   NEW_SUBSCRIPTION_KEY=${NEW_SUBSCRIPTION_KEY%$'\r'}
+  NEW_DOMAIN=${NEW_DOMAIN%$'\r'}
+  NEW_ADMIN_EMAIL=${NEW_ADMIN_EMAIL%$'\r'}
+  NEW_ADMIN_PASSWORD=${NEW_ADMIN_PASSWORD%$'\r'}
 }
 
 # The Suunto app keys from the pipeline: all three or none (the service does not start with only
