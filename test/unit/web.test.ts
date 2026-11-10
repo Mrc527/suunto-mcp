@@ -464,6 +464,17 @@ describe("OAuth and MCP", () => {
     expect(mock.state.violations).toEqual([]);
   });
 
+  it("accepts tool calls big enough for a 5 MB GPX file, and refuses larger ones", async () => {
+    const post = (bytes: number) =>
+      fetch(`${base}/mcp`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${oauth.savedTokens!.access_token}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: { _meta: { padding: "x".repeat(bytes) } } }),
+      });
+    expect((await post(6 * 1024 * 1024)).status).toBe(200);
+    expect((await post(9 * 1024 * 1024)).status).toBe(413);
+  });
+
   it("hides the write tools when the user turns on read-only", async () => {
     const { csrf } = await userBrowser.page("/account");
     await userBrowser.post("/account/suunto/settings", { _csrf: csrf, units: "metric", readOnly: "on" });
