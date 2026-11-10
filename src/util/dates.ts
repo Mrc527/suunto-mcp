@@ -189,3 +189,66 @@ export function todayInZone(tz: string, now = new Date()): string {
   const w = toWallTime(now, tz);
   return formatDateOnly(w.year, w.month, w.day);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Helpers for MCP for Suunto (activity data)
+// ---------------------------------------------------------------------------------------------
+
+export const MINUTE_MS = 60_000;
+export const HOUR_MS = 3_600_000;
+export const DAY_MS = 86_400_000;
+
+/** The instant of local midnight at the start of a YYYY-MM-DD date in `tz`. */
+export function startOfDay(date: string, tz: string): Date {
+  return wallTimeToDate({ ...parseDateOnly(date), hour: 0, minute: 0, second: 0 }, tz);
+}
+
+/** The local calendar date (YYYY-MM-DD) of an instant in `tz`. */
+export function localDateOf(ms: number, tz: string): string {
+  const w = toWallTime(new Date(ms), tz);
+  return formatDateOnly(w.year, w.month, w.day);
+}
+
+/** Whole days from date `a` to date `b` (both YYYY-MM-DD); negative when `b` is before `a`. */
+export function daysBetween(a: string, b: string): number {
+  const x = parseDateOnly(a);
+  const y = parseDateOnly(b);
+  return Math.round((Date.UTC(y.year, y.month - 1, y.day) - Date.UTC(x.year, x.month - 1, x.day)) / DAY_MS);
+}
+
+/** An offset from UTC in minutes as "+HH:MM" (for example 120 -> "+02:00", -330 -> "-05:30"). */
+export function formatOffset(minutes: number): string {
+  const m = Math.round(minutes);
+  const sign = m >= 0 ? "+" : "-";
+  const abs = Math.abs(m);
+  return `${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`;
+}
+
+/**
+ * An instant as ISO 8601 in a fixed offset from UTC, for example a workout that started at
+ * 05:30Z with an offset of 120 minutes: "2026-05-01T07:30:00+02:00".
+ */
+export function formatWithOffset(ms: number, offsetMinutes: number): string {
+  const d = new Date(Math.floor(ms / 1000) * 1000 + Math.round(offsetMinutes) * MINUTE_MS);
+  return (
+    `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}` +
+    `T${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}${formatOffset(offsetMinutes)}`
+  );
+}
+
+/** An instant in UTC as "YYYY-MM-DDTHH:MM:SS" without an offset (what Suunto's daily statistics take). */
+export function formatUtcNoOffset(ms: number): string {
+  return new Date(Math.floor(ms / 1000) * 1000).toISOString().slice(0, 19);
+}
+
+/** The ISO week of a YYYY-MM-DD date, for example "2026-W45" (weeks start on Monday). */
+export function isoWeek(date: string): string {
+  const { year, month, day } = parseDateOnly(date);
+  const d = new Date(Date.UTC(year, month - 1, day));
+  const weekday = d.getUTCDay() || 7; // Monday 1 ... Sunday 7
+  // The Thursday of this week decides the year the week belongs to.
+  d.setUTCDate(d.getUTCDate() + 4 - weekday);
+  const weekYear = d.getUTCFullYear();
+  const week = Math.ceil(((d.getTime() - Date.UTC(weekYear, 0, 1)) / DAY_MS + 1) / 7);
+  return `${weekYear}-W${pad(week)}`;
+}

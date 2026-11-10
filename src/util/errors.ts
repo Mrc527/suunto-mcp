@@ -25,14 +25,17 @@ export class ConfigError extends UserFacingError {
 }
 
 /**
- * A write that may or may not have been saved: it reached PADI, but no answer came back (a
- * timeout, a broken connection or an HTTP 5xx). Sending it again could save it twice, so the
- * message says to check first.
+ * A write that may or may not have been saved: it reached Suunto, but no clear answer came back
+ * (a timeout, a broken connection or an HTTP 5xx). Sending it again could add the route or point
+ * of interest twice, so the message says to check first.
  */
 export class UnconfirmedWriteError extends UserFacingError {
   readonly kind = "unconfirmed_write";
 
-  constructor(message = "PADI did not confirm the change, so it may have been saved anyway. Check the logbook (logbook_list_dives or logbook_get_dive) before you try again.", options?: { cause?: unknown }) {
+  constructor(
+    message = "Suunto did not confirm the change, so it may have been saved anyway. Check in the Suunto App (or list the routes or points of interest) before you try again.",
+    options?: { cause?: unknown },
+  ) {
     super(message, options);
     this.name = "UnconfirmedWriteError";
   }
@@ -40,37 +43,51 @@ export class UnconfirmedWriteError extends UserFacingError {
 
 export class ReadOnlyError extends UserFacingError {
   constructor(action: string) {
-    super(`This account is read-only (PADI_READ_ONLY=true); "${action}" is not allowed.`);
+    super(`This account is read-only (SUUNTO_READ_ONLY=true); "${action}" is not allowed.`);
     this.name = "ReadOnlyError";
   }
 }
 
 /**
- * A JWT (3 parts) or JWE (5 parts, like a Cognito refresh token): base64url parts separated by
- * dots, starting with an encoded JSON header ("eyJ").
+ * A JWT (3 parts) or JWE (5 parts): base64url parts separated by dots, starting with an encoded
+ * JSON header ("eyJ"). Suunto's access and refresh tokens are JWTs.
  */
 const JWT_LIKE = /eyJ[A-Za-z0-9_-]{4,}(?:\.[A-Za-z0-9_-]*){2,4}/g;
 
-/** JSON fields that hold a password or a token (PADI, Cognito and OAuth spellings). */
+/** JSON fields that hold a password, a token or a key (Suunto and OAuth spellings). */
 const SECRET_JSON_FIELD =
-  /("(?:password|PASSWORD|Password|refreshToken|refresh_token|REFRESH_TOKEN|RefreshToken|idToken|id_token|IdToken|accessToken|access_token|AccessToken|client_secret|SECRET_HASH)"\s*:\s*")(?:[^"\\]|\\.)*"/g;
-/** The same in a query string or a form body. */
-const SECRET_PARAM = /\b((?:password|refresh_token|id_token|access_token|code_verifier|client_secret)=)[^&\s"']+/gi;
+  /("(?:password|PASSWORD|Password|refreshToken|refresh_token|REFRESH_TOKEN|RefreshToken|idToken|id_token|IdToken|accessToken|access_token|AccessToken|client_secret|clientSecret|subscriptionKey|subscription_key|SECRET_HASH)"\s*:\s*")(?:[^"\\]|\\.)*"/g;
+/** The same in a query string or a form body (an authorization code included). */
+const SECRET_PARAM = /\b((?:password|refresh_token|id_token|access_token|code_verifier|client_secret|code|subscription-key)=)[^&\s"']+/gi;
+/** The API gateway's subscription key header ("Ocp-Apim-Subscription-Key: <key>"). */
+const SUBSCRIPTION_HEADER = /(Ocp-Apim-Subscription-Key["']?\s*[:=]\s*["']?)[A-Za-z0-9_-]{6,}/gi;
+/** "Bearer <token>" anywhere (headers, logs, echoed requests). */
+const BEARER = /(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}/gi;
+/** "Basic <base64>" anywhere: the client id and secret of the token request. */
+const BASIC = /\b(Basic\s+)([A-Za-z0-9+/]{8,}={0,2})/gi;
+
+/** True for a value after "Basic " that looks encoded, not like an English word. */
+function looksEncoded(value: string): boolean {
+  return value.length >= 20 || /[0-9+/=]/.test(value);
+}
 
 /** Remove anything that looks like a secret from an error message before showing it. */
 export function redact(message: string, secrets: readonly string[]): string {
   let out = message;
   for (const secret of secrets) {
-    if (secret && secret.length >= 4) {
-      out = out.split(secret).join("***");
-    }
+    if (!secret || secret.length < 4) continue;
+    out = out.split(secret).join("***");
+    // The same secret as it appears in a URL or a form body.
+    const encoded = encodeURIComponent(secret);
+    if (encoded !== secret) out = out.split(encoded).join("***");
   }
-  // Basic auth headers or base64 encoded credentials that might appear in low level errors.
-  out = out.replace(/(Authorization:\s*Basic\s+)[A-Za-z0-9+/=]+/gi, "$1***");
-  // Bearer tokens and anything shaped like a JWT (ID, access and refresh tokens).
-  out = out.replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}/gi, "$1***");
+  // Basic auth values (base64 of client id and secret) that might appear in low level errors.
+  out = out.replace(BASIC, (match: string, prefix: string, value: string) => (looksEncoded(value) ? `${prefix}***` : match));
+  // Bearer tokens and anything shaped like a JWT (access and refresh tokens).
+  out = out.replace(BEARER, "$1***");
   out = out.replace(JWT_LIKE, "***");
-  // Passwords and tokens in JSON bodies or query strings (for example a request echoed in an error).
+  out = out.replace(SUBSCRIPTION_HEADER, "$1***");
+  // Passwords, tokens and codes in JSON bodies or query strings (for example a request echoed in an error).
   out = out.replace(SECRET_JSON_FIELD, '$1***"');
   out = out.replace(SECRET_PARAM, "$1***");
   return out;
@@ -97,8 +114,8 @@ export function describeError(error: unknown): string {
       code?: string;
       status?: number;
     };
-    if (anyErr.status === 401) {
-      parts.push("(PADI refused the sign-in: sign in to PADI again with your PADI e-mail and password)");
+    if (anyErr.status === 401 && !/connect suunto again|subscription key|app keys/i.test(error.message)) {
+      parts.push("(Suunto refused the sign-in: connect Suunto again)");
     }
     if (anyErr.responseText && !error.message.includes(anyErr.responseText)) {
       parts.push(`(server said: ${anyErr.responseText})`);

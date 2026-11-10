@@ -9,16 +9,22 @@ This page is the single source of facts the code is written against. It was put 
 developer portal): the data of its 10 APIs (operations, JSON schemas, examples), its product list,
 the pages `/how-to-start`, `/faq`, `/webhooks`, `/route-description`, `/fit-description`,
 `/how-to-workout-upload`, `/suuntoplus-guide-description`, `/how-to-use-suuntoplus-guides-api`,
-and the linked PDFs `Activities.pdf` and `SuuntoplusGuideCloudAPI.pdf`.
+the home page `/`, and the linked PDFs `Activities.pdf` and `SuuntoplusGuideCloudAPI.pdf`. Every
+Suunto fact below was checked again against these downloaded files on 2026-11-10.
+
+Some facts come from outside Suunto: open source projects that already talk to the API, forum
+posts, and the Azure API Management docs (section 9). That code was read only to learn facts. It is
+not official, so those facts are never better than **likely**.
 
 No call to `cloudapi.suunto.com` has been made yet. Labels used below:
 
 - **documented**: Suunto states it in a page, an operation or a schema.
 - **example only**: only an example value in the docs shows it.
-- **unverified**: our reading of the docs, or a guess. Check it with a real call.
-- **not documented**: the docs say nothing about it.
-
-Example values on this page are copied from the Suunto docs.
+- **likely**: not in the Suunto docs, but working third-party clients or forum posts show it, or
+  the examples strongly point to it. The short source name is given (section 9).
+- **unverified**: our reading of the docs, a single third-party report, or a guess. Check it with a
+  real call.
+- **not documented**: the docs say nothing about it. (All example values are from the Suunto docs.)
 
 ## Contents
 
@@ -30,6 +36,7 @@ Example values on this page are copied from the Suunto docs.
 6. [Gotchas](#6-gotchas)
 7. [Open questions](#7-open-questions)
 8. [Appendix: activity ids](#8-appendix-activity-ids)
+9. [Appendix: outside sources](#9-appendix-outside-sources)
 
 ---
 
@@ -71,21 +78,38 @@ this host is wrong: use `cloudapi-oauth.suunto.com` (documented).
   token works too is **unverified**. Always send `Bearer`.
 - Every API also accepts the key as query parameter `subscription-key` (API data). Use the header.
 - No subscription key on OAuth calls (FAQ). Primary and secondary keys both work (documented).
+  The portal data marks every API, the OAuth one included, as `subscriptionRequired`, but the FAQ
+  and the how-to-start curl example send no key to `cloudapi-oauth.suunto.com`. Follow the FAQ.
 
 ### 1.3 Subscriptions and limits
 
 | Product | Limits | Source |
 | --- | --- | --- |
 | Developer API (product id `starter`) | "Subscribers will be able to run 10 calls/minute up to a maximum of 200 calls/week." One subscription per account; no approval needed. | documented (portal product list) |
-| Production API | **not documented** publicly. FAQ: "When you are ready with your implementation, please subscribe to the Production API. We will then connect you for next steps." | FAQ |
+| Production API | **no numbers published**. Home page: "The Development API includes all the endpoints but has smaller request limits." FAQ: "When you are ready with your implementation, please subscribe to the Production API. We will then connect you for next steps." | home page, FAQ |
 
-Also documented: 247 calls take at most **28 days** per request; the routes list has no rate
-limit "but we **prohibit polling**"; 247 APIs can answer **503** "Service capacity exceeded";
-the Developer API "has same capabilities as the production API", only rate limited.
+Also documented: 247 calls take at most **28 days** per request; the routes list: "We currently
+do not impose any rate limits on the Routes Listing API but we **prohibit polling**"; 247 APIs can
+answer **503** "Service capacity exceeded. Try again later."; the Developer API "has same
+capabilities as the production API", only rate limited; the API is free ("We do not charge from
+the use of the API", home page).
 
 The 200 calls/week limit is per subscription key, so it is shared by **all users** of the server
 (unverified, but the key is the only thing that identifies the app). A multi-user service needs
 the Production API.
+
+**When a limit is hit** (not documented by Suunto). The gateway is Azure API Management. Its
+rate-limit policy answers **429** with a `Retry-After` header in seconds; its quota policy answers
+**403** with `Retry-After` and a body like "Out of call volume quota. Quota will be replenished in
+hh:mm:ss" (likely; Azure docs, open-health-sync). So 10 calls/minute most likely gives 429 and
+200 calls/week gives 403. One third party also saw **401** with "RateLimitExceeded" in the body,
+which cleared after about 90 seconds (unverified; googlarz). Rules for the code:
+
+- Treat 429, 403 with a quota text, 401 with "RateLimitExceeded" and 503 as "slow down": wait
+  (`Retry-After` when present) and do not touch the user's tokens.
+- A 401 that mentions the subscription key (Azure's default text is "Access denied due to missing
+  subscription key" or "... invalid subscription key") is a server configuration error, not an
+  expired user token (likely; Azure API Management defaults).
 
 ### 1.4 FAQ points that matter for a multi-user server
 
@@ -93,7 +117,13 @@ the Production API.
   production services need separate API Zone accounts.
 - **Access is for organizations**, "we do not provide this for personal use". A person who runs
   their own copy of the server cannot simply get their own credentials.
-- **Development uses the production system** and real user data.
+- **Development uses the production system** and real user data: "you can use the real data from
+  your testers with your app/service". No Suunto document says that the Developer API only lets
+  the developer's own accounts authorize.
+- **Going to production** (FAQ and home page): be accepted into the partner program and sign the
+  API agreement; submit the app information in the API Zone profile; subscribe to the Production
+  API; fill in the content submit form. Suunto then grants production access and publishes the app
+  on suunto.com and in the Suunto App.
 - **User mapping**: the access token JWT has a claim `user` with the Suunto username. Webhooks
   identify the user by this name.
 - **Do not poll.** Use webhooks for new workouts. Fetch daily activity when a workout arrives,
@@ -101,8 +131,11 @@ the Production API.
 - **Load**: no status page; more load on weekends and at the start of the year.
 - **Credentials**: users sign in with Suunto App credentials; Movescount ones give 401.
 - **Publishing**: the app shows in the Suunto App once the Production subscription is accepted.
-- **Outdated FAQ answers**: the FAQ says sleep data and points of interest are not available.
-  The API now has sleep (3.2) and POI (3.8) endpoints. Trust the API pages.
+- **Personal data**: "weight data or heartrate zones are not available yet" (FAQ). No API
+  operation returns them.
+- **Outdated answers**: the FAQ says sleep data and points of interest are not available, and the
+  route page says POIs "are not supported by the Suunto Cloud API". The API now has sleep (3.2)
+  and POI (3.8) endpoints. Trust the API pages.
 - **Activity ids**: workout JSON uses the **Suunto App activity ids** (section 8), not FIT ids.
 
 ### 1.5 Response envelope and errors
@@ -117,9 +150,10 @@ Status codes named in the docs:
 
 | Code | Where | Meaning (documented) |
 | --- | --- | --- |
-| 400 | all | bad request; 247: "Something is wrong with the parameters." |
+| 400 | all, OAuth token and deauthorize too | bad request; 247: "Something is wrong with the parameters." |
 | 401 | 247, routes, OAuth | "Authentication failed." FAQ: "bad client credentials" with wrong credentials |
-| 403 | workouts, routes, POI, upload, guides | forbidden (no text for most) |
+| 403 | workouts, workout description, routes, POI, upload, guides | forbidden (no text for most). Also, likely, the Azure quota answer (1.3) |
+| 429 | none | not in the docs. Likely the Azure rate-limit answer (1.3) |
 | 404 | FIT export, routes, POI get, upload status, guides | not found |
 | 409 | route update, guide create/update | revision conflict; duplicate guide `externalId` |
 | 422 | upload | "On wrong parameters (e.g. unsupported data type)" |
@@ -150,14 +184,17 @@ GET https://cloudapi-oauth.suunto.com/oauth/authorize?response_type=code&client_
 | `response_type` | yes | only value `code` (documented) |
 | `client_id` | yes | the app's client id (documented) |
 | `redirect_uri` | yes | the redirect URI from the app settings (documented). Exact matching rules: not documented |
-| `state` | ? | **not documented**. Whether it is passed back is unverified. |
-| `scope` | ? | **not documented** |
+| `state` | ? | **not documented**. Several working clients send it and reject the callback when it does not match, so Suunto passes it back (likely; googlarz, open-wearables, quantified-self). |
+| `scope` | ? | **not documented** as an input. Some clients send `scope=workout`, others send nothing. Users report that the consent screen has only an "Authorize" button with no permission choices, and that re-authorizing still gives the `workout` scope (unverified that the input has any effect; quantified-self, intervals.icu forum). |
+| `code_challenge` (PKCE) | ? | **not documented**. One client sends it; support is unverified. Do not depend on it. |
 
-- The user signs in with Suunto App credentials and allows access in a browser (documented).
-  "The authorisation process is optimized for mobile use." There is no mobile SDK.
-- On success the browser goes to `<REDIRECT_URI>?code=<code>`, for example
-  `https://www.example.com/oauth-redirect?code=G5ahWs` (documented).
-- What the redirect carries when the user refuses or on an error: **not documented**.
+- The user signs in with Suunto App credentials and allows access in a browser (documented;
+  "optimized for mobile use"). On success the browser goes to `<REDIRECT_URI>?code=<code>`, for
+  example `https://www.example.com/oauth-redirect?code=G5ahWs` (documented).
+- What the redirect carries when the user refuses or on an error: **not documented**. Production
+  clients treat an `error` query parameter on the redirect as a denial (likely; c2c_tracking,
+  CubeTrek). The exact value `access_denied` is unverified; it is what Spring Security OAuth2
+  sends, and the server texts in 2.3 look like Spring Security OAuth2.
 
 ### 2.3 Token (authorization code)
 
@@ -178,7 +215,9 @@ Authorization: Basic base64(<CLIENT_ID>:<CLIENT_SECRET>)
 - **Where the parameters go**: the operation page puts them in the **query string**
   (`/oauth/token?grant_type=authorization_code&code=...`); the how-to-start page sends a **form
   body** (`curl --user <CLIENT_ID>:<CLIENT_SECRET> -d grant_type=authorization_code -d redirect_uri=... -d code=...`).
-  Use the form body (the OAuth standard); which one works for sure is **unverified**.
+  Both are documented. Working clients use both: CubeTrek, googlarz and quantified-self send a
+  form body, c2c_tracking sends the query string with an empty body (likely). Use the form body
+  (`application/x-www-form-urlencoded`, the OAuth standard).
 - No subscription key (FAQ).
 
 Answer (documented, how-to-start):
@@ -199,11 +238,17 @@ Answer (documented, how-to-start):
 | `token_type` | `bearer` |
 | `refresh_token` | named `<JWT_REFRESH_TOKEN>`, and the 200 answer is "JWT token (access and refresh)", so the refresh token is a JWT too (documented). Its lifetime: **not documented**. |
 | `expires_in` | seconds. `86400` (24 h) in the example only. Use `exp` or `expires_in`, whichever is present. |
-| `scope` | `"workout"` in the example. Other values: not documented. |
-| `user` | the webhooks page says the Suunto user id is "the `user` field in the OAuth access token response". It is missing from the how-to-start example: **unverified**. |
+| `scope` | `"workout"` in the example. Third-party clients always see `workout` (likely). Other values: not documented. |
+| `user` | the webhooks page says the Suunto user id is "the `user` field in the OAuth access token response" (documented there), but the how-to-start example does not show it. Third-party clients read it from the `authorization_code` answer (likely; c2c_tracking, open-wearables). A refresh answer may not have it (likely). Use the JWT `user` claim (2.5) as the main source. |
 
-Errors: HTTP 400 (body not documented). Wrong client credentials: 401 "bad client credentials"
-(FAQ).
+Errors:
+
+- Wrong client credentials: **401** with the message "bad client credentials" (FAQ). The FAQ
+  says the usual causes are a wrong `Authorization` header, or users who sign in with Movescount
+  credentials instead of Suunto App ones.
+- Bad, used or expired code, and a bad refresh token: **400** with a JSON body like
+  `{"error": "invalid_grant", "error_description": "Invalid authorization code: ..."}` (likely;
+  quantified-self). The operation lists 400 without a body.
 
 ### 2.4 Refresh
 
@@ -212,13 +257,22 @@ POST https://cloudapi-oauth.suunto.com/oauth/token?grant_type=refresh_token&refr
 Authorization: Basic base64(<CLIENT_ID>:<CLIENT_SECRET>)
 ```
 
-- Documented as "Refresh access token". The docs list `authorization_code` as giving "New access
-  and refresh tokens" and do **not** say whether a refresh returns a new refresh token.
-  Rule for the code: if the answer has a `refresh_token`, store it and drop the old one.
-- Whether old refresh tokens stop working after a refresh: **not documented**.
-- Whether the refresh token JWT has an `exp` claim: likely (it is a JWT with an "exp token
-  attribute"), but **unverified**. Read it if present, never rely on it.
-- Form body versus query string: as in 2.3, **unverified**.
+- Documented as "Refresh access token". Only `authorization_code` is said to give "New access
+  and refresh tokens". Whether a refresh returns a new refresh token, and whether the old one
+  then stops working: **not documented**.
+- A refresh answer contains a `refresh_token`; one production client requires the field (likely;
+  c2c_tracking). One third party says Suunto invalidates the old refresh token after its first
+  use, so two refreshes at the same time log the user out (unverified; googlarz). Other clients
+  keep the old token when no new one comes back.
+- Rules: always store the newest `refresh_token` from every answer; run only one refresh per user
+  at a time.
+- Refresh token lifetime: **not documented**. The refresh token is a JWT, so it may have `exp`
+  (unverified). Read it if present.
+- Form body versus query string: as in 2.3; use the form body.
+- **Do not delete stored tokens on the first `invalid_grant`.** During an outage in July 2026,
+  Suunto answered refreshes with false 400 `invalid_grant` errors and later accepted the same
+  refresh token again (likely; quantified-self). Keep the tokens, retry later, and ask the user to
+  reconnect only after repeated failures.
 
 ### 2.5 Access token claims
 
@@ -226,7 +280,7 @@ Authorization: Basic base64(<CLIENT_ID>:<CLIENT_SECRET>)
 | --- | --- |
 | `user` | custom claim, "the authorizing user's Suunto app account username" (documented). Use it as the stable user id and to match webhooks (`username`). |
 | `exp` | expiry, seconds since the epoch (documented) |
-| others | not documented. Do not depend on them. |
+| others | not documented. Third parties see `sub`, `jti`, `uk` and `ukv` (likely; c2c_tracking, open-wearables). Do not depend on them. |
 
 Read the claims without checking the signature only to get `user` and `exp`: the token comes
 straight from Suunto's token endpoint over TLS. The signing key is not documented.
@@ -240,8 +294,17 @@ Authorization: Bearer <access token>
 
 - "Disconnect user from partner service" (documented). 200 with an empty body on success; 400 on
   error.
-- Call it when a user disconnects Suunto in our app. What happens to the refresh token afterwards,
-  and whether Suunto tells us when the user disconnects on the Suunto side: **not documented**.
+- Call it when a user disconnects Suunto in our app. What happens to the access and refresh tokens
+  and to webhooks afterwards, and whether Suunto tells us when the user disconnects on the Suunto
+  side: **not documented**.
+- Suunto App side (likely; Suunto forum posts 53397, 60250 and 123407, not official docs): the
+  app lists connected partner services. Suunto staff say the partner must call deauthorize, or the
+  app keeps showing the service as connected. Only some partners (for example Strava and
+  TrainingPeaks, which Suunto manages itself) could be disconnected inside the app; staff said
+  they understood the need for a Suunto-side button. Some users now report a disconnect button at
+  the bottom of a connected service's screen, others could not find it.
+- A partner app is shown in the Suunto App only after Suunto accepts its Production subscription
+  (FAQ).
 
 ---
 
@@ -265,10 +328,22 @@ All calls below need the two headers of section 1.2. Paths are relative to the b
 Common rules (documented for all four operations):
 
 - "Data is stored into and fetched from the API using UTC time."
-- Maximum interval **28 days**. Suunto advises fetching once every 24 hours.
+- Maximum interval **28 days**. Suunto advises fetching once every 24 hours. One third party says
+  a window of exactly 28 days is rejected on daily statistics (unverified). Stay below 28 days.
+- The documented example call `/247samples/activity?from=1672524000000&to=1690837200000` spans
+  212 days. Follow the 28-day rule, not the example.
+- `from` and `to` must be epoch-ms **integers** (documented type). ISO strings give 400 "Type
+  mismatch" (unverified; jb381). They are UTC instants: the window filters on instants, so a
+  window that starts at UTC midnight cuts a local day at the UTC offset, for example at 02:00 for a
+  user at UTC+2 (likely; googlarz). Build windows from the user's local midnight.
+- Returned timestamps are ISO 8601 with the wearer's local offset (for example `+02:00`, webhook
+  examples); the doc examples also use `Z` (documented).
 - Headers: `Authorization` ("JWT access token"). The activity, sleep and recovery operations also
   list a required `Content-Type: application/json` header, although they are GETs. Send it.
 - Errors: 400, 401, 500, 503 (section 1.5).
+- Subscriptions: one third party says sleep, recovery and activity may need extra API Zone
+  subscriptions, and that recovery may answer 404 without one (unverified; googlarz). The home
+  page says the Development API "includes all the endpoints".
 
 #### GET `/247samples/activity?from={from}&to={to}`
 
@@ -279,30 +354,27 @@ watches." `from` and `to`: integers, epoch milliseconds, both required. Example 
 Answer (`DailyActivityEntryDataArray`, documented example):
 
 ```json
-[
-  {"timestamp": "2019-02-11T12:00:00Z",
-   "entryData": {"HR": 72, "StepCount": 100, "EnergyConsumption": 8000, "SpO2": 0.5,
-                 "Altitude": 50, "HRExt": {"Min": 60, "Max": 80}, "HRV": 12}},
-  {"timestamp": "2019-02-11T12:10:00Z",
-   "entryData": {"HR": 65, "StepCount": 50, "EnergyConsumption": 5000, "SpO2": 0.3,
-                 "Altitude": 10, "HRExt": {"Min": 60, "Max": 80}, "HRV": 12}}
-]
+[{"timestamp": "2019-02-11T12:00:00Z",
+  "entryData": {"HR": 72, "StepCount": 100, "EnergyConsumption": 8000, "SpO2": 0.5,
+                "Altitude": 50, "HRExt": {"Min": 60, "Max": 80}, "HRV": 12}},
+ {"timestamp": "2019-02-11T12:10:00Z", "entryData": {"HR": 65, "StepCount": 50, "...": "..."}}]
 ```
 
 | Field | Type | Unit and notes (schema) |
 | --- | --- | --- |
 | `timestamp` | string | ISO 8601 "having also the local time offset from UTC (`yyyy-MM-ddTHH:mm:ss.fffzzz`)". Examples: `2019-02-11T12:00:00Z`, `2024-12-10T14:50:00.000+02:00` (webhook). |
 | `HR` | float | average heart rate, bpm |
-| `StepCount` | int | schema: "Accumulated steps". The example (100, then 50) is not a running day total, so it is most likely the steps of the sample period (unverified). |
-| `EnergyConsumption` | float | **joules** (per sample period, same remark as `StepCount`) |
+| `StepCount` | int | schema: "Accumulated steps". Most likely the steps of the sample period (likely): the example (100, then 50) is not a running day total, and an older, unused schema definition in the same API (`DailyActivitySample`) says "steps recorded since previous measurement". |
+| `EnergyConsumption` | float | **joules** (per sample period, same remark as `StepCount`; the old definition says "energy consumption (in joules) since previous measurement value") |
 | `SpO2` | float | oxygen saturation as a **fraction 0..1** |
 | `Altitude` | float | metres |
 | `HRExt` | object | `{"Min": float, "Max": float}`, bpm |
 | `HRV` | int | ms |
 
 Every field may be missing in a sample (unverified; webhook samples carry only `HR`,
-`StepCount`, `EnergyConsumption`). The sample interval is not documented (10 minutes in the
-example).
+`StepCount`, `EnergyConsumption`). The sample interval is not documented. It is most likely **10
+minutes**: the doc and webhook examples are 10 minutes apart, and a live observer counts 144
+rows per day (likely).
 
 #### GET `/247samples/sleep?from={from}&to={to}`
 
@@ -318,13 +390,10 @@ documented example has every field below, with `Duration` 28126, `DeepSleepDurat
 | `Feeling` | int | Poor (1), Average (2), Good (3), Very Good (4), Excellent (5) |
 | `HRAvg`, `HRMin` | float | bpm |
 | `SleepQualityScore` | int | 0..100 |
-| `BodyResourcesInsightId` | int | "TODO" in the schema; may be null |
-| `SleepId` | int64 | "TODO" in the schema; may be null. Webhook example: `1736112540`. |
+| `BodyResourcesInsightId`, `SleepId` | int, int64 | "TODO" in the schema; may be null. Webhook `SleepId` example: `1736112540`. |
 | `BedtimeStart`, `BedtimeEnd` | string | ISO 8601 |
-| `MaxSpo2` | float | fraction 0..1 |
-| `Altitude` | float | metres |
-| `AvgHRV` | float | ms, average during the segment |
-| `AvgHRVSampleCount` | int | number of HRV samples behind `AvgHRV` |
+| `MaxSpo2`, `Altitude` | float | fraction 0..1; metres |
+| `AvgHRV`, `AvgHRVSampleCount` | float, int | ms, average during the segment; number of HRV samples behind it |
 | `IsNap` | bool | segment is a nap (Gomore algorithm) |
 | `SleepOnsetLatencyDuration` | float | seconds awake before sleep onset (SOL) |
 | `WakeAfterSleepOnsetDuration` | float | seconds awake between onset and offset (WASO) |
@@ -345,10 +414,11 @@ Which day a sleep belongs to (start date, end date, local or UTC) is not documen
 
 | Field | Type | Notes (schema) |
 | --- | --- | --- |
-| `Balance` | float | "Body's energy level between 0.0 and 1.0" |
+| `Balance` | float | "Body's energy level between 0.0 and 1.0". It matches the Suunto App "Resources" percent (0.96 = 96%) (likely; googlarz). |
 | `StressState` | int | Invalid (0), Relaxing (1), Active (2), Passive (3), Stressful (4) |
 
-The sample interval is not documented (one hour in the example).
+The sample interval is not documented. The doc example is hourly, but a live observer counts 48
+rows per day, so most likely **30 minutes** (likely).
 
 #### GET `/247samples/daily-activity-statistics?startdate={startdate}&enddate={enddate}`
 
@@ -375,17 +445,19 @@ Answer `AggregatedActivityDataArray` (documented example):
 | `Samples[].Value` | daily steps or energy in **joules**. Schema type is string; examples are numbers or `null`. "Can be null if no data or 2 records returned for specified date (one null and one not null)." Accept number, numeric string and null. |
 | `Samples[].TimeISO8601` | schema: ISO 8601 with offset (`yyyy-MM-ddTHH:mm:ss.fffzzz`); the example has no offset |
 
-How the day boundaries are chosen (the example starts at 02:00): **not documented**.
+How the day boundaries are chosen: **not documented**, and the evidence conflicts (unverified).
+The doc example asks from 02:00 and gets samples stamped 02:00, which suggests the buckets follow
+`startdate`. One live observer says each daily sample is stamped at local noon (for example
+`2026-09-27T12:00:00+02:00`) and that a one-day window returned two days. Rules: pick days by the
+date part of `TimeISO8601`, and merge the null and non-null records of one date.
+
+Offsets in `startdate`/`enddate` must be written like `+02:00`; `+0200` gives 400 (unverified;
+googlarz). The documented example has no offset at all.
 
 ### 3.3 SUUNTO DAILY ACTIVITY API (`/247`)
 
-One operation, the same as 3.2's statistics:
-
-```
-GET https://cloudapi.suunto.com/247/daily-activity-statistics?startdate={startdate}&enddate={enddate}
-```
-
-Same parameters, rules (UTC, 28 days, once a day), answer and errors as
+One operation, `GET https://cloudapi.suunto.com/247/daily-activity-statistics?startdate={startdate}&enddate={enddate}`,
+with the same parameters, rules (UTC, 28 days, once a day), answer and errors as
 `/247samples/daily-activity-statistics`. Whether the two return the same data, and which one
 Suunto prefers, is **not documented**. Prefer `/247samples`.
 
@@ -399,13 +471,14 @@ Suunto prefers, is **not documented**. Prefer `/247samples`.
 | --- | --- | --- | --- |
 | `since` | int, epoch ms | `0` | minimum timestamp, **inclusive** |
 | `until` | int, epoch ms | now | maximum timestamp, **exclusive** |
-| `limit` | int | `50` | maximum number of workouts. Server maximum: not documented. |
+| `limit` | int | `50` | maximum number of workouts. Server maximum: not documented; clients use 50, 100 and 1000. A page shorter than `limit` is the last page. |
 | `offset` | int | `0` | workouts to skip |
 | `filter-by-modification-time` | bool | `true` | `true`: `since`/`until` filter on **modification time**; `false`: on **workout start time** |
 
 Example call (documented): `/v3/workouts?since=1709251200000&until=1711929600000&limit=10&offset=0`
 "would return list of 10 last modified workouts between 2024-03-01T00:00:00Z and
-2024-04-01T00:00:00Z". The sort order is **not documented**.
+2024-04-01T00:00:00Z". The sort order is **not documented** ("10 last modified" hints at newest
+first; unverified).
 
 Answer: envelope with `payload` = list of workouts (section 3.4.3) and `metadata`. Documented
 example (shortened; the original text is not valid JSON, it starts with `[{{`):
@@ -415,14 +488,10 @@ example (shortened; the original text is not valid JSON, it starts with `[{{`):
  "payload": [{"activityId": 11, "startTime": 1526196562327, "totalTime": 2686.03,
    "totalDistance": 3900.0, "totalAscent": 88.75, "totalDescent": 128.52,
    "startPosition": {"x": 23.842736666666667, "y": 61.453113333333334},
-   "stopPosition": {"x": 23.844015, "y": 61.45330166666667},
-   "centerPosition": {"x": 23.831098333333333, "y": 61.45186},
+   "stopPosition": {"x": 23.844015, "y": 61.45330166666667}, "centerPosition": {"...": "..."},
    "maxSpeed": 2.6, "recoveryTime": 0, "cumulativeRecoveryTime": 0,
    "rankings": {"totalTimeOnRouteRanking": {"originalRanking": 1, "originalNumberOfWorkouts": 1}},
-   "extensions": [{"type": "SummaryExtension", "pte": 2.0, "feeling": null, "avgTemperature": 302.44998,
-     "maxTemperature": null, "peakEpoc": 14.5, "avgPower": null, "maxPower": null,
-     "avgCadence": 0.9801348, "maxCadence": null, "ascentTime": 1178.0, "descentTime": 1043.0,
-     "performanceLevel": null}],
+   "extensions": [{"type": "SummaryExtension", "...": "see section 5.1"}],
    "extensionTypes": ["DISTANCEDELTA", "ALTITUDESTREAM", "LOCATIONSTREAM", "EPOCSTREAM", "SUMMARY",
      "SPEEDSTREAM", "HEARTRATESTREAM", "VERTICALSPEEDSTREAM", "SEALEVELPRESSURESTREAM",
      "CADENCESTREAM", "INTENSITY"],
@@ -461,8 +530,9 @@ WeatherExtension, ZappChannelsExtension
 ```
 
 Note the spelling `HeartrateStreamExtension` (lower-case r) next to `HeartRateExtension`, and
-`MultisportMarker` without "Extension". Which extensions come back when `extensions` is left out:
-**not documented**.
+`MultisportMarker` without "Extension". Names are case-sensitive, an unknown name makes the whole
+call fail with 400, and an extension the workout does not have is simply left out (likely;
+googlarz). Which extensions come back when `extensions` is left out: **not documented**.
 
 Answer: envelope, `payload` = one workout (3.4.3). Errors: 400, 403 (and 500 for a malformed
 key, FAQ).
@@ -470,7 +540,8 @@ key, FAQ).
 #### GET `/v3/workouts/{workoutIdOrKey}/fit` (FIT export)
 
 `workoutIdOrKey`: "Workout identifier (workoutKey)". Answer: `application/octet-stream`, "User
-workout data in Garmin FIT format". Errors: 400, 403, 404. The FAQ: "Fit files has most
+workout data in Garmin FIT format". Errors: 400, 403, 404. A key that does not exist gives 403,
+not 404 (unverified; googlarz). The FAQ: "Fit files has most
 comprehensive dataset from each workout", with all samples, laps and summary values. The FIT
 content is described on `/fit-description` (session, lap, record, length, event, dive messages and
 Suunto developer fields). MCP for Suunto v1 does not parse FIT.
@@ -484,26 +555,24 @@ Same schema in v2 and v3 (the two schema files are identical).
 | `workoutKey` | string | "Workout unique id". 24 hex characters. |
 | `key` | string | "Workout key" (relation to `workoutKey` not documented) |
 | `workoutId` | int32 | not described |
-| `workoutName` | string | |
-| `description` | string | |
+| `workoutName`, `description` | string | |
 | `activityId` | int32 | Suunto App activity id (section 8) |
 | `startTime`, `stopTime` | int64 | **epoch milliseconds**. The schema text says "seconds since Epoch", but the FAQ says "UNIX epoch milliseconds" and the examples (`1526196562327`, webhook `1702729200000`) are milliseconds. |
 | `timeOffsetInMinutes` | int32 | "Timezone offset in minutes. 0 for UTC." FAQ: the user's local time difference to UTC "at the time when the exercise stopped". Local time = UTC + offset. |
 | `created` | int64 | unit not documented |
-| `totalTime` | double | **seconds** |
+| `totalTime` | double | **seconds** (schema). Timer time without pauses (likely; open-wearables). |
 | `totalDistance` | double | **metres** |
-| `totalAscent`, `totalDescent` | double | unit not documented (example `88.75`; metres, unverified) |
-| `maxAltitude`, `minAltitude` | float | unit not documented (metres, unverified); barometer or GPS |
+| `totalAscent`, `totalDescent` | double | unit not documented (example `88.75`); metres (likely) |
+| `maxAltitude`, `minAltitude` | float | unit not documented; metres (likely); barometer or GPS |
 | `avgSpeed`, `maxSpeed` | double / float | The schema text says **km/h**. Both examples fit **m/s**: 3900 m in 2686.03 s is 1.45, the value given; webhook: 10000 m in 3600 s, `avgSpeed` 2.78. Treat as m/s (unverified). |
 | `avgPace` | double | unit not documented. Example `11.48` matches minutes per km for 1.45 m/s (unverified). |
 | `energyConsumption` | int32 | **kcal** (schema) |
-| `recoveryTime` | int64 | seconds |
-| `cumulativeRecoveryTime` | int64 | seconds |
-| `stepCount` | int32 | steps |
-| `cadence` | float | schema: a number, "round per minute" average. The list example has an object `{"max": 0, "avg": 0}`. Accept both. |
-| `hrdata` | object | `userMaxHR` (user max HR at the time), `workoutAvgHR`, `workoutMaxHR`, all bpm. The list example also has `hrmax`, `max`, `avg`. |
+| `recoveryTime`, `cumulativeRecoveryTime` | int64 | seconds |
+| `stepCount` | int32 | no description; a step count (likely) |
+| `cadence` | float | schema: a number, "round per minute" average. The list example has an object `{"max": 0, "avg": 0}` (unit unverified). Accept both. |
+| `hrdata` | object | `userMaxHR` ("Maximum heart rate at the time of workout"), `workoutAvgHR`, `workoutMaxHR`, all bpm (documented). The list example also has `hrmax`, `max`, `avg`. Third parties read `max` as the user's max HR setting and `hrmax` as the workout max (likely; open-wearables). |
 | `startPosition`, `stopPosition`, `centerPosition` | `{"x": double, "y": double}` | **x = longitude, y = latitude**. Not stated for workouts; the POI schema states it for the same `x`/`y` shape, and the workout examples (x 23.84, y 61.45 in Finland) fit. |
-| `extensionTypes` | string[] | which data the workout has. Enum: `SKI`, `MULTISPORTMARKER`, `SUMMARY`, `EPOCSTREAM`, `VERTICALSPEEDSTREAM`, `CADENCESTREAM`, `DEPTHSTREAM`, `POWERSTREAM`, `SEALEVELPRESSURESTREAM`, `STROKERATESTREAM`, `SWOLFSTREAM`, `TEMPERATURESTREAM`, `SWIMMINGHEADER`, `INTENSITY`, `FITNESS`, `HEARTRATE`, `ALTITUDESTREAM`, `HEARTRATESTREAM`, `LOCATIONSTREAM`, `SPEEDSTREAM`, `PAUSEMARKER`, `MANUALLAP`, `INTERVAL`, `VERTICALLAP`, `DISTANCEDELTA`, `STEPCOUNTDELTA`, `STROKESDELTA`, `SKITURN`, `SKIHEADER`, `APPBUNDLEID` |
+| `extensionTypes` | string[] | which data the workout has, as short upper-case names (for example `HEARTRATESTREAM`). Enum: `SKI`, `MULTISPORTMARKER`, `SUMMARY`, `EPOCSTREAM`, `VERTICALSPEEDSTREAM`, `CADENCESTREAM`, `DEPTHSTREAM`, `POWERSTREAM`, `SEALEVELPRESSURESTREAM`, `STROKERATESTREAM`, `SWOLFSTREAM`, `TEMPERATURESTREAM`, `SWIMMINGHEADER`, `INTENSITY`, `FITNESS`, `HEARTRATE`, `ALTITUDESTREAM`, `HEARTRATESTREAM`, `LOCATIONSTREAM`, `SPEEDSTREAM`, `PAUSEMARKER`, `MANUALLAP`, `INTERVAL`, `VERTICALLAP`, `DISTANCEDELTA`, `STEPCOUNTDELTA`, `STROKESDELTA`, `SKITURN`, `SKIHEADER`, `APPBUNDLEID` |
 | `extensions` | object[] | each object has a `type` (for example `"SummaryExtension"`); section 5 |
 | `workoutAchievements` | object[] | `{"type": ..., "value": double, "replacedByWorkout": {"present": bool}}`; `type` is one of `TIME_FOR_100M`, `TIME_FOR_500M`, `TIME_FOR_1KM`, `TIME_FOR_5KM`, `TIME_FOR_10KM`, `TIME_FOR_HALF_MARATHON`, `TIME_FOR_MARATHON`, `AVERAGE_PACE`, `AVERAGE_SPEED`, `DISTANCE`. Units of `value`: not documented. |
 | `achievements` | string[] | not described |
@@ -525,11 +594,9 @@ the fields above (section 4).
 | Get workout (without location points) | `GET /v2/workouts/{workoutKey}/summary` |
 | Export FIT | `GET /v2/workout/exportFit/{workoutIdOrKey}` (note: `workout`, singular) |
 
-- The list takes the same query parameters and gives the same answer as v3 (documented).
-- The workout schema is identical to v3.
-- Differences to v3: v2 has **no `extensions` query parameter**; v2 "get" includes location
-  points, and `/summary` leaves them out. How location points appear in the JSON is **not
-  documented**.
+- Same list parameters, same answer and same workout schema as v3 (documented).
+- Differences: v2 has **no `extensions` parameter**; v2 "get" includes location points and
+  `/summary` leaves them out. How location points appear in the JSON is **not documented**.
 - The how-to-start example still calls `/v2/workouts`. New code uses v3.
 
 ### 3.6 SUUNTO WORKOUT DESCRIPTION API (`/v1/workouts`)
@@ -538,11 +605,10 @@ the fields above (section 4).
 POST https://cloudapi.suunto.com/v1/workouts/addinfo/{workoutId}
 ```
 
-- "Add additional info to workout description." `workoutId`: string, "ID of the workout to be
-  modified" (whether the key or the numeric id: not documented).
-- **The request body is not documented** (no schema, no example).
-- Answer: 200 `application/json` (body not documented). Errors: 400, 403, 500.
-- Not used by MCP for Suunto v1.
+"Add additional info to workout description." `workoutId`: string, "ID of the workout to be
+modified" (key or numeric id: not documented). **The request body is not documented** (no
+schema, no example). Answer: 200 `application/json` (body not documented). Errors: 400, 403,
+500. Not used by MCP for Suunto v1.
 
 ### 3.7 SUUNTO ROUTE API (`/v2/route`)
 
@@ -550,9 +616,18 @@ POST https://cloudapi.suunto.com/v1/workouts/addinfo/{workoutId}
 | --- | --- | --- |
 | List routes | `GET /v2/route` | JSON list of `PartnerRoute` |
 | Get route | `GET /v2/route/{oid}` | `PartnerRoute` |
-| Export GPX | `GET /v2/route/{oid}/export` with `Accept: application/gpx+xml` | GPX |
-| Import GPX | `POST /v2/route/import?activities=1,2` with a GPX body | 200 `application/json` (body not documented) |
+| Export GPX | `GET /v2/route/{oid}/export` with `Accept: application/gpx+xml` (required) | GPX |
+| Import GPX | `POST /v2/route/import?activities=1,2` with a GPX body, `Content-Type: application/gpx+xml` | 200 `application/json` (body not documented) |
 | Update | `PUT /v2/route/{oid}` with `Content-Type` and `Accept: application/gpx+xml` | updated GPX |
+
+- There is **no delete** operation.
+- Export without the `Accept` header answers 500 (unverified).
+- Import: the 200 body is not documented; one client reads `{"items": [{"id": ...}]}`
+  (unverified). Limits on file size or number of points: **not documented**. Imported routes
+  appear as `PRIVATE` (unverified).
+- Watch sync: routes "are shown in Suunto App and can be then synched to Suunto watches for
+  navigation" (FAQ); the user "can choose to use [them] in watch" (route page). The route object
+  has `watchEnabled`.
 
 List query parameters (documented):
 
@@ -581,7 +656,7 @@ from `/route-description`:
 | `id` | route id (`oid` in paths) |
 | `description` | the example shows the route name here; there is no `name` field |
 | `visibility` | string; `PRIVATE` in this example, `public` in the webhook example; other values not documented |
-| `activityIds` | Suunto App activity ids; the schema enum is 0..93 |
+| `activityIds` | Suunto App activity ids (int32 list, no enum). A separate `activities` schema in the same API lists 0..93, which is out of date: the webhook example uses 101 and 102, and the activity list now goes to 121. |
 | `startPoint`, `centerPoint`, `endPoint` | `{altitude, latitude, longitude}` (altitude unit not documented) |
 | `created`, `modified` | epoch ms (example only) |
 | `averageSpeed` | unit not documented (m/s, unverified) |
@@ -591,7 +666,9 @@ from `/route-description`:
 GPX rules (documented on `/route-description`):
 
 - Import: routes from `rte` or `trk` elements; **each `rte`/`trk` becomes a separate route**.
-  Imported per point: latitude, longitude, elevation, name, type.
+  Imported per point: latitude, longitude, elevation, name, type. The route page example writes
+  elevation as `<elevation>`, while standard GPX and Suunto's own export use `<ele>`. Which one
+  the import reads is unverified. Send `<ele>`.
 - Route name priority: `rte.name`/`trk.name`, `rte`/`trk` description, `metadata.name`,
   `metadata.description`, else "Unnamed route". A single `metadata` link is used as a back link.
 - Activities come only from the `activities` query parameter (comma-separated Suunto App ids).
@@ -608,10 +685,10 @@ GPX rules (documented on `/route-description`):
   `Rock`, `Roundabout_exit_1_turn` to `Roundabout_exit_5_turn`, `Roundabout_exit_n_turn`, `Rub`,
   `Scrape`, `Sharp_left_turn`, `Sharp_right_turn`, `Shot`, `Sight`, `Slight_left_turn`,
   `Slight_right_turn`, `Smallgame`, `Stand`, `Straight_turn`, `Trail`, `Trailcam`, `U_turn`,
-  `Valley`, `Water`, `Water_point`, `Waterfall`, `Waypoint`, `Wreck`.
-- Watches may shorten names and drop characters they cannot show.
-- Export GPX uses the namespace `xmlns:suunto="http://www.suunto.com/xmlschemas/RouteExtension/v1"`
-  with `metadata/extensions/suunto:route` holding `suunto:id`, `suunto:revision` (for example
+  `Valley`, `Water`, `Water_point`, `Waterfall`, `Waypoint`, `Wreck`. Watches may shorten names.
+- Export GPX uses the namespace `xmlns:suunto="http://www.suunto.com/xmlschemas/RouteExtension/v1"`,
+  `creator="Suunto app"`, `metadata/author/name` (the username), and
+  `metadata/extensions/suunto:route` holding `suunto:id`, `suunto:revision` (for example
   `1791291783072`), `suunto:activityIds/suunto:activityId` and `suunto:turnWaypointsEnabled`;
   route points may carry `extensions/suunto:routePoint` with `suunto:name`, `suunto:type`,
   `suunto:description`.
@@ -619,8 +696,8 @@ GPX rules (documented on `/route-description`):
 Update rules (documented): first export the GPX, edit it, then PUT it. The GPX must contain
 `suunto:id` (equal to `oid`) and the current `suunto:revision`. A stale revision gives **409**
 ("Fetch the latest GPX ... and retry"). 400: invalid GPX, missing id or revision, id mismatch, or
-not exactly one route. 403: no permission. 404: route not found. The answer is the full GPX with a
-new revision. The description shows the URL `https://cloudapi-partner.suunto.cn/v2/route/{oid}`;
+not exactly one route. 403: no permission. 404: route not found. 500 is also listed. The answer
+is the full GPX with a new revision. The description shows the URL `https://cloudapi-partner.suunto.cn/v2/route/{oid}`;
 on the global API the path is `https://cloudapi.suunto.com/v2/route/{oid}` (unverified).
 
 Errors for list, get and export: 400, 401, 403, 404. Import: 400, 403, 500.
@@ -634,10 +711,13 @@ Errors for list, get and export: 400, 401, 403, 404. Import: 400, 403, 500.
 | Create | `POST /v2/poi/create` | `PointOfInterestCreateRequest` | `PointOfInterestResult` |
 | Upsert | `PUT /v2/poi/{poiKey}` | `PointOfInterestUpsertRequest` | `PointOfInterestResult` |
 
-- `limit`, `offset`: int32; defaults and maximum not documented.
-- There is **no delete** operation.
+- POIs "are shown in the user's Suunto profile and can be synchronized to compatible Suunto
+  watches for navigation" (API description).
+- `limit`, `offset`: int32; defaults and maximum not documented. There is **no delete**.
 - Rules (documented): `watchEnabled` must be `true`; `point.type` must be a `PoiType` value; for
   upsert, `poiKey` in the path must equal `key` in the body. `key` is optional on create.
+  Required fields: `point` (with `x`, `y`, `type`) and `watchEnabled`, plus `key` on upsert.
+  Upsert creates the POI when the key does not exist yet.
 - Errors: 400, 403, 500; get also 404.
 
 Documented example answer:
@@ -651,14 +731,9 @@ Documented example answer:
 
 | Field | Notes |
 | --- | --- |
-| `pointOfInterest.key` | unique key |
-| `point.x` | **longitude** (schema) |
-| `point.y` | **latitude** (schema) |
-| `point.z` | altitude (unit not documented) |
-| `point.name` | string |
-| `point.type` | `PoiType` int, below |
-| `activityId` | Suunto activity id |
-| `country`, `locality` | strings |
+| `point.x`, `point.y`, `point.z` | **longitude**, **latitude** (schema), altitude (unit not documented) |
+| `point.name`, `point.type` | string; `PoiType` int (below) |
+| `key`, `activityId`, `country`, `locality` | unique key; Suunto activity id; strings |
 | `creation`, `modified` | int64 timestamps; unit not documented, example in seconds |
 | `errorCode` | int32, next to `pointOfInterest` in each result; meaning not documented |
 
@@ -676,21 +751,17 @@ Documented example answer:
 Flow (documented on `/how-to-workout-upload`):
 
 1. **Init**: `POST https://cloudapi.suunto.com/v2/upload` (operation path `/`), JSON body, all
-   fields optional:
-
-   | Field | Type | Notes |
-   | --- | --- | --- |
-   | `description` | string | workout description |
-   | `comment` | string | "use it as notes" |
-   | `notifyUser` | bool | default `true`; push notification to the user. Set `false` for bulk uploads. |
-   | `privacy` | string | `DEFAULT`, `PRIVATE`, `FOLLOWERS` or `PUBLIC`; `DEFAULT` or missing uses the user's default (how-to page only; not in the schema) |
-
+   fields optional: `description` (string), `comment` (string, "use it as notes"), `notifyUser`
+   (bool, default `true`, push notification; set `false` for bulk uploads), `privacy`
+   (`DEFAULT`, `PRIVATE`, `FOLLOWERS` or `PUBLIC`; how-to page only, not in the schema).
    Answer (`Upload`): `id`, `url` (an Azure Blob SAS URL), `headers` (`{"x-ms-blob-type": "BlockBlob"}`),
    `method` (`"PUT"`), `description`, `comment`, `dataType` (`"FIT"`), `notifyUser`, `curlString`
    (for testing only; "do not use it in your application"). Errors: 400, 403, 422 (wrong
    parameters, for example an unsupported data type).
 2. **Upload**: send the FIT file with the given `method` (PUT), `url` and `headers`. Azure answers
-   **201 Created**. Only FIT is supported. How long the URL stays valid: not documented.
+   **201 Created**. Only FIT is supported. How long the URL stays valid: not documented. In the two
+   examples the SAS expiry (`se=`) is 12 hours and 24 hours after the creation time held in the
+   upload `id` (its first 8 hex digits are a Unix time; example only).
 3. **Status**: `GET https://cloudapi.suunto.com/v2/upload/{id}`. Answer (`UploadStatus`): `id`,
    `description`, `dataType`, `status`, `message`, `workoutKey`, `comment`, `notifyUser`; the
    example also has `name` and `webUrl` (`https://www.suunto.com/move/username/<workoutKey>`).
@@ -755,9 +826,7 @@ Guide ZIP format (documented, compact):
 - A step may hold a `route` (`points` with `latitude`, `longitude`, optional `distance` m;
   `distance` m; `width` m) for the route conditions.
 - The how-to example uses keys not in the reference (`"trigger"` in steps, a step type
-  `"notification"`). Follow the reference.
-- Watches render only a minimum character set reliably. Guides work on Suunto 3, 5 and 9
-  families (page text).
+  `"notification"`). Follow the reference. Watches render only a small character set reliably.
 
 Not used by MCP for Suunto v1.
 
@@ -769,14 +838,12 @@ MCP for Suunto v1 does not use webhooks. Short facts for later (documented on `/
 
 - Set the notification URLs and a **notification secret** in the OAuth app settings. Routes have
   their own "Route Notification Url".
-- Types (`type` field): `WORKOUT_CREATED`, `ROUTE_CREATED`, `SUUNTO_247_ACTIVITY_CREATED`,
-  `SUUNTO_247_SLEEP_CREATED`, `SUUNTO_247_RECOVERY_CREATED`. The page says "three types" but lists
-  five.
+- Types (`type` field; the page says "three types" but lists five): `WORKOUT_CREATED`,
+  `ROUTE_CREATED`, `SUUNTO_247_ACTIVITY_CREATED`, `SUUNTO_247_SLEEP_CREATED`,
+  `SUUNTO_247_RECOVERY_CREATED`.
 - Every JSON body has `type` and `username` (the `user` claim of section 2.5).
-  - Workout: `workout` (the workout object of 3.4.3, for example `workoutKey`, `activityId`,
-    `startTime` ms, `totalTime`, `energyConsumption`, `startPosition`, `stepCount`,
-    `totalAscent`, `totalDescent`, `totalDistance`, `hrdata`, `avgSpeed`, `maxSpeed`,
-    `timeOffsetInMinutes`) and `gear` (`{"manufacturer": "Suunto", "name": "Suunto Vertical", "productType": "SPORT_WATCH"}`).
+  - Workout: `workout` (a subset of the workout object of 3.4.3, `startTime` in ms) and `gear`
+    (`{"manufacturer": "Suunto", "name": "Suunto Vertical", "productType": "SPORT_WATCH"}`).
   - Route: `route` (a `PartnerRoute`). The route page says it fires on create **and** on modify;
     its older example has no `type`.
   - 247: `samples`, the same items as the matching `/247samples` answers.
@@ -807,32 +874,45 @@ From the workout list example:
  "performanceLevel": null}
 ```
 
-No unit is documented. Readings (all **unverified**):
+No unit is documented. Readings:
 
 | Field | Likely meaning and unit | Why |
 | --- | --- | --- |
-| `pte` | peak training effect | FIT `total_training_effect` is "PeakTrainingEffect" |
-| `feeling` | 1 (worst) to 5 (best) | FIT developer field `feeling`, range 1-5 |
-| `avgTemperature`, `maxTemperature` | **kelvin** | `302.44998` is 29.3 degrees C; as Celsius it would be impossible on a wrist |
-| `peakEpoc` | EPOC peak | FIT field `peak_epoc` (documented there with unit "l/kg") |
-| `avgPower`, `maxPower` | watts | FIT power fields |
-| `avgCadence`, `maxCadence` | **Hz** (revolutions or step pairs per second) | `0.98` per second is 59 per minute; guide targets use Hz for cadence |
-| `ascentTime`, `descentTime` | seconds | `1178 + 1043` is below `totalTime` 2686.03 |
+| `pte` | peak training effect (unverified) | FIT `total_training_effect` is "PeakTrainingEffect" |
+| `feeling` | 1 (worst) to 5 (best) (unverified) | FIT developer field `feeling`, range 1-5 |
+| `avgTemperature`, `maxTemperature` | **kelvin** (likely) | `302.44998` is 29.3 degrees C; as Celsius it would be impossible on a wrist |
+| `peakEpoc` | EPOC peak (unverified) | FIT field `peak_epoc` (documented there with unit "l/kg") |
+| `avgPower`, `maxPower` | watts (unverified) | FIT power fields |
+| `avgCadence`, `maxCadence` | **Hz** (revolutions or step pairs per second) (unverified) | `0.98` per second is 59 per minute; guide targets use Hz for cadence |
+| `ascentTime`, `descentTime` | seconds (likely) | `1178 + 1043` is below `totalTime` 2686.03 |
 | `performanceLevel` | unknown | |
 
-### 5.2 Undocumented extensions
+Newer watches also put a `gear` object here: `{manufacturer, name, displayName, serialNumber,
+softwareVersion, hardwareVersion}` (likely; open-wearables).
 
-The JSON format of **every other extension in the list of 3.4 is not documented**. That includes
-`DiveHeaderExtension`, `WeatherExtension`, `FitnessExtension`, `IntensityExtension`,
-`SkiExtension`, `SwimmingHeaderExtension`, `HeartRateExtension`, the lap and marker extensions,
-and all 22 `...StreamExtension` types (for example `HeartrateStreamExtension`). The format of
-stream points is not documented either.
+### 5.2 Other extensions (third-party evidence only)
 
-Rules for the code: request extensions by name, pass unknown objects through as they are, never
-assume a unit, and treat every field as optional. Record real shapes in this file once seen.
-For dive data the documented source is the FIT file (`/fit-description`: `max_depth` and
-`avg_depth` in metres, `surface_interval` in seconds, `dive_mode`, gas messages with
-`oxygen_content` and `helium_content` percent, `gf_low`, `gf_high`).
+Suunto documents the JSON format of **no other extension in the list of 3.4**. The shapes below
+come from third-party code. Treat them as hints, not as a contract.
+
+| Extension | Shape seen | Label and source |
+| --- | --- | --- |
+| Stream extensions (`HeartrateStreamExtension`, `SpeedStreamExtension`, `AltitudeStreamExtension`, `CadenceStreamExtension` and similar) | `{"type": ..., "points": [{"timestamp": ..., "value": ...}, ...]}`. Speed values in m/s. | likely; hicso21 (partner API code) |
+| Point `timestamp` in streams | absolute epoch ms, not relative | unverified; seen only in code for the internal sports-tracker API (workout-tracker) |
+| `HeartrateStreamExtension` unit | bpm or Hz (beats per second); one client defends against Hz | unverified |
+| `LocationStreamExtension` | `{"type": ..., "locationPoints": [{"timestamp", "latitude", "longitude", "altitude", optional "speed", "bearing", "ehpe"}]}` | likely; hicso21 (the optional fields come from internal-API types) |
+| `PauseMarkerExtension` | `pauseMarkers: [{startTime, endTime (epoch ms), automatic}]` | likely; open-wearables |
+| `IntensityExtension` | `zones.heartRate.<zone>.totalTime` | likely; hicso21 |
+| `DiveHeaderExtension` | `maxDepth` (m), `avgDepth`, `diveTime` (s), `pauseDuration`, `maxDepthTemperature` (kelvin), `diveMode`, `diveNumberInSeries`, `surfaceTime`, `gasesUsed`, `gasQuantitites` (spelled like this), `gasConsumption`, `algorithmLock`, `cns`, `otu`, `personalSetting`, `altitudeSetting`, `algorithm`, `minGF`, `maxGF`. Units of `surfaceTime` and the gas values unknown. | unverified for the partner API; seen only from the internal sports-tracker API (submersion test fixture) |
+| `DepthStreamExtension`, `TemperatureStreamExtension` | probably the `points` pattern | unverified |
+| `WeatherExtension`, `FitnessExtension`, `SkiExtension`, `SwimmingHeaderExtension`, `HeartRateExtension`, lap and marker extensions | nothing known | not documented |
+
+Rules for the code: request extensions by name (an unknown name fails the whole call, 3.4), pass
+unknown objects through as they are, never assume a unit, and treat every field as optional.
+Record real shapes in this file once seen. For dive data the documented source is the FIT file
+(`/fit-description`: `max_depth` and `avg_depth` in metres, `surface_interval` in seconds,
+`dive_mode`, gas messages with `oxygen_content` and `helium_content` percent, `gf_low`,
+`gf_high`).
 
 ---
 
@@ -856,7 +936,7 @@ For dive data the documented source is the FIT file (`/fit-description`: `max_de
     `from`/`to` are epoch ms but `startdate`/`enddate` are ISO strings. Timestamps come with `Z`
     or a local offset (`+02:00`): parse both and keep the offset.
 12. Daily statistics `Value` can be `null`, and a date can appear twice (one null, one not).
-13. A wrong workout key gives **500**, not 404. Check the key format (24 hex characters) first.
+13. A malformed workout key can give **500** (FAQ). Check the key format (24 hex characters) first.
 14. Several doc examples are not valid JSON or disagree with the schema: envelope metadata
     values are strings (`"workoutcount": "1"`), `cadence` can be a number or an object,
     `hrdata` may carry extra keys. Parse defensively and treat every field as optional.
@@ -868,7 +948,17 @@ For dive data the documented source is the FIT file (`/fit-description`: `max_de
 19. Guides: only your own guides are listed; `owner` must equal the OAuth app name; duplicate
     `externalId` gives 409.
 20. Polling is discouraged everywhere and prohibited for the routes list.
-21. The FAQ is partly outdated (sleep, POI, webhooks for daily data).
+21. The FAQ is partly outdated (sleep, POI, webhooks for daily data); so is the route page on POIs.
+22. Store the newest refresh token from every token answer and run only one refresh per user at a
+    time; an old refresh token may stop working after one use.
+23. Do not delete a user's tokens on the first `invalid_grant`: Suunto has sent false ones during
+    an outage.
+24. Limit answers are not documented: expect 429 (rate), 403 with a quota text (weekly quota),
+    maybe 401 with "RateLimitExceeded", and 503 on 247. None of them means "token expired".
+25. The 247 doc example call spans 212 days; the real maximum is 28 days.
+26. An unknown name in `extensions` fails the whole workout call with 400 (likely).
+27. Send the `state` parameter on authorize and check it on return (likely echoed); treat an
+    `error` parameter on the redirect as a refusal.
 
 ---
 
@@ -876,15 +966,19 @@ For dive data the documented source is the FIT file (`/fit-description`: `max_de
 
 These need a real account and a real call.
 
-1. **Q1 Authorize.** Is `state` passed back? Is `scope` accepted, with values other than
-   `workout`? What does the redirect carry when the user refuses?
-2. **Q2 Token request.** Form body or query string (or both)? Exact 400 and 401 bodies?
-3. **Q3 Refresh.** New refresh token on refresh? Does the old one stop working? Refresh token
-   lifetime, and does it carry `exp`?
-4. **Q4 `user`.** Is there a `user` field in the token answer, or only the claim? Other claims?
-5. **Q5 Deauthorize.** Effect on tokens; any notice when the user disconnects in the Suunto App?
-6. **Q6 Limits.** Production rate limits; is the Developer limit per key; status and body when a
-   limit is hit (Azure API Management usually sends 429)?
+1. **Q1 Authorize.** `state` is likely passed back: confirm. Does `scope` change anything? On a
+   refusal, is it `error=access_denied`? Is PKCE supported?
+2. **Q2 Token request.** Form body likely works (and the query string too): confirm. Exact 400
+   (`invalid_grant`, likely) and 401 bodies?
+3. **Q3 Refresh.** A new refresh token comes back (likely): does the old one stop working at once?
+   Refresh token lifetime, and does it carry `exp`?
+4. **Q4 `user`.** The `user` field is likely in the `authorization_code` answer: confirm, and
+   check the refresh answer. Meaning of the `sub`, `uk` and `ukv` claims.
+5. **Q5 Deauthorize.** Effect on tokens and webhooks; any notice when the user disconnects in the
+   Suunto App? What does a call with a revoked token answer?
+6. **Q6 Limits.** Production rate limits; is the Developer limit per key; confirm 429 for the
+   minute limit and 403 with `Retry-After` for the weekly quota; when does a 401
+   "RateLimitExceeded" happen?
 7. **Q7 Bearer.** Is the `Bearer` prefix required, or is the raw token accepted too?
 8. **Q8 Workout list.** Sort order, maximum `limit`, meaning of `metadata.workoutcount` and
    `metadata.until`; does the list include `extensions`?
