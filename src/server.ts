@@ -253,6 +253,8 @@ function loginPage(res: ServerResponse, status: number, title: string, text: str
       "x-content-type-options": "nosniff",
       "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'",
     });
+    // "close" also comes when the browser went away before the page was sent: never wait forever.
+    res.once("close", () => resolve());
     res.end(body, () => resolve());
   });
 }
@@ -324,12 +326,16 @@ export async function runLogin(config: AppConfig, opts: LoginOptions): Promise<L
   const timeoutMs = opts.timeoutMs ?? LOGIN_TIMEOUT_MS;
   const url = authorizeUrl(config.suunto.endpoints, keys.clientId, redirectUri, state);
 
+  /** A callback with the right state arrived (or the time is up): no other one is handled. */
   let finished = false;
+  let settled = false;
   let settle: { resolve: (r: LoginResult) => void; reject: (e: unknown) => void } | undefined;
   const result = new Promise<LoginResult>((resolve, reject) => {
     settle = { resolve, reject };
   });
   const finish = (outcome: { ok: LoginResult } | { error: unknown }) => {
+    if (settled) return;
+    settled = true;
     if ("ok" in outcome) settle!.resolve(outcome.ok);
     else settle!.reject(outcome.error);
   };
@@ -388,10 +394,8 @@ export async function runLogin(config: AppConfig, opts: LoginOptions): Promise<L
     handle(req, res).catch((error: unknown) => {
       if (!res.headersSent) res.writeHead(500, { "content-type": "text/plain; charset=utf-8" });
       res.end("Internal error");
-      if (!finished) {
-        finished = true;
-        finish({ error });
-      }
+      // Only a failure of the one callback that counts ends the login.
+      if (finished) finish({ error });
     });
   };
 

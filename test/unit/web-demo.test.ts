@@ -1,22 +1,22 @@
 /**
- * The demo account for app reviewers: a sample PADI logbook built into the server, kept in memory
+ * The demo account for app reviewers: sample Suunto data built into the server, kept in memory
  * and reset every day. Exercised end to end over HTTP with the real OAuth flow, like Claude.
  *
- * The operator's PADI addresses point at a local "trap" server that counts every connection, and
- * fetch is spied on: the demo account must never reach a network. A normal user on the same server
- * is the control: their tools do reach the trap.
+ * The operator's Suunto addresses point at a local "trap" server that counts every connection,
+ * and fetch is spied on: the demo account must never reach a network. A normal user on the same
+ * server is the control: connecting Suunto does reach the trap.
  */
 import { createServer, type Server } from "node:http";
 import net, { type AddressInfo } from "node:net";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { afterAll, beforeAll, describe, expect, it, vi, type MockInstance } from "vitest";
-import { DEMO_ADDRESS, DEMO_NAME, DemoRegistry, demoRegistry, lastDemoReset, nextDemoReset, resetDemo } from "../../src/demo/index.js";
-import { addDays, todayInZone } from "../../src/util/dates.js";
+import { DEMO_NAME, DEMO_TIME_ZONE, DEMO_USERNAME, DemoRegistry, demoRegistry, lastDemoReset, nextDemoReset, resetDemo } from "../../src/demo/index.js";
 import { createWebApp, type WebApp } from "../../src/web/server.js";
 import { Browser, connectMcp, setBase, TestOAuthClient } from "../helpers/web-client.js";
 
 const PASSWORD = "correct horse battery";
-const TZ = "Europe/Zurich";
+/** Invented app keys: the trap never checks them. */
+const KEYS = { clientId: "invented-client", clientSecret: "invented-secret-value", subscriptionKey: "0123456789abcdef0123456789abcdef" };
 
 let web: WebApp;
 let server: Server;
@@ -45,16 +45,8 @@ beforeAll(async () => {
     host: "127.0.0.1",
     port: 0,
     dataDir: ":memory:",
-    operator: {
-      PADI_COGNITO_URL: `${t}/cognito/`,
-      PADI_AUTH_URL: `${t}/auth/api`,
-      PADI_LOGBOOK_URL: `${t}/api/Logbook`,
-      PADI_DIRECT_URL: `${t}/v1/graphql`,
-      PADI_INSTRUCTOR_URL: `${t}/api/Logbook/instructor`,
-      PADI_DIRECT_INSTRUCTOR_URL: `${t}/instructor`,
-      PADI_ECARD_URL: `${t}/api/eCard`,
-      PADI_IMAGES_URL: `${t}/api/Image`,
-    },
+    operator: { SUUNTO_OAUTH_URL: `${t}/oauth-host`, SUUNTO_API_URL: `${t}/api-host` },
+    suuntoKeys: KEYS,
     log: (m) => logs.push(m),
   });
   server.on("request", web.app);
@@ -109,7 +101,7 @@ describe("creating a demo account", () => {
     expect(reviewerPassword).toMatch(/^[A-Za-z0-9]{6}(-[A-Za-z0-9]{6}){3}$/);
 
     const user = web.ctx.store.getUserByEmail(reviewerEmail)!;
-    expect(user).toMatchObject({ demo: true, isAdmin: false, disabled: false, pending: false, hasPadi: false });
+    expect(user).toMatchObject({ demo: true, isAdmin: false, disabled: false, pending: false, hasSuunto: false });
     // Only the scrypt hash is stored, never the password itself.
     const row = web.ctx.store.db.prepare("SELECT password_hash FROM users WHERE id = ?").get(user.id) as { password_hash: string };
     expect(row.password_hash).toMatch(/^scrypt\$/);
@@ -151,41 +143,36 @@ describe("the demo user's pages", () => {
     expect((await reviewer.login(reviewerEmail, reviewerPassword)).status).toBe(303);
   });
 
-  it("shows the demo notice instead of the PADI form", async () => {
+  it("shows the demo notice instead of the Suunto connection", async () => {
     const { res, html } = await reviewer.page("/account");
     expect(res.status).toBe(200);
     expect(html).toContain("This is a demo account.");
     expect(html).toContain("every day at 04:00 (Swiss time)");
-    expect(html).toContain("Nothing is ever sent to PADI or to a PADI Pro");
-    expect(html).toContain(`${DEMO_NAME} &lt;${DEMO_ADDRESS}&gt;`);
-    expect(html).toContain("Demo account with a sample logbook.");
+    expect(html).toContain("Nothing is ever sent to Suunto.");
+    expect(html).toContain(`Athlete: ${DEMO_NAME}. Suunto username: ${DEMO_USERNAME}. Time zone: ${DEMO_TIME_ZONE}.`);
+    expect(html).toContain("Demo account with sample Suunto data.");
     expect(html).toContain('action="/account/demo"');
     expect(html).toContain('name="readOnly"');
     // The connection card, as for any account that is set up.
     expect(html).toContain(`${base}/mcp`);
-    // No PADI form.
-    for (const absent of ['name="password"', 'action="/account/padi"', "Save and test", "Remove PADI connection"]) expect(html).not.toContain(absent);
+    // No Suunto connection: no connect button, no Suunto page in the form targets.
+    for (const absent of ['action="/account/suunto/connect"', "Connect Suunto", "Remove Suunto connection"]) expect(html).not.toContain(absent);
+    expect(res.headers.get("content-security-policy")).toMatch(/form-action 'self'$/);
   });
 
-  it("never stores a PADI connection for a demo account", async () => {
+  it("never connects Suunto for a demo account", async () => {
     const { csrf } = await reviewer.page("/account");
-    const res = await reviewer.post("/account/padi", { _csrf: csrf, email: "someone@example.com", password: "invented-password" });
+    const res = await reviewer.post("/account/suunto/connect", { _csrf: csrf });
     expect(res.status).toBe(403);
-    expect(await res.text()).toContain("it cannot be connected to a PADI account");
+    expect(await res.text()).toContain("it cannot be connected to a Suunto account");
+    expect(web.ctx.store.db.prepare("SELECT COUNT(*) AS n FROM suunto_oauth_states").get()).toEqual({ n: 0 });
+    // A callback is ignored too.
+    expect((await reviewer.fetch("/suunto/callback?code=c&state=s")).headers.get("location")).toBe("/account");
     const row = web.ctx.store.db.prepare("SELECT service_enc FROM users WHERE id = ?").get(reviewerId) as { service_enc: string | null };
     expect(row.service_enc).toBeNull();
     // Also refused below the web pages.
-    web.ctx.store.savePadiSettings(reviewerId, {
-      email: "x@example.com",
-      refreshToken: "rt-invented",
-      loginMethod: "cognito",
-      clientId: "c",
-      affiliateId: "1",
-      units: "auto",
-      readOnly: false,
-      connectedAt: 1,
-    });
-    expect(web.ctx.store.getUser(reviewerId)!.hasPadi).toBe(false);
+    web.ctx.store.saveSuuntoSettings(reviewerId, { username: "x", refreshToken: "rt-invented", clientId: "c", units: "metric", readOnly: false, connectedAt: 1 });
+    expect(web.ctx.store.getUser(reviewerId)!.hasSuunto).toBe(false);
   });
 
   it("keeps the connected apps and security pages", async () => {
@@ -203,9 +190,9 @@ describe("the demo user's pages", () => {
     const query = new URLSearchParams({ client_id, redirect_uri: "https://claude.ai/api/mcp/auth_callback", response_type: "code", code_challenge: "x".repeat(43), code_challenge_method: "S256", resource: `${base}/mcp` });
     const res = await reviewer.fetch(`/authorize?${query}`);
     const { html } = await reviewer.page(res.headers.get("location")!);
-    expect(html).toContain("This is a demo account: the app sees a sample logbook built into this server.");
-    expect(html).not.toContain("You have not connected your PADI account yet");
-    expect(html).toContain("log new dives, change and delete dives");
+    expect(html).toContain("This is a demo account: the app sees invented sample data built into this server. Nothing is sent to Suunto.");
+    expect(html).not.toContain("You have not connected your Suunto account yet");
+    expect(html).toContain("and add new ones to your Suunto App");
   });
 });
 
@@ -223,43 +210,42 @@ describe("an AI app on the demo account", () => {
 
   it("offers every tool and says it is a demo account", async () => {
     const names = (await client.listTools()).tools.map((x) => x.name);
-    expect(names).toEqual(expect.arrayContaining(["padi_account_info", "logbook_list_dives", "logbook_create_dive", "logbook_update_dive", "logbook_delete_dive"]));
-    const info = await t.json("padi_account_info", { check: true });
+    expect(names).toEqual(expect.arrayContaining(["suunto_account_info", "suunto_list_workouts", "suunto_sleep", "suunto_import_route", "suunto_create_poi"]));
+    const info = await t.json("suunto_account_info", { check: true });
     expect(info.demo_account).toContain("This is a demo account");
-    expect(info.name).toBe(DEMO_NAME);
+    expect(info).toMatchObject({ demo: true, username: DEMO_USERNAME, time_zone: DEMO_TIME_ZONE, units: "metric" });
+    expect(info.check).toMatchObject({ ok: true });
     expect(web.ctx.demo.peek(reviewerId)).toBeDefined();
   });
 
-  it("lists the sample dives and logs a new one", async () => {
-    const before = await t.json("logbook_list_dives", { limit: 5 });
-    expect(before.total).toBeGreaterThan(10);
-    const date = addDays(todayInZone(TZ), -1);
-    const created = await t.json("logbook_create_dive", { title: "Review dive", date, location: "House reef", dive_type: "shore", max_depth: 18, bottom_time_min: 45 });
-    expect(JSON.stringify(created)).toContain("Review dive");
-    const after = await t.json("logbook_list_dives", { limit: 5 });
-    expect(after.total).toBe(before.total + 1);
+  it("lists the sample workouts and adds a point of interest", async () => {
+    const workouts = await t.json("suunto_list_workouts", { limit: 5 });
+    expect(workouts.count).toBe(5);
+    const before = await t.json("suunto_list_pois", {});
+    const created = await t.json("suunto_create_poi", { name: "Review hut", latitude: 46.5, longitude: 8.1 });
+    expect(JSON.stringify(created)).toContain("Review hut");
+    const after = await t.json("suunto_list_pois", { limit: 100 });
+    expect(JSON.stringify(after)).toContain("Review hut");
+    expect(JSON.stringify(before)).not.toContain("Review hut");
     // The activity log works as for any account.
-    expect(web.ctx.store.recentActivity(reviewerId)).toContainEqual(expect.objectContaining({ tool: "logbook_create_dive", ok: true }));
+    expect(web.ctx.store.recentActivity(reviewerId)).toContainEqual(expect.objectContaining({ tool: "suunto_create_poi", ok: true }));
   });
 
   it("resetDemo() throws every change away", async () => {
     const before = web.ctx.demo.peek(reviewerId)!.generation;
-    const total = (await t.json("logbook_list_dives", { limit: 1 })).total;
     expect(resetDemo(reviewerId)).toBe(1);
     expect(web.ctx.demo.peek(reviewerId)!.generation).toBe(before + 1);
-    expect((await t.json("logbook_list_dives", { limit: 1 })).total).toBe(total - 1);
-    expect(JSON.stringify(await t.json("logbook_list_dives", { limit: 100 }))).not.toContain("Review dive");
+    expect(JSON.stringify(await t.json("suunto_list_pois", { limit: 100 }))).not.toContain("Review hut");
   });
 
   it("the admin's button resets the demo data too", async () => {
-    const date = addDays(todayInZone(TZ), -2);
-    await t.json("logbook_create_dive", { title: "Temporary dive", date, location: "House reef", dive_type: "boat", max_depth: 12, bottom_time_min: 40 });
+    await t.json("suunto_create_poi", { name: "Temporary spring", latitude: 46.6, longitude: 8.2 });
     const { csrf } = await admin.page("/admin");
     const res = await admin.post("/admin/demo/reset", { _csrf: csrf, id: reviewerId });
     expect(res.status).toBe(303);
     expect(res.headers.get("location")).toBe("/admin?m=demoreset#demo");
     expect((await admin.page("/admin?m=demoreset")).html).toContain("Demo data reset: the account has fresh sample data.");
-    expect(JSON.stringify(await t.json("logbook_list_dives", { limit: 100 }))).not.toContain("Temporary dive");
+    expect(JSON.stringify(await t.json("suunto_list_pois", { limit: 100 }))).not.toContain("Temporary spring");
     // The page now shows when the current data was made.
     expect((await admin.page("/admin")).html).not.toContain("created on first use");
   });
@@ -269,13 +255,14 @@ describe("an AI app on the demo account", () => {
     expect((await reviewer.post("/account/demo", { _csrf: csrf, readOnly: "on" })).status).toBe(303);
     expect(web.ctx.store.getUser(reviewerId)!.demoReadOnly).toBe(true);
     let names = (await client.listTools()).tools.map((x) => x.name);
-    expect(names).toContain("logbook_list_dives");
-    expect(names).not.toContain("logbook_create_dive");
-    expect((await reviewer.page("/account")).html).toContain("Demo account with a sample logbook, read-only.");
+    expect(names).toContain("suunto_list_workouts");
+    expect(names).not.toContain("suunto_create_poi");
+    expect(names).not.toContain("suunto_import_route");
+    expect((await reviewer.page("/account")).html).toContain("Demo account with sample Suunto data, read-only.");
     ({ csrf } = await reviewer.page("/account"));
     await reviewer.post("/account/demo", { _csrf: csrf });
     names = (await client.listTools()).tools.map((x) => x.name);
-    expect(names).toContain("logbook_create_dive");
+    expect(names).toContain("suunto_create_poi");
   });
 
   it("made no network connection at all", () => {
@@ -288,44 +275,50 @@ describe("other accounts", () => {
   const normal = new Browser();
   let normalId = "";
 
-  it("a normal user keeps the PADI form and reaches the operator's servers (control)", async () => {
+  it("a normal user keeps the Connect Suunto button and reaches the operator's servers (control)", async () => {
     web.ctx.store.saveSettings({ ...web.ctx.store.getSettings(), registration: "open" });
     expect((await normal.signup("user@example.com", PASSWORD)).status).toBe(303);
     normalId = web.ctx.store.getUserByEmail("user@example.com")!.id;
     const page = await normal.page("/account");
-    expect(page.html).toContain('name="password"');
+    expect(page.html).toContain('action="/account/suunto/connect"');
     expect(page.html).not.toContain("This is a demo account.");
-    // Save and test goes to the operator's PADI servers (the trap, which drops the connection).
-    const res = await normal.post("/account/padi", { _csrf: page.csrf, email: "bob.diver@example.com", password: "invented-password" });
-    expect(res.status).toBe(400);
-    expect(await res.text()).toContain("Could not sign in to PADI");
-    expect(web.ctx.store.getUser(normalId)!.hasPadi).toBe(false);
+    // Connect Suunto sends the browser to the operator's Suunto host (the trap)...
+    const started = await normal.post("/account/suunto/connect", { _csrf: page.csrf });
+    expect(started.headers.get("location")).toMatch(/\/oauth-host\/oauth\/authorize\?/);
+    // ...and the code exchange of the callback goes there too (the trap drops the connection).
+    const state = new URL(started.headers.get("location")!).searchParams.get("state")!;
+    const res = await normal.fetch(`/suunto/callback?${new URLSearchParams({ code: "invented-code", state })}`);
+    expect(res.headers.get("location")).toBe("/account?m=connectfailed");
+    expect(web.ctx.store.getUser(normalId)!.hasSuunto).toBe(false);
     // The guards notice real connection attempts.
     expect(trapHits).toBeGreaterThan(0);
     expect(foreignFetches().length).toBeGreaterThan(0);
   });
 
   it("an administrator turns a user into a demo account and back", async () => {
-    web.ctx.store.savePadiSettings(normalId, {
-      email: "bob.diver@example.com",
+    web.ctx.store.saveSuuntoSettings(normalId, {
+      username: "bob-runner",
       refreshToken: "rt-invented-bob",
-      loginMethod: "cognito",
-      clientId: "test-client",
-      affiliateId: "10000007",
-      units: "auto",
+      accessToken: "at-invented-bob",
+      accessTokenExpiresAt: Date.now() + 3_600_000,
+      clientId: KEYS.clientId,
+      units: "metric",
       readOnly: false,
       connectedAt: Date.now(),
     });
     let { csrf } = await admin.page("/admin");
     expect((await admin.page("/admin")).html).toMatch(/user@example\.com[\s\S]*?<span class="badge ok">connected<\/span>/);
+    const hits = trapHits;
     await admin.post("/admin/users/action", { _csrf: csrf, id: normalId, action: "demo-on" });
     let user = web.ctx.store.getUser(normalId)!;
-    expect(user).toMatchObject({ demo: true, hasPadi: false });
-    expect(web.ctx.store.getPadiSettings(normalId)).toBeUndefined();
+    expect(user).toMatchObject({ demo: true, hasSuunto: false });
+    expect(web.ctx.store.getSuuntoSettings(normalId)).toBeUndefined();
+    // The Suunto connection ended: the server tried to tell Suunto (the trap), best effort.
+    expect(trapHits).toBeGreaterThan(hits);
     expect((await normal.page("/account")).html).toContain("This is a demo account.");
     const entry = web.ctx.pool.get(user)!;
     expect(entry.services.backend?.kind).toBe("demo");
-    expect(entry.config.padi.email).toBe(DEMO_ADDRESS);
+    expect(entry.config.timeZone).toBe(DEMO_TIME_ZONE);
 
     // A demo account never becomes an administrator.
     ({ csrf } = await admin.page("/admin"));
@@ -337,7 +330,7 @@ describe("other accounts", () => {
     expect(user.demo).toBe(false);
     expect(web.ctx.demo.peek(normalId)).toBeUndefined();
     expect(web.ctx.pool.get(user)).toBeUndefined();
-    expect((await normal.page("/account")).html).toContain('name="password"');
+    expect((await normal.page("/account")).html).toContain('action="/account/suunto/connect"');
     // Administrators are never demo accounts.
     expect(web.ctx.store.setDemo(web.ctx.store.getUserByEmail("admin@example.com")!.id, true)).toBe(false);
   });
@@ -370,21 +363,21 @@ describe("daily reset", () => {
     const registry = new DemoRegistry({ clock: () => now });
     try {
       const account = registry.account("u1");
-      account.logbook.units = "Imperial";
+      const pois = account.activity.pois.length;
+      account.activity.pois.push(account.activity.pois[0]!);
 
       // After midnight but before 04:00: nothing changes.
       now = new Date("2026-11-08T23:30:00Z");
       expect(registry.account("u1").generation).toBe(1);
       now = new Date("2026-11-09T02:59:00Z");
       expect(registry.account("u1").generation).toBe(1);
-      expect(account.logbook.units).toBe("Imperial");
+      expect(account.activity.pois.length).toBe(pois + 1);
 
       // From 04:00 the first use resets the store.
       now = new Date("2026-11-09T03:01:00Z");
       expect(registry.account("u1").generation).toBe(2);
-      expect(account.logbook.units).toBe("Metric");
+      expect(account.activity.pois.length).toBe(pois);
       expect(registry.account("u1").resetAt).toEqual(now);
-      expect(account.logbook.resetAt).toEqual(now);
     } finally {
       registry.clear();
     }
@@ -396,7 +389,8 @@ describe("daily reset", () => {
     try {
       const a = registry.account("a");
       const b = registry.account("b");
-      a.logbook.units = "Imperial";
+      const pois = a.activity.pois.length;
+      a.activity.pois.push(a.activity.pois[0]!);
       const timer = (registry as unknown as { timer: NodeJS.Timeout }).timer;
       expect(vi.getTimerCount()).toBe(1);
       expect(timer.hasRef()).toBe(false);
@@ -406,7 +400,7 @@ describe("daily reset", () => {
       vi.advanceTimersByTime(2000); // 04:00:01
       expect(a.generation).toBe(2);
       expect(b.generation).toBe(2);
-      expect(a.logbook.units).toBe("Metric");
+      expect(a.activity.pois.length).toBe(pois);
       // And again the next day.
       vi.advanceTimersByTime(24 * 3600_000);
       expect(a.generation).toBe(3);
