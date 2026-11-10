@@ -33,8 +33,14 @@ services:
       SUUNTO_CLIENT_ID: ${SUUNTO_CLIENT_ID:-}
       SUUNTO_CLIENT_SECRET: ${SUUNTO_CLIENT_SECRET:-}
       SUUNTO_SUBSCRIPTION_KEY: ${SUUNTO_SUBSCRIPTION_KEY:-}
-      # Optional. Default: https://DOMAIN/suunto/callback (register it in the API Zone).
+      # Optional. Default: https://DOMAIN/suunto/callback (register it in the API Zone). A value
+      # must be on https://DOMAIN with the path /suunto/callback, or the service does not start.
       SUUNTO_REDIRECT_URI: ${SUUNTO_REDIRECT_URI:-}
+      # Optional: limits of the requests to Suunto. Empty means the default: 10 per minute for the
+      # whole service and 100 per user per day; 0 means no limit. Raise them after Suunto accepts
+      # the Production subscription.
+      SUUNTO_CALLS_PER_MINUTE: ${SUUNTO_CALLS_PER_MINUTE:-}
+      SUUNTO_CALLS_PER_USER_PER_DAY: ${SUUNTO_CALLS_PER_USER_PER_DAY:-}
       # Optional: SMTP server for e-mails to administrators about access requests.
       SMTP_URL: ${SMTP_URL:-}
       NOTIFY_FROM: ${NOTIFY_FROM:-}

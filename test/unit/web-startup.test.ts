@@ -120,10 +120,37 @@ describe("deploy files", () => {
   it("pass the Suunto settings to the service and name the Compose project", () => {
     for (const path of ["deploy/docker-compose.yml", "deploy/server/compose.yml"]) {
       const compose = read(path);
-      for (const name of ["SUUNTO_CLIENT_ID", "SUUNTO_CLIENT_SECRET", "SUUNTO_SUBSCRIPTION_KEY", "SUUNTO_REDIRECT_URI"]) {
+      for (const name of [
+        "SUUNTO_CLIENT_ID",
+        "SUUNTO_CLIENT_SECRET",
+        "SUUNTO_SUBSCRIPTION_KEY",
+        "SUUNTO_REDIRECT_URI",
+        "SUUNTO_CALLS_PER_MINUTE",
+        "SUUNTO_CALLS_PER_USER_PER_DAY",
+      ]) {
+        // Unset in .env: Compose passes an empty value, which the service reads as "use the default".
         expect(compose, `${path}: ${name}`).toContain(`${name}: \${${name}:-}`);
       }
       expect(compose, path).toMatch(/^name: suunto-mcp$/m);
+    }
+  });
+
+  it("explain the Suunto call limits with the defaults the service uses, and set none", () => {
+    // What an empty value (as Compose passes an unset one) turns into.
+    const limits = webOptionsFromEnv(env({ SUUNTO_CALLS_PER_MINUTE: "", SUUNTO_CALLS_PER_USER_PER_DAY: "" }), {}, () => {}).callLimits!;
+    for (const path of ["deploy/.env.example", "deploy/server/.env.example"]) {
+      const text = read(path);
+      for (const name of ["SUUNTO_CALLS_PER_MINUTE", "SUUNTO_CALLS_PER_USER_PER_DAY"]) {
+        // Commented out: the defaults apply until the operator sets a value.
+        expect(text, `${path}: ${name}`).toMatch(new RegExp(`^#${name}=$`, "m"));
+        expect(text, `${path}: ${name}`).not.toMatch(new RegExp(`^${name}=`, "m"));
+      }
+      // The comment as one line of text (it is wrapped at about 100 characters).
+      const comment = text.replace(/\n# ?/g, " ");
+      expect(comment, path).toContain(`SUUNTO_CALLS_PER_MINUTE counts the requests of the whole service in any 60 seconds (default ${limits.perMinute},`);
+      expect(comment, path).toContain(`SUUNTO_CALLS_PER_USER_PER_DAY caps each user per UTC day (default ${limits.perUserPerDay})`);
+      expect(comment, path).toContain("0 means no limit; empty means the default.");
+      expect(comment, path).toContain("Raise both after Suunto accepts the Production subscription");
     }
   });
 
