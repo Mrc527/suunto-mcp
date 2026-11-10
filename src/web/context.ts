@@ -1,5 +1,7 @@
 import type { Request, Response } from "express";
 import type { DemoRegistry } from "../demo/index.js";
+import type { SuuntoEndpoints } from "../suunto/endpoints.js";
+import type { SuuntoAppKeys } from "../suunto/oauth.js";
 import type { ServicePool } from "./accounts.js";
 import { layout, type LayoutOptions, type SafeHtml } from "./html.js";
 import { LOCALES, t, type Locale, type MessageKey } from "./i18n/index.js";
@@ -21,11 +23,18 @@ export interface WebContext {
   cookies: Cookies;
   publicUrl: URL;
   mcpUrl: URL;
+  /** The operator's Suunto host overrides (SUUNTO_OAUTH_URL, SUUNTO_API_URL; tests only). Never secrets. */
   operator: Record<string, string>;
+  /** The operator's Suunto app keys. Not set: nobody can connect Suunto yet (demo accounts work). */
+  suuntoKeys?: SuuntoAppKeys;
+  /** Where Suunto sends the browser back after "Connect Suunto" (registered in the Suunto API Zone). */
+  suuntoRedirectUri: string;
+  /** The Suunto hosts (the operator's overrides applied). */
+  suuntoEndpoints: SuuntoEndpoints;
+  /** fetch for every request to Suunto (tests pass a mock; default: the global fetch). */
+  suuntoFetch?: typeof fetch;
   version: string;
   platform: NodeJS.Platform;
-  /** fetch for every request to PADI (tests pass a mock; default: the global fetch). */
-  padiFetch?: typeof fetch;
   log: (m: string) => void;
 }
 
@@ -42,18 +51,28 @@ export const FLASH: Record<string, { kind: "ok" | "error" | "info"; key: Message
   rejected: { kind: "ok", key: "common.flash.rejected" },
   deleted: { kind: "ok", key: "common.flash.deleted" },
   welcome: { kind: "info", key: "common.flash.welcome" },
-  denied: { kind: "info", key: "common.flash.denied" },
+  // The user chose "Don't Allow" on the consent page of an AI app.
+  appdenied: { kind: "info", key: "common.flash.denied" },
   csrf: { kind: "error", key: "common.flash.csrf" },
   lastadmin: { kind: "error", key: "common.flash.lastadmin" },
   demoreset: { kind: "ok", key: "admin.demo.flash.reset" },
+  // "Connect Suunto" (the callback from Suunto's sign-in page).
   connected: { kind: "ok", key: "account.flash.connected" },
-  logbookfailed: { kind: "error", key: "account.flash.logbookFailed" },
+  checkfailed: { kind: "error", key: "account.flash.checkFailed" },
+  denied: { kind: "info", key: "account.flash.denied" },
+  connectfailed: { kind: "error", key: "account.flash.connectFailed" },
+  stateexpired: { kind: "error", key: "account.flash.stateExpired" },
+  notconfigured: { kind: "error", key: "account.flash.notConfigured" },
 };
 
-/** Where to go after saving the PADI connection: only back to a pending consent page. */
-export function returnTo(req: Request): string | undefined {
-  const raw = (typeof req.body?.next === "string" ? req.body.next : undefined) ?? (typeof req.query.next === "string" ? req.query.next : undefined);
+/** `raw` when it is a pending consent page on this site (the only place to return to), else undefined. */
+export function consentReturn(raw: string | undefined): string | undefined {
   return raw && /^\/oauth\/consent\?request=[A-Za-z0-9_-]+$/.test(raw) ? raw : undefined;
+}
+
+/** Where to go after connecting Suunto: only back to a pending consent page. */
+export function returnTo(req: Request): string | undefined {
+  return consentReturn((typeof req.body?.next === "string" ? req.body.next : undefined) ?? (typeof req.query.next === "string" ? req.query.next : undefined));
 }
 
 /**

@@ -21,16 +21,16 @@ const MIGRATIONS: string[] = [
     disabled INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
     last_login_at INTEGER,
-    -- The PADI connection (PadiAccountSettings), encrypted with the user id as associated data.
+    -- The Suunto connection (SuuntoAccountSettings), encrypted with the user id as associated data.
     service_enc TEXT,
     -- When the connection was saved or removed (refreshed tokens do not change it).
     service_updated_at INTEGER,
-    -- The stored PADI sign-in stopped working: the user must sign in again.
-    padi_needs_reconnect INTEGER NOT NULL DEFAULT 0,
+    -- Suunto refused the stored refresh token: the user should connect Suunto again.
+    suunto_needs_reconnect INTEGER NOT NULL DEFAULT 0,
     -- Access requests: accounts that wait for an administrator's approval (they are also disabled).
     pending INTEGER NOT NULL DEFAULT 0,
     request_note TEXT,
-    -- Demo accounts (a sample logbook built into the server, for app reviewers) and their
+    -- Demo accounts (sample Suunto data built into the server, for app reviewers) and their
     -- read-only switch (a demo account has no stored settings to keep it in).
     demo INTEGER NOT NULL DEFAULT 0,
     demo_read_only INTEGER NOT NULL DEFAULT 0,
@@ -112,6 +112,18 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX activity_user ON activity(user_id, at);
   CREATE INDEX activity_user_id ON activity(user_id, id);
+  -- "Connect Suunto" in progress: the OAuth state sent to Suunto (only its SHA-256 hash), who
+  -- started it, and where to go afterwards. Single use, valid for 10 minutes.
+  CREATE TABLE suunto_oauth_states (
+    state_hash TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at INTEGER NOT NULL,
+    -- A pending consent page to return to (/oauth/consent?request=...).
+    next TEXT,
+    -- The browser's time zone, saved with a first connection.
+    time_zone TEXT
+  );
+  CREATE INDEX suunto_oauth_states_user ON suunto_oauth_states(user_id, created_at);
   `,
 ];
 
@@ -123,7 +135,7 @@ export function openDatabase(dataDir: string): Db {
     file = ":memory:";
   } else {
     mkdirSync(dataDir, { recursive: true });
-    file = path.join(dataDir, "padi-mcp.db");
+    file = path.join(dataDir, "suunto-mcp.db");
   }
   const db = new DatabaseSync(file);
   db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");

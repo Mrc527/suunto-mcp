@@ -1,43 +1,38 @@
 /**
- * Account pages: the PADI connection, connected apps, activity and security.
+ * Account pages: the Suunto connection, connected apps, activity and security.
  *
- * "Save and test" signs in to PADI with the e-mail and password from the form, reads the dive
- * count once with the fresh token, and saves the connection only when the sign-in worked. The
- * password is used for that one sign-in and never stored: only the refresh token is kept
- * (encrypted, see store.ts).
+ * "Connect Suunto" runs Suunto's OAuth 2.0 sign-in: this server sends the browser to Suunto's
+ * authorize page with a random, single-use state bound to the signed-in user, and Suunto sends it
+ * back to /suunto/callback with a code. The code is exchanged for tokens once, one test request
+ * counts the workouts of the last 30 days, and the tokens are saved encrypted (see store.ts). This
+ * server never sees the Suunto password. Showing the page never calls Suunto: it shows what was
+ * saved at connect time.
  */
 
 import express, { type Request, type Response, type Router } from "express";
-import { DEMO_ADDRESS, DEMO_NAME, DEMO_TIME_ZONE } from "../demo/index.js";
-import type { BackendCheck, UnitChoice } from "../logbook/types.js";
-import { PadiApi, type ApiMode } from "../padi/api.js";
-import { PadiAuthError, signIn, type PadiAuthErrorCode } from "../padi/auth.js";
-import { endpointsFromEnv } from "../padi/endpoints.js";
-import { PadiSession } from "../padi/session.js";
+import type { UnitChoice } from "../activity/types.js";
+import { DEMO_NAME, DEMO_TIME_ZONE, DEMO_USERNAME } from "../demo/index.js";
+import { SuuntoApi } from "../suunto/api.js";
+import { authorizeUrl, callbackError, exchangeCode, type StoredSuuntoTokens, type TokenResult } from "../suunto/oauth.js";
+import { SuuntoSession } from "../suunto/session.js";
 import { isValidTimeZone } from "../util/dates.js";
-import { describeError, UserFacingError } from "../util/errors.js";
+import { describeError, redact, UserFacingError } from "../util/errors.js";
+import { deauthorizeAtSuunto } from "./accounts.js";
 import { connectCard } from "./connect.js";
-import { bool, page, returnTo, str, type WebContext } from "./context.js";
+import { bool, consentReturn, page, returnTo, str, type WebContext } from "./context.js";
 import { hashPassword, verifyPassword } from "./crypto.js";
-import { isEmail } from "./email.js";
 import { avatar, formatDate, html, type SafeHtml } from "./html.js";
 import { t, th, type MessageKey } from "./i18n/index.js";
 import { serviceIcon, type Service } from "./icons.js";
 import { passwordProblem } from "./routes-auth.js";
-import { csrfOk, locals, perUserLimit, requireUser, setCookie } from "./session.js";
-import type { PadiAccountSettings, User } from "./store.js";
+import { csrfOk, locals, perUserLimit, requireUser, securityHeaders, setCookie } from "./session.js";
+import type { SuuntoAccountSettings, SuuntoConnectionCheck } from "./store.js";
 
-/** Where people with a Google, Apple or Facebook sign-in set a PADI password. */
-const PADI_ACCOUNT_URL = "https://account.padi.com";
-
-const UNIT_CHOICES: readonly UnitChoice[] = ["auto", "metric", "imperial"];
+const UNIT_CHOICES: readonly UnitChoice[] = ["metric", "imperial"];
 const UNIT_LABELS: Record<UnitChoice, MessageKey> = {
-  auto: "account.padi.units.auto",
-  metric: "account.padi.units.metric",
-  imperial: "account.padi.units.imperial",
+  metric: "account.suunto.units.metric",
+  imperial: "account.suunto.units.imperial",
 };
-
-const API_MODES: readonly ApiMode[] = ["proxy", "direct", "auto"];
 
 function unitChoice(value: unknown): UnitChoice | undefined {
   return UNIT_CHOICES.find((u) => u === value);
@@ -51,51 +46,11 @@ function allTimeZones(): string[] {
   return timeZones;
 }
 
-/** Why a PADI sign-in failed, by the PADI client's error code. */
-const SIGN_IN_ERRORS: Record<Exclude<PadiAuthErrorCode, "unknown">, MessageKey> = {
-  bad_credentials: "account.error.padi.badCredentials",
-  challenge: "account.error.padi.challenge",
-  expired: "account.error.padi.expired",
-  not_confirmed: "account.error.padi.notConfirmed",
-  password_reset: "account.error.padi.passwordReset",
-  network: "account.error.padi.network",
-};
-
-/**
- * Why "Save and test" could not sign in to PADI, in the page's language. The PADI client's own
- * texts are English and end with an internal code ("[bad_credentials]"), so they are only used
- * as the detail of an unexpected answer.
- */
-export function signInError(error: unknown): string {
-  return t("account.error.signIn", { error: signInReason(error) });
-}
-
-function signInReason(error: unknown): string {
-  if (!(error instanceof PadiAuthError)) return error instanceof UserFacingError ? error.message : describeError(error);
-  // PADI also refuses a blocked or a disabled account as "wrong e-mail or password".
-  if (error.refusal === "locked") return t("account.error.padi.locked");
-  if (error.refusal === "disabled") return t("account.error.padi.disabled");
-  if (error.code === "unknown") return t("account.error.padi.unknown", { detail: error.message });
-  return t(SIGN_IN_ERRORS[error.code]);
-}
-
-/** How long a dive count read for the account page is reused. */
-const CHECK_CACHE_MS = 5 * 60_000;
-/** The account page waits this long for the dive count. */
-const PAGE_CHECK_TIMEOUT_MS = 5_000;
-/** "Save and test" waits this long for the dive count after the sign-in. */
-const SAVE_CHECK_TIMEOUT_MS = 15_000;
-
-/** A dive count read for the page, or why there is none. */
-type DiveCount = BackendCheck | { ok: false; timeout: true };
-
-/** Values typed into the sign-in form, shown again after an error (never the password). */
-interface SignInValues {
-  email: string;
-  units: UnitChoice;
-  readOnly: boolean;
-  timeZone: string;
-}
+/** The test request at connect time lists at most this many workouts (one request). */
+export const CHECK_LIMIT = 100;
+/** The callback waits this long for the test request. */
+const CHECK_TIMEOUT_MS = 15_000;
+const DAY_MS = 86_400_000;
 
 /** `promise`, or `onTimeout` when it takes longer than `ms`. */
 async function within<T>(promise: Promise<T>, ms: number, onTimeout: T): Promise<T> {
@@ -107,63 +62,64 @@ async function within<T>(promise: Promise<T>, ms: number, onTimeout: T): Promise
   }
 }
 
+/**
+ * The test request right after the code exchange: the workouts of the last 30 days, with the
+ * fresh access token (no refresh). A refused request (for example HTTP 403: the subscription does
+ * not cover the workout API) does not stop the connection: it is saved with the error. Returns
+ * the check and the newest tokens.
+ */
+async function testConnection(ctx: WebContext, result: TokenResult): Promise<{ check: SuuntoConnectionCheck; tokens: StoredSuuntoTokens }> {
+  const keys = ctx.suuntoKeys!;
+  const fetchOpt = ctx.suuntoFetch ? { fetch: ctx.suuntoFetch } : {};
+  const session = new SuuntoSession({ tokens: result.tokens, keys, endpoints: ctx.suuntoEndpoints, ...fetchOpt });
+  const api = new SuuntoApi({ session, keys, endpoints: ctx.suuntoEndpoints, log: ctx.log, ...fetchOpt });
+  const at = Date.now();
+  const secrets = [keys.clientSecret, keys.subscriptionKey, result.tokens.refreshToken, result.tokens.accessToken];
+  const check = await within<SuuntoConnectionCheck>(
+    api
+      .listWorkouts({ since: at - 30 * DAY_MS, until: at, limit: CHECK_LIMIT, offset: 0, byModificationTime: false })
+      .then((list) => ({ at, workouts: list.payload.length }))
+      .catch((error: unknown) => ({ at, error: redact(error instanceof UserFacingError ? error.message : describeError(error), secrets) })),
+    CHECK_TIMEOUT_MS,
+    { at, error: "Suunto did not answer in time." },
+  );
+  await api.close().catch(() => undefined);
+  return { check, tokens: session.storedTokens };
+}
+
 export function accountRoutes(ctx: WebContext): Router {
   const r = express.Router();
   const form = express.urlencoded({ extended: false, limit: "64kb" });
   r.use("/account", requireUser);
   const sensitive = perUserLimit(20);
-
-  /**
-   * Dive counts per user, for the account page. The key holds the time the connection was saved,
-   * so a new sign-in never shows the count of the previous one.
-   */
-  const counts = new Map<string, { key: string; at: number; result: DiveCount }>();
-  const countKey = (user: User) => `${user.id}:${user.serviceUpdatedAt ?? 0}`;
-  const remember = (user: User, result: DiveCount) => {
-    const cutoff = Date.now() - CHECK_CACHE_MS;
-    for (const [id, entry] of counts) if (entry.at < cutoff) counts.delete(id);
-    counts.set(user.id, { key: countKey(user), at: Date.now(), result });
-  };
-
-  /** The dive count of a connected account (cached for a few minutes; waits at most 5 s). */
-  const diveCount = async (user: User): Promise<DiveCount | undefined> => {
-    const cached = counts.get(user.id);
-    if (cached && cached.key === countKey(user) && cached.at > Date.now() - CHECK_CACHE_MS) return cached.result;
-    let logbook;
-    try {
-      logbook = ctx.pool.get(user)?.services.logbook;
-    } catch {
-      return undefined;
-    }
-    if (!logbook) return undefined;
-    const result = await within<DiveCount>(
-      logbook.check().catch((error: unknown) => ({ ok: false, error: describeError(error) })),
-      PAGE_CHECK_TIMEOUT_MS,
-      { ok: false, timeout: true },
-    );
-    // A timeout is not kept: the next visit tries again.
-    if (!("timeout" in result)) remember(user, result);
-    return result;
-  };
+  const fetchOpt = ctx.suuntoFetch ? { fetch: ctx.suuntoFetch } : {};
+  // Suunto's sign-in page: the connect form's answer redirects there.
+  const suuntoOrigin = new URL(ctx.suuntoEndpoints.oauthUrl).origin;
 
   const readOnlyBox = (checked: boolean, enforced: boolean) =>
     html`<label class="check"><input type="checkbox" name="readOnly" ${checked || enforced ? "checked" : ""} ${enforced ? "disabled" : ""}>
-      <span>${t("account.padi.readOnly")} <span class="hint">${enforced ? t("account.padi.readOnlyEnforced") : t("account.padi.readOnlyHint")}</span></span></label>`;
+      <span>${t("account.suunto.readOnly")} <span class="hint">${enforced ? t("account.suunto.readOnlyEnforced") : t("account.suunto.readOnlyHint")}</span></span></label>`;
 
   const unitsField = (id: string, units: UnitChoice) =>
-    html`<label for="${id}">${t("account.padi.units")}<span class="hint">${t("account.padi.unitsHint")}</span></label>
+    html`<label for="${id}">${t("account.suunto.units")}<span class="hint">${t("account.suunto.unitsHint")}</span></label>
       <select id="${id}" name="units">${UNIT_CHOICES.map((u) => html`<option value="${u}" ${u === units ? "selected" : ""}>${t(UNIT_LABELS[u])}</option>`)}</select>`;
 
-  /** The time zone; with `browser`, the page selects the browser's own zone when it is known. */
-  const timeZoneField = (id: string, timeZone: string, browser = false) => {
+  const timeZoneField = (id: string, timeZone: string) => {
     const list = allTimeZones();
     const options = list.includes(timeZone) ? list : [timeZone, ...list];
-    return html`<label for="${id}">${t("account.padi.timeZone")}<span class="hint">${t("account.padi.timeZoneHint")}</span></label>
-      <select id="${id}" name="timeZone"${browser ? html` data-browser-tz` : ""}>${options.map((tz) => html`<option value="${tz}" ${tz === timeZone ? "selected" : ""}>${tz}</option>`)}</select>`;
+    return html`<label for="${id}">${t("account.suunto.timeZone")}<span class="hint">${t("account.suunto.timeZoneHint")}</span></label>
+      <select id="${id}" name="timeZone">${options.map((tz) => html`<option value="${tz}" ${tz === timeZone ? "selected" : ""}>${tz}</option>`)}</select>`;
   };
 
   const tile = (service: Service, name: MessageKey, text: MessageKey, state: SafeHtml) =>
     html`<div class="tile"><div class="tile-head">${serviceIcon(service, "lg")}<strong>${t(name)}</strong></div><p>${t(text)}</p>${state}</div>`;
+
+  const tiles = (readOnly: boolean, state: SafeHtml) =>
+    html`<div class="tiles">
+        ${tile("workouts", "account.service.workouts", "account.tile.workouts", state)}
+        ${tile("health", "account.service.health", "account.tile.health", state)}
+        ${tile("routes", "account.service.routes", readOnly ? "account.tile.routesReadOnly" : "account.tile.routes", state)}
+      </div>`;
 
   const profile = (email: string, line: string) =>
     html`<section class="profile">
@@ -175,26 +131,25 @@ export function accountRoutes(ctx: WebContext): Router {
     </section>`;
 
   /**
-   * A demo account's page: no PADI form (there is no PADI account behind it), a notice that the
-   * logbook is sample data, and the read-only switch. Nothing on this page reaches PADI.
+   * A demo account's page: no Suunto connection (there is no Suunto account behind it), a notice
+   * that the data is sample data, and the read-only switch. Nothing on this page reaches Suunto.
    */
   const renderDemoAccount = (req: Request, res: Response, opts: { status?: number; flash?: { kind: "ok" | "error"; text: string } } = {}) => {
     const s = locals(res).session!;
     const server = ctx.store.getSettings();
     const readOnly = server.forceReadOnly || s.user.demoReadOnly === true;
-    const on = html`<span class="badge ok">${t("account.state.on")}</span>`;
     const demoCard = html`<div class="card" id="demo">
         <h2>${t("account.demo.heading")} <span class="badge warn">${t("account.demo.badge")}</span></h2>
         <p>${t("account.demo.intro")}</p>
         <p>${t("account.demo.memory")}</p>
         <p>${t("account.demo.nothingSent")}</p>
-        <p class="muted">${t("account.demo.identity", { identity: `${DEMO_NAME} <${DEMO_ADDRESS}>`, timeZone: DEMO_TIME_ZONE })}
+        <p class="muted">${t("account.demo.identity", { identity: DEMO_NAME, username: DEMO_USERNAME, timeZone: DEMO_TIME_ZONE })}
           ${th("account.demo.nextReset", { date: formatDate(ctx.demo.nextReset().getTime()) })}</p>
         <form method="post" action="/account/demo">
           <input type="hidden" name="_csrf" value="${s.csrf}">
           <h3>${t("account.demo.settingsHeading")}</h3>
           <div class="group">${readOnlyBox(s.user.demoReadOnly === true, server.forceReadOnly)}</div>
-          <div class="actions"><button type="submit">${t("account.padi.save")}</button></div>
+          <div class="actions"><button type="submit">${t("account.suunto.save")}</button></div>
         </form>
       </div>`;
     page(
@@ -202,133 +157,99 @@ export function accountRoutes(ctx: WebContext): Router {
       res,
       { title: t("account.title"), active: "account", ...(opts.flash ? { flash: opts.flash } : {}) },
       html`${profile(s.user.email, readOnly ? t("account.profile.demoReadOnly") : t("account.profile.demo"))}
-      <div class="tiles">
-        ${tile("logbook", "account.service.logbook", readOnly ? "account.tile.logbookReadOnly" : "account.tile.logbook", readOnly ? html`<span class="badge ok">${t("account.state.onReadOnly")}</span>` : on)}
-        ${tile("cards", "account.service.cards", "account.tile.cards", on)}
-      </div>
+      ${tiles(readOnly, readOnly ? html`<span class="badge ok">${t("account.state.onReadOnly")}</span>` : html`<span class="badge ok">${t("account.state.on")}</span>`)}
       ${connectCard({ mcpUrl: ctx.mcpUrl.href, email: s.user.email })}${demoCard}`,
       opts.status ?? 200,
     );
   };
 
-  /**
-   * The fields of a PADI sign-in, and the "Save and test" button. `browserTimeZone`: nothing was
-   * chosen yet, so the page may select the browser's time zone. The fields hold the PADI.com
-   * sign-in, not this site's: autocomplete="off" keeps password managers from filing them (or
-   * filling them in) as the login of this site.
-   */
-  const signInFields = (values: SignInValues, withSettings: boolean, enforced: boolean, browserTimeZone = false) =>
-    html`<div class="row">
-        <div>
-          <label for="email">${t("account.padi.email")}</label>
-          <input id="email" name="email" type="email" required autocomplete="off" value="${values.email}" placeholder="you@example.com">
-        </div>
-        <div>
-          <label for="password">${t("account.padi.password")}<span class="hint">${t("account.padi.passwordHint")}</span></label>
-          <input id="password" name="password" type="password" required autocomplete="off">
-        </div>
-      </div>
-      ${withSettings
-        ? html`<div class="row"><div>${unitsField("units", values.units)}</div><div>${timeZoneField("timeZone", values.timeZone, browserTimeZone)}</div></div>
-            <div class="group">${readOnlyBox(values.readOnly, enforced)}</div>`
-        : html`<input type="hidden" name="keep" value="settings">`}
-      <div class="actions"><button type="submit">${t("account.padi.saveAndTest")}</button></div>`;
+  /** The workouts counted at connect time, or why that test request failed. */
+  const workoutsLine = (check: SuuntoConnectionCheck | undefined): SafeHtml => {
+    if (!check) return html`<span class="muted">${t("account.suunto.workoutsUnknown")}</span>`;
+    const when = html` <span class="muted">(${th("account.suunto.checkedAt", { date: formatDate(check.at) })})</span>`;
+    if (typeof check.workouts === "number") return html`${check.workouts >= CHECK_LIMIT ? `${CHECK_LIMIT}+` : String(check.workouts)}${when}`;
+    return html`<span class="badge bad">${t("account.suunto.workoutsUnknown")}</span>${when}
+      <br><span class="muted">${t("account.suunto.checkFailed")} ${check.error ?? ""}</span>`;
+  };
 
-  const renderAccount = async (
-    req: Request,
-    res: Response,
-    opts: { values?: SignInValues; error?: string; status?: number; flash?: { kind: "ok" | "error"; text: string } } = {},
-  ) => {
+  const renderAccount = (req: Request, res: Response, opts: { error?: string; status?: number; flash?: { kind: "ok" | "error"; text: string } } = {}) => {
     const s = locals(res).session!;
     if (s.user.demo) {
       const flash = opts.error ? { kind: "error" as const, text: opts.error } : opts.flash;
       return renderDemoAccount(req, res, { ...(opts.status ? { status: opts.status } : {}), ...(flash ? { flash } : {}) });
     }
+    const configured = !!ctx.suuntoKeys;
+    // Chrome applies form-action to the redirect after the "Connect Suunto" form: allow Suunto's
+    // sign-in page on the pages that show that form.
+    if (configured) securityHeaders([suuntoOrigin])(req, res, () => undefined);
     const server = ctx.store.getSettings();
-    const read = ctx.store.readPadiSettings(s.user.id);
-    const stored = read.settings;
-    // Reading the dive count may find that the sign-in expired (the pool marks it): read the user again.
-    const count = stored && !s.user.padiNeedsReconnect ? await diveCount(s.user) : undefined;
-    const expired = !!stored && (ctx.store.getUser(s.user.id)?.padiNeedsReconnect ?? s.user.padiNeedsReconnect);
+    const read = ctx.store.readSuuntoSettings(s.user.id);
+    const stored: SuuntoAccountSettings | undefined = read.settings;
+    const expired = !!stored && s.user.suuntoNeedsReconnect;
     const readOnly = server.forceReadOnly || stored?.readOnly === true;
-    const csrf = html`<input type="hidden" name="_csrf" value="${s.csrf}">${returnTo(req) ? html`<input type="hidden" name="next" value="${returnTo(req)}">` : ""}`;
-    const values: SignInValues = opts.values ?? {
-      email: stored?.email ?? "",
-      units: stored?.units ?? "auto",
-      readOnly: stored?.readOnly ?? false,
-      timeZone: stored?.timeZone || server.defaultTimeZone,
-    };
+    const next = returnTo(req);
+    const csrf = html`<input type="hidden" name="_csrf" value="${s.csrf}">${next ? html`<input type="hidden" name="next" value="${next}">` : ""}`;
 
-    const logbookState = !stored
+    /** The "Connect Suunto" button. The page fills in the browser's time zone (saved with a first connection). */
+    const connectForm = (label: MessageKey, secondary = false) =>
+      html`<form method="post" action="/account/suunto/connect" class="actions">${csrf}<input type="hidden" name="timeZone" value="" data-browser-tz>
+          <button type="submit"${secondary ? html` class="secondary"` : ""}>${t(label)}</button></form>`;
+
+    const state = !stored
       ? html`<span class="badge warn">${t("account.state.notConnected")}</span>`
       : expired
-        ? html`<span class="badge bad">${t("account.state.signInAgain")}</span>`
+        ? html`<span class="badge bad">${t("account.state.connectAgain")}</span>`
         : html`<span class="badge ok">${readOnly ? t("account.state.onReadOnly") : t("account.state.on")}</span>`;
-    const cardsState = !stored
-      ? html`<span class="badge warn">${t("account.state.notConnected")}</span>`
-      : expired
-        ? html`<span class="badge bad">${t("account.state.signInAgain")}</span>`
-        : html`<span class="badge ok">${t("account.state.on")}</span>`;
-
     const badge = !stored
-      ? html`<span class="badge warn">${t("account.padi.badgeNotConnected")}</span>`
+      ? html`<span class="badge warn">${t("account.suunto.badgeNotConnected")}</span>`
       : expired
-        ? html`<span class="badge bad">${t("account.padi.badgeExpired")}</span>`
-        : html`<span class="badge ok">${t("account.padi.badgeConnected")}</span>`;
-    const help = html`<p class="muted">${t("account.padi.intro")}</p><p class="muted">${th("account.padi.social", { url: PADI_ACCOUNT_URL })}</p>`;
+        ? html`<span class="badge bad">${t("account.suunto.badgeReconnect")}</span>`
+        : html`<span class="badge ok">${t("account.suunto.badgeConnected")}</span>`;
+    const notConfigured = html`<div class="flash warn">${t("account.suunto.notConfigured")}</div>`;
 
-    // The dive count, or why it is not known. The error text comes from the PADI client as it is.
-    const dives = (c: DiveCount | undefined): SafeHtml | string => {
-      if (!c) return html`<span class="muted">${t("account.padi.divesUnknown")}</span>`;
-      if (c.ok && typeof c.dives === "number") return String(c.dives);
-      const why = "timeout" in c ? t("account.padi.divesTimeout") : (c.error ?? "");
-      return html`<span class="badge bad">${t("account.padi.divesUnknown")}</span>${why ? html` <span class="muted">${why}</span>` : ""}`;
-    };
-
-    const padiCard = stored
-      ? html`<div class="card" id="padi">
-          <h2>${t("account.padi.heading")} ${badge}</h2>
-          ${expired ? html`<div class="flash error">${t("account.padi.expired")}</div>` : ""}
+    const suuntoCard = stored
+      ? html`<div class="card" id="suunto">
+          <h2>${t("account.suunto.heading")} ${badge}</h2>
+          ${configured ? "" : notConfigured}
+          ${expired ? html`<div class="flash error">${t("account.suunto.expired")}</div>` : ""}
+          ${expired && configured ? connectForm("account.suunto.connectAgain") : ""}
           <dl class="kv">
-            ${stored.name ? html`<div><dt>${t("account.padi.diver")}</dt><dd>${stored.name}</dd></div>` : ""}
-            <div><dt>${t("account.padi.email")}</dt><dd>${stored.email}</dd></div>
-            <div><dt>${t("account.padi.affiliateId")}</dt><dd>${stored.affiliateId}</dd></div>
-            ${expired ? "" : html`<div><dt>${t("account.padi.dives")}</dt><dd>${dives(count)}</dd></div>`}
-            <div><dt>${t("account.padi.connectedAt")}</dt><dd>${formatDate(stored.connectedAt)}</dd></div>
+            <div><dt>${t("account.suunto.username")}</dt><dd>${stored.username}</dd></div>
+            <div><dt>${t("account.suunto.connectedAt")}</dt><dd>${formatDate(stored.connectedAt)}</dd></div>
+            <div><dt>${t("account.suunto.workouts")}</dt><dd>${workoutsLine(stored.lastCheck)}</dd></div>
           </dl>
-          ${expired
-            ? html`<h3>${t("account.padi.reconnect")}</h3>${help}
-                <form method="post" action="/account/padi" autocomplete="off">${csrf}${signInFields(values, false, server.forceReadOnly)}</form>`
-            : ""}
-          <h3>${t("account.padi.settingsHeading")}</h3>
-          <form method="post" action="/account/padi/settings">
+          <p class="muted">${t("account.suunto.syncHint")}</p>
+          <h3>${t("account.suunto.settingsHeading")}</h3>
+          <form method="post" action="/account/suunto/settings">
             ${csrf}
             <div class="row"><div>${unitsField("units-saved", stored.units)}</div><div>${timeZoneField("timeZone-saved", stored.timeZone || server.defaultTimeZone)}</div></div>
             <div class="group">${readOnlyBox(stored.readOnly, server.forceReadOnly)}</div>
-            <div class="actions"><button type="submit">${t("account.padi.save")}</button></div>
+            <div class="actions"><button type="submit">${t("account.suunto.save")}</button></div>
           </form>
-          ${expired
+          ${expired || !configured
             ? ""
-            : html`<details id="reconnect"${opts.values ? html` open` : ""}>
-                <summary>${t("account.padi.reconnect")}</summary>
-                <p class="muted">${t("account.padi.reconnectHint")}</p>
-                <p class="muted">${th("account.padi.social", { url: PADI_ACCOUNT_URL })}</p>
-                <form method="post" action="/account/padi" autocomplete="off">${csrf}${signInFields(values, false, server.forceReadOnly)}</form>
+            : html`<details id="reconnect">
+                <summary>${t("account.suunto.reconnect")}</summary>
+                <p class="muted">${t("account.suunto.reconnectHint")}</p>
+                ${connectForm("account.suunto.connectAgain", true)}
               </details>`}
-          <form method="post" action="/account/padi/remove" class="actions">
+          <form method="post" action="/account/suunto/remove" class="actions">
             <input type="hidden" name="_csrf" value="${s.csrf}">
-            <button type="submit" class="secondary" data-confirm="${t("account.padi.removeConfirm")}">${t("account.padi.remove")}</button>
+            <button type="submit" class="secondary" data-confirm="${t("account.suunto.removeConfirm")}">${t("account.suunto.remove")}</button>
           </form>
         </div>`
-      : html`<div class="card" id="padi">
-          <h2>${t("account.padi.heading")} ${badge}</h2>
-          ${read.unreadable ? html`<div class="flash error">${t("account.padi.unreadable")}</div>` : ""}
-          ${help}
-          <form method="post" action="/account/padi" autocomplete="off">${csrf}${signInFields(values, true, server.forceReadOnly, !opts.values)}</form>
+      : html`<div class="card" id="suunto">
+          <h2>${t("account.suunto.heading")} ${badge}</h2>
+          ${read.unreadable ? html`<div class="flash error">${t("account.suunto.unreadable")}</div>` : ""}
+          ${configured
+            ? html`<p class="muted">${t("account.suunto.intro")}</p><p class="muted">${t("account.suunto.syncHint")}</p>${connectForm("account.suunto.connect")}`
+            : notConfigured}
         </div>`;
 
     const line = !stored
-      ? t("account.profile.getStarted")
+      ? configured
+        ? t("account.profile.getStarted")
+        : t("account.profile.notConfigured")
       : expired
         ? t("account.profile.reconnect")
         : readOnly
@@ -339,11 +260,8 @@ export function accountRoutes(ctx: WebContext): Router {
       res,
       { title: t("account.title"), active: "account", ...(opts.error ? { flash: { kind: "error", text: opts.error } } : opts.flash ? { flash: opts.flash } : {}) },
       html`${profile(s.user.email, line)}
-      <div class="tiles">
-        ${tile("logbook", "account.service.logbook", readOnly ? "account.tile.logbookReadOnly" : "account.tile.logbook", logbookState)}
-        ${tile("cards", "account.service.cards", "account.tile.cards", cardsState)}
-      </div>
-      ${stored && !expired ? html`${connectCard({ mcpUrl: ctx.mcpUrl.href, email: s.user.email })}${padiCard}` : html`${padiCard}${connectCard({ mcpUrl: ctx.mcpUrl.href, email: s.user.email })}`}`,
+      ${tiles(readOnly, state)}
+      ${stored && !expired ? html`${connectCard({ mcpUrl: ctx.mcpUrl.href, email: s.user.email })}${suuntoCard}` : html`${suuntoCard}${connectCard({ mcpUrl: ctx.mcpUrl.href, email: s.user.email })}`}`,
       opts.status ?? 200,
     );
   };
@@ -351,91 +269,92 @@ export function accountRoutes(ctx: WebContext): Router {
   r.get("/account", (req, res) => renderAccount(req, res));
 
   /**
-   * "Save and test": sign in to PADI, read the dive count once, save the connection. From the
-   * reconnect form (keep=settings) the saved units and read-only switch stay as they are.
+   * "Connect Suunto" (also Reconnect): remember a random state for this user, then send the
+   * browser to Suunto's sign-in page. The browser's time zone (hidden field) is kept with the
+   * state and saved with a first connection.
    */
-  r.post("/account/padi", sensitive, form, async (req, res) => {
+  r.post("/account/suunto/connect", sensitive, form, (req, res) => {
     const s = locals(res).session!;
-    const server = ctx.store.getSettings();
-    const existing = ctx.store.getPadiSettings(s.user.id);
-    const keep = req.body.keep === "settings" && !!existing;
-    const values: SignInValues = {
-      email: str(req.body.email, 320).trim().toLowerCase(),
-      units: keep ? existing.units : (unitChoice(req.body.units) ?? existing?.units ?? "auto"),
-      // While the administrator enforces read-only, the (disabled) box is not sent: keep the user's choice.
-      readOnly: keep || server.forceReadOnly ? (existing?.readOnly ?? false) : bool(req.body.readOnly),
-      timeZone: (keep ? existing.timeZone : str(req.body.timeZone, 100).trim() || existing?.timeZone) || server.defaultTimeZone,
-    };
-    if (!csrfOk(req, res, ctx.cookies)) return renderAccount(req, res, { values, error: t("account.error.formExpired"), status: 400 });
-    // A demo account never gets a PADI connection (and never signs in to PADI).
-    if (s.user.demo) return renderAccount(req, res, { error: t("account.demo.noPadi"), status: 403 });
-    const password = str(req.body.password, 500);
-    if (!values.email || !password) return renderAccount(req, res, { values, error: t("account.error.missing"), status: 400 });
-    if (!isEmail(values.email)) return renderAccount(req, res, { values, error: t("account.error.email"), status: 400 });
-    if (!isValidTimeZone(values.timeZone)) return renderAccount(req, res, { values, error: t("account.error.timeZone"), status: 400 });
-
-    // The operator's PADI endpoints and API mode, as every user's services get them.
-    let endpoints;
-    try {
-      endpoints = endpointsFromEnv(ctx.operator);
-    } catch (error) {
-      return renderAccount(req, res, { values, error: describeError(error), status: 400 });
-    }
-    const apiMode = API_MODES.find((m) => m === ctx.operator.PADI_API_MODE) ?? "proxy";
-    const fetchOpt = ctx.padiFetch ? { fetch: ctx.padiFetch } : {};
-
-    let result;
-    try {
-      result = await signIn(values.email, password, { method: "auto", endpoints, ...fetchOpt });
-    } catch (error) {
-      ctx.log("PADI sign-in on the account page failed");
-      return renderAccount(req, res, { values, error: signInError(error), status: 400 });
-    }
-
-    const settings: PadiAccountSettings = {
-      email: values.email,
-      refreshToken: result.tokens.refreshToken,
-      loginMethod: result.tokens.loginMethod,
-      clientId: result.tokens.clientId,
-      affiliateId: result.claims.affiliateId,
-      ...(result.claims.name ? { name: result.claims.name } : {}),
-      units: values.units,
-      readOnly: values.readOnly,
-      timeZone: values.timeZone,
-      connectedAt: Date.now(),
-    };
-    ctx.store.savePadiSettings(s.user.id, settings);
-    await ctx.pool.invalidate(s.user.id);
-    ctx.log("PADI connection saved for a user");
-
-    // The quick check: count the dives with the token from the sign-in (no second sign-in).
-    const issued = { ...endpoints, clientId: result.tokens.clientId };
-    const session = new PadiSession({ tokens: result.tokens, method: result.tokens.loginMethod, endpoints: issued, ...fetchOpt });
-    const api = new PadiApi({ session, endpoints: issued, apiMode, ...fetchOpt, log: ctx.log });
-    const check = await within<DiveCount>(
-      api.check().catch((error: unknown) => ({ ok: false, error: describeError(error) })),
-      SAVE_CHECK_TIMEOUT_MS,
-      { ok: false, timeout: true },
-    );
-    await api.close();
-    // A timeout is not kept (like on the page): the next page tries again, as it says.
-    const user = ctx.store.getUser(s.user.id);
-    if (user && !("timeout" in check)) remember(user, check);
-    res.redirect(303, returnTo(req) ?? (check.ok ? "/account?m=connected" : "/account?m=logbookfailed"));
+    if (!csrfOk(req, res, ctx.cookies)) return renderAccount(req, res, { error: t("account.error.formExpired"), status: 400 });
+    // A demo account never gets a Suunto connection.
+    if (s.user.demo) return renderAccount(req, res, { error: t("account.demo.noSuunto"), status: 403 });
+    if (!ctx.suuntoKeys) return void res.redirect(303, "/account?m=notconfigured");
+    const timeZone = str(req.body.timeZone, 100).trim();
+    const state = ctx.store.createOAuthState(s.user.id, returnTo(req), timeZone && isValidTimeZone(timeZone) ? timeZone : undefined);
+    res.redirect(303, authorizeUrl(ctx.suuntoEndpoints, ctx.suuntoKeys.clientId, ctx.suuntoRedirectUri, state));
   });
 
-  /** Units, read-only switch and time zone of a saved connection (no sign-in). */
-  r.post("/account/padi/settings", form, async (req, res) => {
+  /**
+   * Where Suunto sends the browser back: ?code=..&state=.. or ?error=..&state=... The state must
+   * be one this user started (single use, 10 minutes). Nothing Suunto sends is put in a URL: the
+   * outcome is a flash code.
+   */
+  r.get("/suunto/callback", async (req, res) => {
+    const s = locals(res).session;
+    // The session cookie (SameSite=Lax) comes with this redirect. Without it, start again: the
+    // code is not carried through the sign-in page.
+    if (!s) return void res.redirect(303, `/login?next=${encodeURIComponent("/account")}`);
+    if (s.user.demo) return void res.redirect(303, "/account");
+    const started = ctx.store.consumeOAuthState(str(req.query.state, 200), s.user.id);
+    if (!started) {
+      ctx.log("A Suunto callback came with an unknown, used or expired state");
+      return void res.redirect(303, "/account?m=stateexpired");
+    }
+    const keys = ctx.suuntoKeys;
+    if (!keys) return void res.redirect(303, "/account?m=notconfigured");
+    const error = str(req.query.error, 200);
+    if (error) {
+      const refused = callbackError(error);
+      ctx.log(`Suunto sign-in ended without a code (${refused.code})`);
+      return void res.redirect(303, refused.code === "denied" ? "/account?m=denied" : "/account?m=connectfailed");
+    }
+    const code = str(req.query.code, 2000);
+    if (!code) return void res.redirect(303, "/account?m=connectfailed");
+
+    let result: TokenResult;
+    try {
+      result = await exchangeCode(code, ctx.suuntoRedirectUri, { endpoints: ctx.suuntoEndpoints, keys, ...fetchOpt });
+    } catch (err) {
+      // The client's messages hold no code, token or secret.
+      ctx.log(`Suunto code exchange failed: ${err instanceof UserFacingError ? err.message : "unexpected error"}`);
+      return void res.redirect(303, "/account?m=connectfailed");
+    }
+
+    const { check, tokens } = await testConnection(ctx, result);
+    // A reconnect keeps the user's settings; a first connection takes the browser's time zone.
+    const existing = ctx.store.getSuuntoSettings(s.user.id);
+    const timeZone = existing?.timeZone ?? started.timeZone;
+    const settings: SuuntoAccountSettings = {
+      username: result.username,
+      refreshToken: tokens.refreshToken,
+      ...(tokens.accessToken ? { accessToken: tokens.accessToken } : {}),
+      ...(tokens.accessTokenExpiresAt !== undefined ? { accessTokenExpiresAt: tokens.accessTokenExpiresAt } : {}),
+      clientId: tokens.clientId,
+      units: existing?.units ?? "metric",
+      readOnly: existing?.readOnly ?? false,
+      ...(timeZone ? { timeZone } : {}),
+      connectedAt: Date.now(),
+      lastCheck: check,
+    };
+    ctx.store.saveSuuntoSettings(s.user.id, settings);
+    await ctx.pool.invalidate(s.user.id);
+    ctx.log(`Suunto connection saved for a user${check.error ? " (the test request failed)" : ""}`);
+    res.redirect(303, consentReturn(started.next) ?? (check.error ? "/account?m=checkfailed" : "/account?m=connected"));
+  });
+
+  /** Units, read-only switch and time zone of a saved connection (no call to Suunto). */
+  r.post("/account/suunto/settings", form, async (req, res) => {
     const s = locals(res).session!;
     if (!csrfOk(req, res, ctx.cookies)) return void res.redirect(303, "/account?m=csrf");
-    const existing = ctx.store.getPadiSettings(s.user.id);
+    const existing = ctx.store.getSuuntoSettings(s.user.id);
     if (s.user.demo || !existing) return void res.redirect(303, "/account");
     const server = ctx.store.getSettings();
     // A form without the field keeps the saved zone.
     const timeZone = str(req.body.timeZone, 100).trim() || undefined;
     if (timeZone && !isValidTimeZone(timeZone)) return renderAccount(req, res, { error: t("account.error.timeZone"), status: 400 });
-    ctx.store.savePadiPreferences(s.user.id, {
+    ctx.store.saveSuuntoPreferences(s.user.id, {
       units: unitChoice(req.body.units) ?? existing.units,
+      // While the administrator enforces read-only, the (disabled) box is not sent: keep the user's choice.
       readOnly: server.forceReadOnly ? existing.readOnly : bool(req.body.readOnly),
       ...(timeZone ? { timeZone } : {}),
     });
@@ -454,12 +373,14 @@ export function accountRoutes(ctx: WebContext): Router {
     res.redirect(303, "/account?m=saved");
   });
 
-  r.post("/account/padi/remove", form, async (req, res) => {
+  /** Remove the connection: tell Suunto first (best effort, with the stored tokens), then delete it. */
+  r.post("/account/suunto/remove", form, async (req, res) => {
     const s = locals(res).session!;
     if (!csrfOk(req, res, ctx.cookies)) return void res.redirect(303, "/account?m=csrf");
-    ctx.store.savePadiSettings(s.user.id, undefined);
-    counts.delete(s.user.id);
+    await deauthorizeAtSuunto(ctx.store.getSuuntoSettings(s.user.id), { keys: ctx.suuntoKeys, endpoints: ctx.suuntoEndpoints, ...fetchOpt });
+    ctx.store.saveSuuntoSettings(s.user.id, undefined);
     await ctx.pool.invalidate(s.user.id);
+    ctx.log("A user removed their Suunto connection");
     res.redirect(303, "/account?m=removed");
   });
 
@@ -588,9 +509,10 @@ export function accountRoutes(ctx: WebContext): Router {
     if (s.user.isAdmin && ctx.store.countAdmins() <= 1 && ctx.store.countUsers() > 1) {
       return renderSecurity(req, res, t("account.security.lastAdmin"), 400);
     }
+    // Tell Suunto first (best effort), while the tokens are still stored.
+    await deauthorizeAtSuunto(ctx.store.getSuuntoSettings(s.user.id), { keys: ctx.suuntoKeys, endpoints: ctx.suuntoEndpoints, ...fetchOpt });
     ctx.store.deleteUser(s.user.id);
     ctx.demo.forget(s.user.id);
-    counts.delete(s.user.id);
     await ctx.pool.invalidate(s.user.id);
     setCookie(res, ctx.cookies.clear(ctx.cookies.session));
     res.redirect(303, "/");

@@ -17,7 +17,7 @@ export interface ToolContext {
   log: (message: string) => void;
   /** Called after every tool call (used for the per-user activity log in web mode). */
   onToolCall?: (tool: string, ok: boolean, durationMs: number) => void;
-  /** Called before every tool call; throwing turns the call into a tool error (e.g. "connect PADI first"). */
+  /** Called before every tool call; throwing turns the call into a tool error (for example "connect Suunto first"). */
   beforeToolCall?: (tool: string) => void;
 }
 
@@ -29,7 +29,7 @@ export interface ToolSpec<Shape extends ZodShape> {
   /** Mutating tools are not registered when the server runs in read-only mode. */
   kind: "read" | "write" | "destructive";
   idempotent?: boolean;
-  /** Tool reaches a third party (for example, it sends a dive to a PADI Pro for verification). */
+  /** Tool reaches a third party (for example, it sends data to someone other than the user's own account). */
   openWorld?: boolean;
 }
 

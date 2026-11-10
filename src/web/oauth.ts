@@ -32,7 +32,7 @@ import type { OAuthClientInformationFull, OAuthTokenRevocationRequest, OAuthToke
 import { sha256 } from "./crypto.js";
 import type { Store } from "./store.js";
 
-export const SCOPE = "padi";
+export const SCOPE = "suunto";
 /** A rotated refresh token is still accepted for this long (client retries after a timeout). */
 const REFRESH_REUSE_GRACE_MS = 60_000;
 
@@ -127,7 +127,7 @@ async function fetchMetadataDocument(url: URL, allowPrivate: boolean): Promise<s
       url,
       {
         method: "GET",
-        headers: { accept: "application/json", "user-agent": "padi-mcp" },
+        headers: { accept: "application/json", "user-agent": "suunto-mcp" },
         // Pin the connection to the address that was checked (no DNS rebinding between check and use).
         lookup: ((_h: string, opts: { all?: boolean }, cb: (...args: unknown[]) => void) =>
           opts && opts.all ? cb(null, [{ address, family }]) : cb(null, address, family)) as unknown as LookupFunction,

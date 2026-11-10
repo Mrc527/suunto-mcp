@@ -1,77 +1,126 @@
 /**
  * Per-user configuration and service lifecycle for the multi-user web mode.
  *
- * A user's stored PADI connection is turned into the same AppConfig the single-user mode uses, by
- * feeding a whitelisted set of PADI_* variables to loadConfig(). The PADI hosts can only be
- * changed by the operator (process environment), never by users, so nobody can make the server
- * connect to other machines.
+ * A user's stored Suunto connection is turned into the same AppConfig the single-user mode uses,
+ * by feeding a whitelisted set of SUUNTO_* variables to loadConfig(). The app keys (client id,
+ * client secret, subscription key) and the Suunto hosts belong to the operator (process
+ * environment), never to users, so nobody can make the server connect to other machines.
  */
 
 import { randomBytes } from "node:crypto";
+import type { UnitChoice } from "../activity/types.js";
 import { loadConfig, type AppConfig } from "../config.js";
-import { DEMO_ADDRESS, DEMO_TIME_ZONE, demoRegistry, type DemoRegistry } from "../demo/index.js";
-import { endpointEnv } from "../padi/endpoints.js";
-import type { TokenSink } from "../padi/session.js";
-import { ConfigError } from "../util/errors.js";
+import { DEMO_TIME_ZONE, demoRegistry, type DemoRegistry } from "../demo/index.js";
 import { closeServices, createServices, type Services } from "../server.js";
-import type { PadiAccountSettings, ServerSettings, Store, User } from "./store.js";
-
-const API_MODES = ["proxy", "direct", "auto"] as const;
+import { endpointEnv, endpointsFromEnv, type SuuntoEndpoints } from "../suunto/endpoints.js";
+import type { StoredSuuntoTokens, SuuntoAppKeys } from "../suunto/oauth.js";
+import { SuuntoSession, type TokenSink } from "../suunto/session.js";
+import { ConfigError } from "../util/errors.js";
+import type { ServerSettings, Store, SuuntoAccountSettings, User } from "./store.js";
 
 /**
- * Operator-level settings that apply to every user: the PADI endpoints (useful for tests against
- * a local mock) and the API transport. PADI_API_MODE is checked here, at startup, and lowercased:
- * a typo would otherwise only show up later, as an error in every user's tool calls, and the
- * account page compares the exact value.
+ * Operator-level settings that apply to every user: the Suunto hosts (overridden only for tests
+ * against a local mock). They are checked here, at startup: a typo would otherwise only show up
+ * later, as an error in every user's tool calls. Never holds the app keys.
  */
 export function operatorOverrides(env: Record<string, string | undefined>): Record<string, string> {
-  const out = endpointEnv(env);
-  const mode = (env.PADI_API_MODE ?? "").trim().toLowerCase();
-  if (mode) {
-    if (!API_MODES.some((m) => m === mode)) throw new ConfigError(`PADI_API_MODE must be one of ${API_MODES.join(", ")} (got "${mode}")`);
-    out.PADI_API_MODE = mode;
-  }
+  // Throws ConfigError for a value that is not an https URL (or http on a loopback host).
+  endpointsFromEnv(env);
+  const out: Record<string, string> = {};
+  // Docker Compose passes unset variables as empty strings: those mean "not set".
+  for (const [name, value] of Object.entries(endpointEnv(env))) if (value.trim()) out[name] = value.trim();
   return out;
 }
 
+/** The units a stored connection uses ("metric" for anything unexpected). */
+function unitsOf(value: unknown): UnitChoice {
+  return value === "imperial" ? "imperial" : "metric";
+}
+
 /**
- * Build the AppConfig for one user from their stored PADI connection. Throws ConfigError for
- * invalid settings. The client id the tokens were issued for wins over the operator's. The
- * user's own time zone wins over the server's default (it decides what "today" is).
+ * Build the AppConfig for one user from their stored Suunto connection and the operator's app
+ * keys. Throws ConfigError for invalid settings. The user's own time zone wins over the server's
+ * default (it decides what "today" is).
  */
-export function buildUserConfig(s: PadiAccountSettings, server: ServerSettings, operator: Record<string, string> = {}): AppConfig {
+export function buildUserConfig(s: SuuntoAccountSettings, server: ServerSettings, operator: Record<string, string>, keys: SuuntoAppKeys): AppConfig {
   const env: Record<string, string | undefined> = {
     ...operator,
-    PADI_EMAIL: s.email,
-    PADI_REFRESH_TOKEN: s.refreshToken,
-    PADI_LOGIN_METHOD: s.loginMethod,
-    PADI_CLIENT_ID: s.clientId,
-    PADI_UNITS: s.units,
-    PADI_READ_ONLY: String(s.readOnly || server.forceReadOnly),
-    PADI_TIMEZONE: s.timeZone || server.defaultTimeZone,
+    SUUNTO_CLIENT_ID: keys.clientId,
+    SUUNTO_CLIENT_SECRET: keys.clientSecret,
+    SUUNTO_SUBSCRIPTION_KEY: keys.subscriptionKey,
+    SUUNTO_REFRESH_TOKEN: s.refreshToken,
+    SUUNTO_UNITS: unitsOf(s.units),
+    SUUNTO_READ_ONLY: String(s.readOnly || server.forceReadOnly),
+    SUUNTO_TIMEZONE: s.timeZone || server.defaultTimeZone,
   };
   return loadConfig(env);
 }
 
 /**
- * A demo account has no PADI sign-in; the configuration needs one. It is random, so it can never
- * be mistaken for (or redact) any other text.
+ * A demo account has no Suunto app keys and no sign-in; the configuration needs them. They are
+ * random, so they can never be mistaken for (or redact) any other text, and the demo services
+ * never send them anywhere.
  */
+const DEMO_KEYS: SuuntoAppKeys = {
+  clientId: `demo-${randomBytes(8).toString("hex")}`,
+  clientSecret: randomBytes(18).toString("base64url"),
+  subscriptionKey: randomBytes(16).toString("hex"),
+};
 const DEMO_TOKEN = randomBytes(18).toString("base64url");
 
 /**
- * The fixed configuration of every demo account: diver "Alex Demo" in Europe/Zurich. Neither the
- * user's stored settings nor the operator's PADI overrides apply: the services use the in-memory
- * demo store only and never talk to PADI. The administrator's read-only switch still applies.
+ * The fixed configuration of every demo account: "Alex Demo" in Europe/Zurich, metric. Neither
+ * the user's stored settings nor the operator's Suunto settings apply: the services use the
+ * in-memory demo store only and never talk to Suunto. The administrator's read-only switch still
+ * applies.
  */
 export function buildDemoConfig(server: ServerSettings, readOnly: boolean): AppConfig {
   return loadConfig({
-    PADI_EMAIL: DEMO_ADDRESS,
-    PADI_REFRESH_TOKEN: DEMO_TOKEN,
-    PADI_TIMEZONE: DEMO_TIME_ZONE,
-    PADI_UNITS: "auto",
-    PADI_READ_ONLY: String(readOnly || server.forceReadOnly),
+    SUUNTO_CLIENT_ID: DEMO_KEYS.clientId,
+    SUUNTO_CLIENT_SECRET: DEMO_KEYS.clientSecret,
+    SUUNTO_SUBSCRIPTION_KEY: DEMO_KEYS.subscriptionKey,
+    SUUNTO_REFRESH_TOKEN: DEMO_TOKEN,
+    SUUNTO_TIMEZONE: DEMO_TIME_ZONE,
+    SUUNTO_UNITS: "metric",
+    SUUNTO_READ_ONLY: String(readOnly || server.forceReadOnly),
   });
+}
+
+/** The tokens of a stored connection, as a SuuntoSession takes them. */
+export function storedTokens(s: SuuntoAccountSettings): StoredSuuntoTokens {
+  return {
+    refreshToken: s.refreshToken,
+    clientId: s.clientId,
+    ...(s.accessToken ? { accessToken: s.accessToken } : {}),
+    ...(s.accessTokenExpiresAt !== undefined ? { accessTokenExpiresAt: s.accessTokenExpiresAt } : {}),
+  };
+}
+
+/** How long a disconnect at Suunto may take before the connection is removed here anyway. */
+export const DEAUTHORIZE_TIMEOUT_MS = 10_000;
+
+/**
+ * Tell Suunto that this user disconnects (when the user removes the connection or the account is
+ * deleted). Best effort: never throws, and without app keys there is nothing to call.
+ */
+export async function deauthorizeAtSuunto(
+  settings: SuuntoAccountSettings | undefined,
+  opts: { keys?: SuuntoAppKeys; endpoints: SuuntoEndpoints; fetch?: typeof fetch; timeoutMs?: number },
+): Promise<void> {
+  if (!settings || !opts.keys) return;
+  try {
+    const session = new SuuntoSession({
+      tokens: storedTokens(settings),
+      keys: opts.keys,
+      endpoints: opts.endpoints,
+      timeoutMs: opts.timeoutMs ?? DEAUTHORIZE_TIMEOUT_MS,
+      backoffMs: 0,
+      ...(opts.fetch ? { fetch: opts.fetch } : {}),
+    });
+    await session.deauthorize();
+  } catch {
+    // Best effort: the connection is removed here anyway.
+  }
 }
 
 interface PoolEntry {
@@ -86,6 +135,22 @@ export interface UserContext {
   services: Services;
 }
 
+export interface ServicePoolOptions {
+  /** The operator's Suunto host overrides (SUUNTO_OAUTH_URL, SUUNTO_API_URL). */
+  operator: Record<string, string>;
+  /** The operator's Suunto app keys. Without them real users get no services (demo accounts do). */
+  keys?: SuuntoAppKeys;
+  /** Services unused for this long are closed (default 10 minutes). */
+  idleMs?: number;
+  /** The demo accounts' in-memory stores (default: the process-wide registry). */
+  demo?: DemoRegistry;
+  log?: (m: string) => void;
+  /** fetch for every request to Suunto (tests pass a mock). */
+  fetch?: typeof fetch;
+  /** The sentence that tells a user how to connect again, e.g. "Connect Suunto again at <url>/account." */
+  connectAgain?: string;
+}
+
 /**
  * Keeps services per user, rebuilt when the user's or the server's settings change and closed
  * after a period without use. Demo accounts get services on the in-memory demo stores of `demo`,
@@ -94,62 +159,81 @@ export interface UserContext {
 export class ServicePool {
   private readonly entries = new Map<string, PoolEntry>();
   private readonly timer: NodeJS.Timeout;
+  private readonly operator: Record<string, string>;
+  private readonly keys: SuuntoAppKeys | undefined;
+  private readonly idleMs: number;
+  private readonly demo: DemoRegistry;
+  private readonly log: (m: string) => void;
 
   constructor(
     private readonly store: Store,
-    private readonly operator: Record<string, string>,
-    private readonly idleMs = 10 * 60_000,
-    private readonly demo: DemoRegistry = demoRegistry,
-    private readonly log: (m: string) => void = () => {},
-    /** fetch for every request to PADI (tests pass a mock). */
-    private readonly padiFetch?: typeof fetch,
+    private readonly opts: ServicePoolOptions,
   ) {
+    this.operator = opts.operator;
+    this.keys = opts.keys;
+    this.idleMs = opts.idleMs ?? 10 * 60_000;
+    this.demo = opts.demo ?? demoRegistry;
+    this.log = opts.log ?? (() => {});
     this.timer = setInterval(() => void this.sweep(), 60_000);
     this.timer.unref();
   }
 
-  /** Returns undefined when the user has not connected PADI yet (never for a demo account). */
+  /** Whether the operator set the Suunto app keys (real users can connect and use Suunto). */
+  get configured(): boolean {
+    return this.keys !== undefined;
+  }
+
+  /**
+   * Returns undefined when the user has not connected Suunto yet, or when the operator's app keys
+   * are missing (never for a demo account). Throws ConfigError when the stored connection cannot
+   * be decrypted.
+   */
   get(user: User): UserContext | undefined {
     if (user.demo) return this.getDemo(user);
-    if (!user.hasPadi) return undefined;
+    if (!user.hasSuunto || !this.keys) return undefined;
+    const keys = this.keys;
     const server = this.store.getSettings();
     const version = `${user.serviceUpdatedAt ?? 0}:${JSON.stringify(server)}`;
     const existing = this.current(user.id, version);
     if (existing) return existing;
-    const { settings, unreadable } = this.store.readPadiSettings(user.id);
+    const { settings, unreadable } = this.store.readSuuntoSettings(user.id);
     if (unreadable) {
-      throw new ConfigError("The stored PADI connection cannot be decrypted (the server's encryption key changed). Sign in to PADI again on the account page.");
+      throw new ConfigError("it cannot be decrypted (the server's encryption key changed).");
     }
     if (!settings) return undefined;
-    const config = buildUserConfig(settings, server, this.operator);
+    const config = buildUserConfig(settings, server, this.operator, keys);
     const services = createServices(config, {
+      // The stored tokens win over the configuration: they hold the newest refresh token.
+      tokens: storedTokens(settings),
       tokenSink: this.tokenSink(user.id, settings.connectedAt),
       log: this.log,
-      ...(this.padiFetch ? { fetch: this.padiFetch } : {}),
+      ...(this.opts.fetch ? { fetch: this.opts.fetch } : {}),
+      ...(this.opts.connectAgain ? { connectAgain: this.opts.connectAgain } : {}),
     });
     return this.add(user.id, { config, services, version, lastUsed: Date.now() });
   }
 
   /**
-   * Where a user's session saves new tokens: into the store, without rebuilding the services. A
-   * refresh token that stopped working marks the connection "needs reconnect".
+   * Where a user's session saves new tokens: into the store, without rebuilding the services (a
+   * saved refresh also clears "needs reconnect"). A refresh token that Suunto refuses marks the
+   * connection "needs reconnect". Both only for the connection the session belongs to, never for
+   * one saved meanwhile (the user connected again while a call was running).
    */
   private tokenSink(userId: string, connectedAt: number): TokenSink {
     return {
       save: (tokens) => {
         try {
-          this.store.savePadiTokens(userId, tokens, connectedAt);
+          this.store.saveSuuntoTokens(userId, tokens, connectedAt);
         } catch (error) {
-          this.log(`Could not save refreshed PADI tokens: ${(error as Error).message}`);
+          this.log(`Could not save refreshed Suunto tokens: ${(error as Error).message}`);
         }
       },
       invalid: () => {
         try {
-          const current = this.store.getPadiSettings(userId);
-          // Only the connection this session belongs to (not one saved meanwhile).
-          if (current && current.connectedAt === connectedAt) this.store.setPadiNeedsReconnect(userId, true);
+          const current = this.store.getSuuntoSettings(userId);
+          if (current && current.connectedAt === connectedAt) this.store.setSuuntoNeedsReconnect(userId, true);
         } catch (error) {
-          this.log(`Could not mark a PADI connection for reconnect: ${(error as Error).message}`);
+          this.log(`Could not mark a Suunto connection for reconnect: ${(error as Error).message}`);
         }
       },
     };
@@ -164,7 +248,7 @@ export class ServicePool {
     const existing = this.current(user.id, version);
     if (existing) return existing;
     const config = buildDemoConfig(server, readOnly);
-    const services = createServices(config, { demo: account.logbook, log: this.log });
+    const services = createServices(config, { demo: account.activity, log: this.log });
     return this.add(user.id, { config, services, version, lastUsed: Date.now() });
   }
 
@@ -177,7 +261,7 @@ export class ServicePool {
     }
     if (existing) {
       this.entries.delete(userId);
-      void closeServices(existing.services);
+      void closeServices(existing.services).catch(() => undefined);
     }
     return undefined;
   }
@@ -191,7 +275,7 @@ export class ServicePool {
     const entry = this.entries.get(userId);
     if (!entry) return;
     this.entries.delete(userId);
-    await closeServices(entry.services);
+    await closeServices(entry.services).catch(() => undefined);
   }
 
   async sweep(): Promise<void> {

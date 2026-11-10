@@ -18,12 +18,12 @@ export default {
   "admin.overview.publicUrl": "Public URL",
   "admin.overview.version": "Version",
   "admin.overview.users": "Users",
-  "admin.overview.userCount": "{n} ({padi} with PADI connected)",
+  "admin.overview.userCount": "{n} ({suunto} with Suunto connected)",
   "admin.overview.requests": "Access requests",
   "admin.overview.requestsWaiting.one": "{n} waiting",
   "admin.overview.requestsWaiting.other": "{n} waiting",
   "admin.overview.noRequests": "none",
-  "admin.overview.activeConnections": "Logbooks in use (last 10 minutes)",
+  "admin.overview.activeConnections": "Accounts in use (last 10 minutes)",
   "admin.overview.platform": "Host platform",
 
   // Public setup check
@@ -37,11 +37,22 @@ export default {
   "admin.selfTest.httpsRequired": "AI apps only connect to https:// servers",
   "admin.selfTest.mcpReachable": "MCP endpoint reachable",
   "admin.selfTest.mcpDiscovery": "MCP endpoint answers 401 with discovery header",
-  "admin.selfTest.padi": "PADI servers",
-  // {mode} is the API mode (proxy, direct or auto).
-  "admin.selfTest.padiDefault": "the PADI servers on the internet, API mode {mode}",
-  // {list} names the settings, for example PADI_LOGBOOK_URL.
-  "admin.selfTest.padiCustom": "custom servers for tests ({list}), API mode {mode}",
+  "admin.selfTest.suunto": "Suunto servers",
+  "admin.selfTest.suuntoDefault": "the Suunto servers on the internet",
+  // {list} names the settings, for example SUUNTO_API_URL.
+  "admin.selfTest.suuntoCustom": "custom servers for tests ({list})",
+
+  // The Suunto API (the operator's app keys, from the environment)
+  "admin.suunto.title": "Suunto API",
+  "admin.suunto.keys": "Suunto app keys",
+  "admin.suunto.keysSet": "set",
+  "admin.suunto.keysMissing": "missing",
+  "admin.suunto.keysHint": "SUUNTO_CLIENT_ID, SUUNTO_CLIENT_SECRET and SUUNTO_SUBSCRIPTION_KEY from the environment. Their values are never shown.",
+  "admin.suunto.missingWarning": "The Suunto app keys are not set, so nobody can connect Suunto (demo accounts work). Set SUUNTO_CLIENT_ID, SUUNTO_CLIENT_SECRET and SUUNTO_SUBSCRIPTION_KEY from your app in the Suunto API Zone, then restart the server.",
+  "admin.suunto.redirectUri": "Redirect URI",
+  "admin.suunto.redirectUriHint": "Register exactly this address as the redirect URI of your app in the Suunto API Zone. Change it with SUUNTO_REDIRECT_URI.",
+  "admin.suunto.servers": "Suunto servers",
+  "admin.suunto.plan": "A Developer subscription of the Suunto API allows 10 calls per minute and 200 calls per week for the whole server: enough to try it, not for many users. Ask Suunto for Production access before you invite people. When the limit is reached, AI apps get an error that says when to try again.",
 
   // Settings
   "admin.settings.title": "Settings",
@@ -53,7 +64,7 @@ export default {
   "admin.settings.domains.label": "Allowed sign-up email domains",
   "admin.settings.domains.hint": "Empty = any domain. Addresses are not verified, so this does not prove who someone is: use invite codes to control who joins.",
   "admin.settings.readOnly.label": "Read-only for everyone",
-  "admin.settings.readOnly.hint": "Nobody can add, change or delete dives through this server.",
+  "admin.settings.readOnly.hint": "AI apps cannot add routes or points of interest through this server.",
   "admin.settings.connections": "Connections",
   "admin.settings.redirectHosts.label": "Allowed AI apps (redirect hosts)",
   "admin.settings.redirectHosts.hint": "Empty = any OAuth client. Use <code>claude.ai claude.com</code> to allow only Claude.",
@@ -104,7 +115,7 @@ export default {
   "admin.notices.problem.network": "the mail server did not answer (try again later)",
   "admin.notices.problem.rejected": "the mail server did not accept the e-mail",
   "admin.notices.problem.other": "an unexpected error",
-  // The e-mail itself (plain text). {site} is the server's address, e.g. padi.example.com.
+  // The e-mail itself (plain text). {site} is the server's address, e.g. suunto.example.com.
   "admin.notices.mail.subject.one": "New access request for {app}",
   "admin.notices.mail.subject.other": "{n} new access requests for {app}",
   "admin.notices.mail.intro.one": "Someone asked for an account on {site}:",
@@ -133,7 +144,7 @@ export default {
 
   // Demo accounts (sample data built into the server, for app reviewers)
   "admin.demo.title": "Demo account for app reviewers",
-  "admin.demo.intro": "A demo account has a sample PADI logbook built into this server, so app reviewers (for example for the Claude Connectors Directory) can try every tool without a PADI account. Nothing in it is real: nothing is sent to PADI or to a PADI Pro, and every change is kept in memory only. The sample data is reset every day at 04:00 (Swiss time) and whenever the server restarts.",
+  "admin.demo.intro": "A demo account has sample Suunto data built into this server (workouts, sleep, recovery, daily activity, routes and points of interest), so app reviewers (for example for the Claude Connectors Directory) can try every tool without a Suunto account. Nothing in it is real: nothing is sent to Suunto, and every change is kept in memory only. The sample data is reset every day at 04:00 (Swiss time) and whenever the server restarts.",
   "admin.demo.email": "Email for signing in",
   "admin.demo.emailHint": "Only used as the sign-in name. This server never sends mail to it.",
   "admin.demo.create": "Create demo account",
@@ -154,7 +165,7 @@ export default {
   "admin.users.title": "Users",
   "admin.users.col.email": "Email",
   "admin.users.col.status": "Status",
-  "admin.users.col.padi": "PADI",
+  "admin.users.col.suunto": "Suunto",
   "admin.users.col.lastSignIn": "Last sign-in",
   "admin.users.col.toolCalls": "Tool calls (7 days)",
   "admin.users.col.actions": "Actions",
@@ -162,10 +173,10 @@ export default {
   "admin.users.admin": "admin",
   "admin.users.disabled": "disabled",
   "admin.users.demo": "demo",
-  "admin.users.padiConnected": "connected",
-  "admin.users.padiMissing": "not connected",
-  "admin.users.padiReconnect": "needs reconnect",
-  "admin.users.padiDemo": "sample data",
+  "admin.users.suuntoConnected": "connected",
+  "admin.users.suuntoMissing": "not connected",
+  "admin.users.suuntoReconnect": "needs reconnect",
+  "admin.users.suuntoDemo": "sample data",
   "admin.users.makeAdmin": "Make admin",
   "admin.users.removeAdmin": "Remove admin",
   "admin.users.enable": "Enable",
@@ -174,11 +185,11 @@ export default {
   "admin.users.resetPassword": "Reset password",
   "admin.users.confirmResetPassword": "Generate a new temporary password for this user?",
   "admin.users.makeDemo": "Make demo account",
-  "admin.users.confirmMakeDemo": "Turn {email} into a demo account? Their PADI connection is deleted, and their connected apps see the sample logbook from now on.",
+  "admin.users.confirmMakeDemo": "Turn {email} into a demo account? Their Suunto connection is deleted (this server tells Suunto to end its access), and their connected apps see the sample data from now on.",
   "admin.users.makeNormal": "Make normal account",
-  "admin.users.confirmMakeNormal": "Turn {email} back into a normal account? The demo data is deleted, and they can connect their own PADI account.",
+  "admin.users.confirmMakeNormal": "Turn {email} back into a normal account? The demo data is deleted, and they can connect their own Suunto account.",
   "admin.users.delete": "Delete",
-  "admin.users.confirmDelete": "Delete {email} and all their data on this server?",
+  "admin.users.confirmDelete": "Delete {email} and all their data on this server? This server also tells Suunto to end its access.",
 
   // OAuth clients
   "admin.clients.title": "OAuth clients",

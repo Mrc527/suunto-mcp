@@ -13,6 +13,12 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isLoopback, type HttpSettings } from "./config.js";
 
+/**
+ * Largest request body accepted. A tool call can carry a GPX file of up to 5 MB (suunto_import_route),
+ * which grows a little when it is escaped in JSON; the SDK's default of 4 MB is too small.
+ */
+export const MAX_REQUEST_BODY_BYTES = 8 * 1024 * 1024;
+
 export interface HttpServerOptions {
   settings: HttpSettings;
   /** Creates a fresh MCP server for each request (stateless mode). */
@@ -100,7 +106,7 @@ export function startHttpServer(options: HttpServerOptions): Promise<Server> {
         const auth = req.headers.authorization ?? "";
         const match = auth.match(/^Bearer\s+(.+)$/i);
         if (!match || !tokenMatches(settings.token, match[1]!.trim())) {
-          jsonRpcError(res, 401, "Unauthorized", { "www-authenticate": 'Bearer realm="padi-mcp"', ...corsHeaders });
+          jsonRpcError(res, 401, "Unauthorized", { "www-authenticate": 'Bearer realm="suunto-mcp"', ...corsHeaders });
           return;
         }
       }
@@ -112,7 +118,7 @@ export function startHttpServer(options: HttpServerOptions): Promise<Server> {
 
       for (const [k, v] of Object.entries(corsHeaders)) res.setHeader(k, v);
       const mcp = options.createMcpServer();
-      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true, maxRequestBodySize: MAX_REQUEST_BODY_BYTES });
       res.on("close", () => {
         void transport.close();
         void mcp.close();
@@ -130,7 +136,7 @@ export function startHttpServer(options: HttpServerOptions): Promise<Server> {
     server.once("error", reject);
     server.listen(settings.port, settings.host, () => {
       server.off("error", reject);
-      log(`padi-mcp listening on http://${settings.host.includes(":") ? `[${settings.host}]` : settings.host}:${settings.port}/mcp`);
+      log(`suunto-mcp listening on http://${settings.host.includes(":") ? `[${settings.host}]` : settings.host}:${settings.port}/mcp`);
       resolve(server);
     });
   });

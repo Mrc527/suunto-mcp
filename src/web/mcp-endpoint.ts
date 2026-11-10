@@ -1,6 +1,6 @@
 /**
- * The authenticated MCP endpoint. Each request runs with the PADI account of the user the access
- * token belongs to.
+ * The authenticated MCP endpoint. Each request runs with the Suunto connection of the user the
+ * access token belongs to.
  */
 
 import express, { type Request, type Response, type Router } from "express";
@@ -9,10 +9,8 @@ import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middlew
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Icon } from "@modelcontextprotocol/sdk/types.js";
-import { DEMO_NOTICE } from "../demo/index.js";
-import { DemoLogbookStore } from "../demo/logbook.js";
-import { PadiAuthError, type PadiAuthErrorCode } from "../padi/auth.js";
-import { createMcpServer, createServices, type Services } from "../server.js";
+import { DEMO_NOTICE, DemoActivityStore } from "../demo/index.js";
+import { createMcpServer, createServices } from "../server.js";
 import { redactForLog, UserFacingError } from "../util/errors.js";
 import { buildDemoConfig } from "./accounts.js";
 import { mcpIcons } from "./brand.js";
@@ -22,76 +20,47 @@ import { SCOPE } from "./oauth.js";
 import { issuerOf } from "./routes-oauth.js";
 import type { User } from "./store.js";
 
-/** A placeholder logbook store for the setup server (never read: every call is stopped first). */
-const SETUP_STORE = new DemoLogbookStore();
+/**
+ * A placeholder demo store for the setup server (never read: every call is stopped first). Built
+ * on first use, because building sample data takes a moment.
+ */
+let setupStore: DemoActivityStore | undefined;
+
+/** Why a user's tool calls cannot reach Suunto. */
+type SetupProblem = { kind: "not_connected" } | { kind: "not_configured" } | { kind: "unusable"; detail: string };
+
+/** The answer of every tool call while the problem lasts. */
+export function setupMessage(ctx: WebContext, user: User, problem: SetupProblem): string {
+  const accountUrl = `${issuerOf(ctx.publicUrl)}/account`;
+  switch (problem.kind) {
+    case "not_configured":
+      return "The administrator of this server has not set up the Suunto connection yet, so Suunto data cannot be read. Try again later, or ask the administrator of this server.";
+    case "unusable":
+      return `The Suunto connection saved for ${user.email} cannot be used: ${problem.detail} Connect Suunto again at ${accountUrl}.`;
+    default:
+      return `Suunto is not connected yet for ${user.email}. Connect your Suunto account first at ${accountUrl}, then try again.`;
+  }
+}
 
 /**
- * Server for users who have not connected PADI yet (or whose connection cannot be used). It
- * offers the same tools as a connected account, because Claude caches the tool list, but every
- * call answers with setup instructions.
+ * Server for users who cannot use Suunto yet: not connected, the operator's app keys are missing,
+ * or the stored connection cannot be read. It offers the same tools as a connected account,
+ * because AI apps cache the tool list, but every call answers with what to do.
  */
-function setupServer(ctx: WebContext, user: User, problem?: string | "reconnect"): McpServer {
-  const accountUrl = `${issuerOf(ctx.publicUrl)}/account`;
-  const message =
-    problem === "reconnect"
-      ? expiredMessage(ctx)
-      : problem
-        ? `The PADI connection saved for ${user.email} cannot be used: ${problem} Fix it at ${accountUrl}.`
-        : `PADI is not connected yet for ${user.email}. Ask the user to open ${accountUrl}, sign in with their PADI e-mail and password, then try again.`;
+function setupServer(ctx: WebContext, user: User, problem: SetupProblem): McpServer {
+  const message = setupMessage(ctx, user, problem);
   // The tool list of a writable account. Nothing is ever read from the placeholder store: the
   // guard below stops every call before it runs.
   const config = buildDemoConfig(ctx.store.getSettings(), false);
-  const services = createServices(config, { demo: SETUP_STORE });
-  const mcp = createMcpServer(config, services, ctx.log, {
+  setupStore ??= new DemoActivityStore();
+  const services = createServices(config, { demo: setupStore });
+  return createMcpServer(config, services, ctx.log, {
     ...branding(ctx),
     beforeToolCall: () => {
       throw new UserFacingError(message);
     },
     extraInstructions: message,
   });
-  return mcp;
-}
-
-/** PADI client errors that mean "sign in to PADI again" (in web mode only "expired" happens). */
-const SIGN_IN_AGAIN: ReadonlySet<PadiAuthErrorCode> = new Set(["expired", "bad_credentials", "challenge", "not_confirmed", "password_reset"]);
-
-/** The answer of a tool call that found that the user's PADI sign-in stopped working. */
-function expiredMessage(ctx: WebContext): string {
-  return `Your PADI sign-in expired. Sign in again at ${issuerOf(ctx.publicUrl)}/account.`;
-}
-
-/**
- * A connected user's services, with the errors that mean "sign in to PADI again" turned into a
- * message with the address of the account page. The PADI client does not know that address: it
- * says "Sign in to PADI again", and an AI app could then send the user to padi.com, which does
- * not help. Later calls get the same message from the setup server (the user is then marked
- * "needs reconnect"), but the call that finds the dead sign-in, and calls running at the same
- * time, run here.
- */
-function withAccountLink(services: Services, message: string): Services {
-  if (!services.logbook) return services;
-  const map = (error: unknown) =>
-    error instanceof PadiAuthError && SIGN_IN_AGAIN.has(error.code) ? new UserFacingError(message, { cause: error }) : error;
-  const logbook = new Proxy(services.logbook, {
-    get(target, prop, receiver) {
-      const value: unknown = Reflect.get(target, prop, receiver);
-      if (typeof value !== "function") return value;
-      return (...args: unknown[]) => {
-        let result: unknown;
-        try {
-          result = value.apply(target, args);
-        } catch (error) {
-          throw map(error);
-        }
-        return result instanceof Promise
-          ? result.catch((error: unknown) => {
-              throw map(error);
-            })
-          : result;
-      };
-    },
-  });
-  return { ...services, logbook };
 }
 
 function branding(ctx: WebContext): { icons: Icon[]; websiteUrl: string } {
@@ -135,8 +104,9 @@ export function mcpRoutes(ctx: WebContext): Router {
 
   r.use("/mcp", cors);
 
-  // Same size limit as the MCP SDK. Parsing here lets the batch size be checked.
-  const json = express.json({ limit: "4mb" });
+  // Parsing here lets the batch size be checked. 8 MB: a GPX file of up to 5 MB (suunto_import_route)
+  // must fit after JSON escaping.
+  const json = express.json({ limit: "8mb" });
 
   r.post("/mcp", bearer, perUser, json, async (req: Request & { auth?: AuthInfo }, res: Response) => {
     // The rate limit counts requests; a JSON-RPC batch could hide many tool calls in one.
@@ -154,9 +124,13 @@ export function mcpRoutes(ctx: WebContext): Router {
     }
     let server: McpServer;
     try {
-      const userCtx = user.padiNeedsReconnect && !user.demo ? undefined : ctx.pool.get(user);
+      // "Needs reconnect" does not block tool calls: Suunto has refused refresh tokens by mistake
+      // during outages. The user's Suunto session decides (it tries again after a cool-down) and
+      // answers "Your Suunto connection expired. Connect Suunto again at <url>/account."
+      const userCtx = ctx.pool.get(user);
+      const accountUrl = `${issuerOf(ctx.publicUrl)}/account`;
       server = userCtx
-        ? createMcpServer(userCtx.config, user.demo ? userCtx.services : withAccountLink(userCtx.services, expiredMessage(ctx)), ctx.log, {
+        ? createMcpServer(userCtx.config, userCtx.services, ctx.log, {
             ...branding(ctx),
             onToolCall: (tool, ok, ms) => {
               try {
@@ -166,13 +140,14 @@ export function mcpRoutes(ctx: WebContext): Router {
               }
             },
             extraInstructions: user.demo
-              ? `${DEMO_NOTICE}\nAccount settings (read-only switch) are managed at ${issuerOf(ctx.publicUrl)}/account.`
-              : `Account settings (PADI connection, units, read-only) are managed at ${issuerOf(ctx.publicUrl)}/account.`,
+              ? `${DEMO_NOTICE}\nAccount settings (read-only switch) are managed at ${accountUrl}.`
+              : `Account settings (Suunto connection, units, time zone, read-only) are managed at ${accountUrl}.` +
+                (user.suuntoNeedsReconnect ? `\nSuunto refused the stored sign-in of this account: if tool calls fail, ask the user to connect Suunto again at ${accountUrl}.` : ""),
             ...(user.demo ? { accountInfo: { demo_account: DEMO_NOTICE } } : {}),
           })
-        : setupServer(ctx, user, user.padiNeedsReconnect && !user.demo ? "reconnect" : undefined);
+        : setupServer(ctx, user, ctx.suuntoKeys ? { kind: "not_connected" } : { kind: "not_configured" });
     } catch (error) {
-      server = setupServer(ctx, user, (error as Error).message);
+      server = setupServer(ctx, user, { kind: "unusable", detail: (error as Error).message });
     }
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on("close", () => {

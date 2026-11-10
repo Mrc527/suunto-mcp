@@ -3,8 +3,9 @@
  */
 
 import express, { type Request, type Response, type Router } from "express";
-import { customEndpoints, endpointsFromEnv } from "../padi/endpoints.js";
+import { customEndpoints } from "../suunto/endpoints.js";
 import { isValidTimeZone } from "../util/dates.js";
+import { deauthorizeAtSuunto } from "./accounts.js";
 import { bool, page, str, type WebContext } from "./context.js";
 import { hashPassword, randomToken, readablePassword } from "./crypto.js";
 import { formatDate, html } from "./html.js";
@@ -70,20 +71,17 @@ async function selfTest(ctx: WebContext): Promise<SelfTestRow[]> {
     if (res instanceof Error) rows.push({ label: path, ok: false, detail: res.message });
     else rows.push({ label: path, ok: res.status === 200, detail: `HTTP ${res.status}` });
   }
-  // Which PADI servers the users' requests go to (nothing is sent to PADI here). Custom servers
-  // are meant for tests against a mock.
-  try {
-    const custom = customEndpoints(endpointsFromEnv(ctx.operator));
-    const mode = ctx.operator.PADI_API_MODE || "proxy";
-    rows.push({
-      label: t("admin.selfTest.padi"),
-      ok: custom.length === 0,
-      detail: custom.length ? t("admin.selfTest.padiCustom", { list: custom.join(", "), mode }) : t("admin.selfTest.padiDefault", { mode }),
-    });
-  } catch (error) {
-    rows.push({ label: t("admin.selfTest.padi"), ok: false, detail: (error as Error).message });
-  }
+  // The Suunto app keys and the Suunto servers the users' requests go to (nothing is sent to
+  // Suunto here). Custom servers are meant for tests against a mock.
+  rows.push({ label: t("admin.suunto.keys"), ok: !!ctx.suuntoKeys, detail: ctx.suuntoKeys ? t("admin.suunto.keysSet") : t("admin.suunto.keysMissing") });
+  rows.push({ label: t("admin.selfTest.suunto"), ok: suuntoServers(ctx).custom.length === 0, detail: suuntoServers(ctx).text });
   return rows;
+}
+
+/** Which Suunto servers the users' requests go to, as a phrase. */
+function suuntoServers(ctx: WebContext): { custom: string[]; text: string } {
+  const custom = customEndpoints(ctx.suuntoEndpoints);
+  return { custom, text: custom.length ? t("admin.selfTest.suuntoCustom", { list: custom.join(", ") }) : t("admin.selfTest.suuntoDefault") };
 }
 
 /** Why no e-mail about access requests could be sent, as a phrase for a sentence. */
@@ -108,9 +106,9 @@ export function adminRoutes(ctx: WebContext): Router {
     const users = ctx.store.listUsers().filter((u) => !u.pending);
     const demoUsers = users.filter((u) => u.demo);
     // Connections on record that cannot be decrypted (the master key changed): they cannot be
-    // used until the user signs in to PADI again.
-    const unreadable = ctx.store.unreadablePadiUserIds();
-    const padiWorks = (u: (typeof users)[number]) => u.hasPadi && !u.padiNeedsReconnect && !u.demo && !unreadable.has(u.id);
+    // used until the user connects Suunto again.
+    const unreadable = ctx.store.unreadableSuuntoUserIds();
+    const suuntoWorks = (u: (typeof users)[number]) => u.hasSuunto && !u.suuntoNeedsReconnect && !u.demo && !unreadable.has(u.id);
     const requests = ctx.store.listAccessRequests();
     const activity = ctx.store.activityCounts(Date.now() - 7 * 86_400_000);
     const invites = ctx.store.listInvites();
@@ -136,7 +134,7 @@ export function adminRoutes(ctx: WebContext): Router {
           <div><dt>${t("admin.overview.mcpUrl")}</dt><dd><code>${ctx.mcpUrl.href}</code></dd></div>
           <div><dt>${t("admin.overview.publicUrl")}</dt><dd>${ctx.publicUrl.href}</dd></div>
           <div><dt>${t("admin.overview.version")}</dt><dd>${ctx.version}</dd></div>
-          <div><dt>${t("admin.overview.users")}</dt><dd>${t("admin.overview.userCount", { n: users.length, padi: users.filter(padiWorks).length })}</dd></div>
+          <div><dt>${t("admin.overview.users")}</dt><dd>${t("admin.overview.userCount", { n: users.length, suunto: users.filter(suuntoWorks).length })}</dd></div>
           <div><dt>${t("admin.overview.requests")}</dt><dd>${requests.length ? html`<a href="#requests">${tn("admin.overview.requestsWaiting", requests.length)}</a>` : t("admin.overview.noRequests")}</dd></div>
           <div><dt>${t("admin.overview.activeConnections")}</dt><dd>${ctx.pool.size}</dd></div>
           <div><dt>${t("admin.overview.platform")}</dt><dd>${ctx.platform}</dd></div>
@@ -146,6 +144,19 @@ export function adminRoutes(ctx: WebContext): Router {
         ${extra.selfTest
           ? html`<ul class="status-list">${extra.selfTest.map((row) => html`<li><span class="badge ${row.ok ? "ok" : "bad"}">${row.ok ? t("admin.selfTest.badgeOk") : t("admin.selfTest.badgeProblem")}</span> ${row.label} <span class="muted">${row.detail}</span></li>`)}</ul>`
           : ""}
+      </div>
+
+      <div class="card" id="suunto">
+        <h2>${t("admin.suunto.title")} ${ctx.suuntoKeys
+          ? html`<span class="badge ok">${t("admin.suunto.keysSet")}</span>`
+          : html`<span class="badge bad">${t("admin.suunto.keysMissing")}</span>`}</h2>
+        ${ctx.suuntoKeys ? "" : html`<div class="flash warn">${t("admin.suunto.missingWarning")}</div>`}
+        <dl class="kv">
+          <div><dt>${t("admin.suunto.keys")}</dt><dd>${ctx.suuntoKeys ? t("admin.suunto.keysSet") : t("admin.suunto.keysMissing")} <span class="muted">${t("admin.suunto.keysHint")}</span></dd></div>
+          <div><dt>${t("admin.suunto.redirectUri")}</dt><dd><code>${ctx.suuntoRedirectUri}</code> <span class="muted">${t("admin.suunto.redirectUriHint")}</span></dd></div>
+          <div><dt>${t("admin.suunto.servers")}</dt><dd>${suuntoServers(ctx).text}</dd></div>
+        </dl>
+        <p class="muted">${t("admin.suunto.plan")}</p>
       </div>
 
       <div class="card">
@@ -274,7 +285,7 @@ export function adminRoutes(ctx: WebContext): Router {
       <div class="card">
         <h2>${t("admin.users.title")}</h2>
         <div class="table-wrap wide"><table>
-          <tr><th>${t("admin.users.col.email")}</th><th>${t("admin.users.col.status")}</th><th>${t("admin.users.col.padi")}</th><th>${t("admin.users.col.lastSignIn")}</th><th>${t("admin.users.col.toolCalls")}</th><th>${t("admin.users.col.actions")}</th></tr>
+          <tr><th>${t("admin.users.col.email")}</th><th>${t("admin.users.col.status")}</th><th>${t("admin.users.col.suunto")}</th><th>${t("admin.users.col.lastSignIn")}</th><th>${t("admin.users.col.toolCalls")}</th><th>${t("admin.users.col.actions")}</th></tr>
           ${users.map((u) => {
             const self = u.id === s.user.id;
             const action = (name: string, label: string, confirm?: string, danger = false) =>
@@ -284,12 +295,12 @@ export function adminRoutes(ctx: WebContext): Router {
               <td>${u.email}${self ? html` <span class="badge">${t("admin.users.you")}</span>` : ""}</td>
               <td>${u.isAdmin ? html`<span class="badge ok">${t("admin.users.admin")}</span> ` : ""}${u.demo ? html`<span class="badge warn">${t("admin.users.demo")}</span> ` : ""}${u.disabled ? html`<span class="badge bad">${t("admin.users.disabled")}</span>` : ""}</td>
               <td>${u.demo
-                ? html`<span class="badge">${t("admin.users.padiDemo")}</span>`
-                : u.padiNeedsReconnect || unreadable.has(u.id)
-                  ? html`<span class="badge bad">${t("admin.users.padiReconnect")}</span>`
-                  : u.hasPadi
-                    ? html`<span class="badge ok">${t("admin.users.padiConnected")}</span>`
-                    : html`<span class="badge warn">${t("admin.users.padiMissing")}</span>`}</td>
+                ? html`<span class="badge">${t("admin.users.suuntoDemo")}</span>`
+                : u.suuntoNeedsReconnect || unreadable.has(u.id)
+                  ? html`<span class="badge bad">${t("admin.users.suuntoReconnect")}</span>`
+                  : u.hasSuunto
+                    ? html`<span class="badge ok">${t("admin.users.suuntoConnected")}</span>`
+                    : html`<span class="badge warn">${t("admin.users.suuntoMissing")}</span>`}</td>
               <td>${formatDate(u.lastLoginAt)}</td>
               <td>${activity.get(u.id) ?? 0}</td>
               <td>${self
@@ -327,6 +338,14 @@ export function adminRoutes(ctx: WebContext): Router {
   };
 
   r.get("/admin", (req, res) => render(req, res));
+
+  /** Tell Suunto that a user's connection ends (best effort; never throws). */
+  const disconnect = (userId: string) =>
+    deauthorizeAtSuunto(ctx.store.getSuuntoSettings(userId), {
+      keys: ctx.suuntoKeys,
+      endpoints: ctx.suuntoEndpoints,
+      ...(ctx.suuntoFetch ? { fetch: ctx.suuntoFetch } : {}),
+    });
 
   r.post("/admin/settings", form, async (req, res) => {
     if (!csrfOk(req, res, ctx.cookies)) return render(req, res, { flash: { kind: "error", text: t("admin.error.formExpired") } }, 400);
@@ -407,14 +426,18 @@ export function adminRoutes(ctx: WebContext): Router {
       }
       case "delete":
         if (lastAdmin) return void res.redirect(303, "/admin?m=lastadmin");
-        // Delete first (tokens go with it), then close the connection, so no request can
-        // re-create it in between.
+        // Tell Suunto first (best effort), while the tokens are still stored.
+        await disconnect(id);
+        // Delete (tokens go with it), then close the connection, so no request can re-create it
+        // in between.
         ctx.store.deleteUser(id);
         ctx.demo.forget(id);
         await ctx.pool.invalidate(id);
         break;
       case "demo-on":
-        // Deletes the user's PADI connection: from now on their apps see the sample data.
+        // Deletes the user's Suunto connection: from now on their apps see the sample data.
+        if (user.isAdmin || user.demo) return void res.redirect(303, "/admin");
+        await disconnect(id);
         if (!ctx.store.setDemo(id, true)) return void res.redirect(303, "/admin");
         // Forget the stores before the await below, so a request in between builds on new ones.
         ctx.demo.forget(id);

@@ -1,11 +1,12 @@
 /**
- * Data access for the web mode: users, sessions, server settings, invites, OAuth state and activity.
+ * Data access for the web mode: users, sessions, server settings, invites, OAuth state, the
+ * "Connect Suunto" states and activity.
  */
 
 import { randomUUID } from "node:crypto";
 import type { OAuthClientInformationFull } from "@modelcontextprotocol/sdk/shared/auth.js";
-import type { UnitChoice } from "../logbook/types.js";
-import type { LoginMethod, StoredPadiTokens } from "../padi/auth.js";
+import type { UnitChoice } from "../activity/types.js";
+import type { StoredSuuntoTokens } from "../suunto/oauth.js";
 import { randomToken, SecretBox, sha256 } from "./crypto.js";
 import { transaction, type Db } from "./db.js";
 
@@ -19,15 +20,19 @@ export interface User {
   requestNote?: string;
   createdAt: number;
   lastLoginAt?: number;
-  /** A PADI account is connected (encrypted settings are stored). */
-  hasPadi: boolean;
-  /** When the PADI connection was last saved or removed (not when its tokens were refreshed). */
+  /** A Suunto account is connected (encrypted settings are stored). */
+  hasSuunto: boolean;
+  /** When the Suunto connection was last saved or removed (not when its tokens were refreshed). */
   serviceUpdatedAt?: number;
-  /** The stored PADI sign-in stopped working: the user must sign in to PADI again. */
-  padiNeedsReconnect: boolean;
   /**
-   * Demo account: its logbook is sample data built into the server (src/demo), kept in memory
-   * only. It never has PADI settings.
+   * Suunto refused the stored refresh token: the user should connect Suunto again. Tool calls are
+   * not blocked by it (Suunto has refused tokens by mistake during outages; the session tries
+   * again after a cool-down), and a refresh that works again clears it.
+   */
+  suuntoNeedsReconnect: boolean;
+  /**
+   * Demo account: its Suunto data is sample data built into the server (src/demo), kept in memory
+   * only. It never has Suunto settings.
    */
   demo: boolean;
   /** A demo account's own read-only switch. */
@@ -38,32 +43,55 @@ export interface User {
   lang?: string;
 }
 
+/** The test call made when Suunto was connected (the account page shows it; it never calls Suunto). */
+export interface SuuntoConnectionCheck {
+  /** When it ran (epoch ms). */
+  at: number;
+  /** Workouts that started in the 30 days before the check (at most CHECK_LIMIT). */
+  workouts?: number;
+  /** Why the test call failed (English text from the Suunto client; no secrets). */
+  error?: string;
+}
+
 /**
- * Per-user PADI connection (stored encrypted, AAD = user id). The PADI password is used once to
- * sign in and is never stored: only the refresh token is kept.
+ * Per-user Suunto connection (stored encrypted, AAD = user id). People sign in on Suunto's own
+ * page: this server never sees their Suunto password, only the tokens Suunto hands out.
  */
-export interface PadiAccountSettings {
-  /** The PADI sign-in e-mail (lowercase). */
-  email: string;
+export interface SuuntoAccountSettings {
+  /** The Suunto App username (the access token's "user" claim). */
+  username: string;
   refreshToken: string;
-  /** The method that issued the refresh token. */
-  loginMethod: LoginMethod;
-  /** The app client the tokens were issued for. */
+  accessToken?: string;
+  /** Epoch ms. */
+  accessTokenExpiresAt?: number;
+  /** The app (client id) the tokens were issued to. */
   clientId: string;
-  /** custom:affiliate_id of the account. */
-  affiliateId: string;
-  /** The diver's name from the token, for display. */
-  name?: string;
   units: UnitChoice;
   readOnly: boolean;
   /**
-   * The diver's time zone (IANA name): it decides what "today" is, for example the newest date
-   * a dive may have. Not set: the server's default time zone.
+   * The user's time zone (IANA name): it decides what "today" and a calendar day are. Not set:
+   * the server's default time zone.
    */
   timeZone?: string;
-  /** When the user signed in to PADI here (epoch ms). */
+  /** When the user connected Suunto here (epoch ms). */
   connectedAt: number;
+  /** The test call made at connect time. */
+  lastCheck?: SuuntoConnectionCheck;
 }
+
+/** What a "Connect Suunto" state remembers until the callback. */
+export interface OAuthStateInfo {
+  /** A pending consent page to return to. */
+  next?: string;
+  /** The browser's time zone from the connect form. */
+  timeZone?: string;
+  createdAt: number;
+}
+
+/** A "Connect Suunto" state is valid this long. */
+export const OAUTH_STATE_TTL_MS = 10 * 60_000;
+/** Open "Connect Suunto" states per user; the oldest are dropped. */
+export const MAX_OAUTH_STATES = 5;
 
 /**
  * open: anyone can create an account. approval: anyone can request one, an administrator approves
@@ -168,9 +196,9 @@ function toUser(r: Row): User {
     ...(r.request_note != null ? { requestNote: String(r.request_note) } : {}),
     createdAt: Number(r.created_at),
     ...(r.last_login_at != null ? { lastLoginAt: Number(r.last_login_at) } : {}),
-    hasPadi: r.service_enc != null,
+    hasSuunto: r.service_enc != null,
     ...(r.service_updated_at != null ? { serviceUpdatedAt: Number(r.service_updated_at) } : {}),
-    padiNeedsReconnect: r.service_enc != null && Number(r.padi_needs_reconnect) === 1,
+    suuntoNeedsReconnect: r.service_enc != null && Number(r.suunto_needs_reconnect) === 1,
     demo: Number(r.demo) === 1,
     ...(Number(r.demo) === 1 && Number(r.demo_read_only) === 1 ? { demoReadOnly: true } : {}),
     notifyRequests: Number(r.notify_requests ?? 1) === 1,
@@ -190,18 +218,19 @@ export class Store {
   // Users
   // -------------------------------------------------------------------------------------------
 
-  /** Number of users whose stored PADI settings cannot be decrypted with the current key. */
+  /** Number of users whose stored Suunto settings cannot be decrypted with the current key. */
   countUnreadableSettings(): number {
-    return this.unreadablePadiUserIds().size;
+    return this.unreadableSuuntoUserIds().size;
   }
 
   /**
-   * Users whose stored PADI settings cannot be decrypted with the current key (for example after
-   * the master key changed). They have a connection on record (hasPadi) that cannot be used.
+   * Users whose stored Suunto settings cannot be decrypted with the current key (for example
+   * after the master key changed). They have a connection on record (hasSuunto) that cannot be
+   * used.
    */
-  unreadablePadiUserIds(): Set<string> {
+  unreadableSuuntoUserIds(): Set<string> {
     const rows = this.db.prepare("SELECT id FROM users WHERE service_enc IS NOT NULL").all() as Row[];
-    return new Set(rows.map((r) => String(r.id)).filter((id) => this.readPadiSettings(id).unreadable));
+    return new Set(rows.map((r) => String(r.id)).filter((id) => this.readSuuntoSettings(id).unreadable));
   }
 
   countUsers(): number {
@@ -219,7 +248,7 @@ export class Store {
     return this.getUser(id)!;
   }
 
-  /** Create a demo account: approved, not an administrator, with sample data instead of PADI. */
+  /** Create a demo account: approved, not an administrator, with sample data instead of Suunto. */
   createDemoUser(email: string, passwordHash: string): User {
     const id = randomUUID();
     this.db
@@ -233,16 +262,20 @@ export class Store {
   }
 
   /**
-   * Turn an account into a demo account or back. A demo account never keeps a PADI connection: it
-   * is deleted. Administrators cannot be demo accounts. Returns false when nothing changed.
+   * Turn an account into a demo account or back. A demo account never keeps a Suunto connection:
+   * it is deleted, with any "Connect Suunto" in progress. Administrators cannot be demo accounts.
+   * Returns false when nothing changed.
    */
   setDemo(id: string, demo: boolean): boolean {
-    const res = demo
-      ? this.db
-          .prepare("UPDATE users SET demo = 1, demo_read_only = 0, service_enc = NULL, padi_needs_reconnect = 0, service_updated_at = ? WHERE id = ? AND is_admin = 0 AND demo = 0")
-          .run(now(), id)
-      : this.db.prepare("UPDATE users SET demo = 0, demo_read_only = 0, service_updated_at = ? WHERE id = ? AND demo = 1").run(now(), id);
-    return Number(res.changes) === 1;
+    return transaction(this.db, () => {
+      const res = demo
+        ? this.db
+            .prepare("UPDATE users SET demo = 1, demo_read_only = 0, service_enc = NULL, suunto_needs_reconnect = 0, service_updated_at = ? WHERE id = ? AND is_admin = 0 AND demo = 0")
+            .run(now(), id)
+        : this.db.prepare("UPDATE users SET demo = 0, demo_read_only = 0, service_updated_at = ? WHERE id = ? AND demo = 1").run(now(), id);
+      if (demo && Number(res.changes) === 1) this.db.prepare("DELETE FROM suunto_oauth_states WHERE user_id = ?").run(id);
+      return Number(res.changes) === 1;
+    });
   }
 
   setDemoReadOnly(id: string, readOnly: boolean): void {
@@ -362,72 +395,130 @@ export class Store {
     this.db.prepare("UPDATE users SET last_login_at = ? WHERE id = ?").run(now(), id);
   }
 
-  /** Stored PADI settings; undefined when none are stored or they cannot be decrypted. */
-  getPadiSettings(userId: string): PadiAccountSettings | undefined {
-    return this.readPadiSettings(userId).settings;
+  /** Stored Suunto settings; undefined when none are stored or they cannot be decrypted. */
+  getSuuntoSettings(userId: string): SuuntoAccountSettings | undefined {
+    return this.readSuuntoSettings(userId).settings;
   }
 
   /**
-   * Like getPadiSettings, but also tells whether stored settings exist that cannot be read
+   * Like getSuuntoSettings, but also tells whether stored settings exist that cannot be read
    * (for example after the server's master key changed). Never throws.
    */
-  readPadiSettings(userId: string): { settings?: PadiAccountSettings; unreadable: boolean } {
+  readSuuntoSettings(userId: string): { settings?: SuuntoAccountSettings; unreadable: boolean } {
     const r = this.db.prepare("SELECT service_enc FROM users WHERE id = ?").get(userId) as Row | undefined;
     if (!r || r.service_enc == null) return { unreadable: false };
     try {
-      return { settings: JSON.parse(this.box.open(String(r.service_enc), userId)) as PadiAccountSettings, unreadable: false };
+      return { settings: JSON.parse(this.box.open(String(r.service_enc), userId)) as SuuntoAccountSettings, unreadable: false };
     } catch {
       return { unreadable: true };
     }
   }
 
   /**
-   * Save or remove a user's PADI connection. This changes service_updated_at (the user's services
-   * are rebuilt) and clears "needs reconnect". A demo account never gets one (nothing is saved).
+   * Save or remove (undefined) a user's Suunto connection. This changes service_updated_at (the
+   * user's services are rebuilt) and clears "needs reconnect". A demo account never gets one
+   * (nothing is saved).
    */
-  savePadiSettings(userId: string, settings: PadiAccountSettings | undefined): void {
+  saveSuuntoSettings(userId: string, settings: SuuntoAccountSettings | undefined): void {
     const enc = settings ? this.box.seal(JSON.stringify(settings), userId) : null;
     this.db
-      .prepare("UPDATE users SET service_enc = ?, service_updated_at = ?, padi_needs_reconnect = 0 WHERE id = ? AND (demo = 0 OR ? IS NULL)")
+      .prepare("UPDATE users SET service_enc = ?, service_updated_at = ?, suunto_needs_reconnect = 0 WHERE id = ? AND (demo = 0 OR ? IS NULL)")
       .run(enc, now(), userId, enc);
   }
 
   /**
-   * Keep the tokens of a refresh (the PADI auth API may hand out a new refresh token) without
-   * changing service_updated_at, so the user's running services are not rebuilt. With
-   * `connectedAt`, nothing is saved when the stored connection is another one (the user signed
-   * in again meanwhile). Returns whether anything was saved.
+   * Keep the tokens of a refresh (Suunto may hand out a new refresh token) without changing
+   * service_updated_at, so the user's running services are not rebuilt. A refresh that worked
+   * also clears "needs reconnect": Suunto has refused refresh tokens by mistake and accepted them
+   * again later, and the session has no other way to say the connection works again. With
+   * `connectedAt`, nothing is saved when the stored connection is another one (the user connected
+   * again meanwhile). Returns whether anything was saved.
    */
-  savePadiTokens(userId: string, tokens: Pick<StoredPadiTokens, "refreshToken" | "loginMethod" | "clientId">, connectedAt?: number): boolean {
+  saveSuuntoTokens(userId: string, tokens: StoredSuuntoTokens, connectedAt?: number): boolean {
     return transaction(this.db, () => {
-      const { settings } = this.readPadiSettings(userId);
+      const { settings } = this.readSuuntoSettings(userId);
       if (!settings) return false;
       if (connectedAt !== undefined && settings.connectedAt !== connectedAt) return false;
-      const next: PadiAccountSettings = { ...settings, refreshToken: tokens.refreshToken, loginMethod: tokens.loginMethod, clientId: tokens.clientId };
-      this.db.prepare("UPDATE users SET service_enc = ?, padi_needs_reconnect = 0 WHERE id = ?").run(this.box.seal(JSON.stringify(next), userId), userId);
+      const next: SuuntoAccountSettings = { ...settings, refreshToken: tokens.refreshToken, clientId: tokens.clientId };
+      // A token set without an access token must not keep an older one next to a new refresh token.
+      if (tokens.accessToken) next.accessToken = tokens.accessToken;
+      else delete next.accessToken;
+      if (tokens.accessTokenExpiresAt !== undefined) next.accessTokenExpiresAt = tokens.accessTokenExpiresAt;
+      else delete next.accessTokenExpiresAt;
+      this.db.prepare("UPDATE users SET service_enc = ?, suunto_needs_reconnect = 0 WHERE id = ?").run(this.box.seal(JSON.stringify(next), userId), userId);
       return true;
     });
   }
 
   /**
-   * Change the units, read-only switch and time zone of the saved PADI connection. The sign-in
-   * stays as it is (also its "needs reconnect" mark), but the user's services are rebuilt,
-   * because read-only changes the tools an AI app gets. A time zone that is not given stays as
-   * it is. Returns false when no readable connection is saved.
+   * Change the units, read-only switch and time zone of the saved Suunto connection. The tokens
+   * stay as they are (also the "needs reconnect" mark), but the user's services are rebuilt,
+   * because read-only changes the tools an AI app gets. A time zone that is not given stays as it
+   * is. Returns false when no readable connection is saved.
    */
-  savePadiPreferences(userId: string, prefs: Pick<PadiAccountSettings, "units" | "readOnly" | "timeZone">): boolean {
+  saveSuuntoPreferences(userId: string, prefs: Pick<SuuntoAccountSettings, "units" | "readOnly" | "timeZone">): boolean {
     return transaction(this.db, () => {
-      const { settings } = this.readPadiSettings(userId);
+      const { settings } = this.readSuuntoSettings(userId);
       if (!settings) return false;
-      const next: PadiAccountSettings = { ...settings, units: prefs.units, readOnly: prefs.readOnly, ...(prefs.timeZone ? { timeZone: prefs.timeZone } : {}) };
+      const next: SuuntoAccountSettings = { ...settings, units: prefs.units, readOnly: prefs.readOnly, ...(prefs.timeZone ? { timeZone: prefs.timeZone } : {}) };
       this.db.prepare("UPDATE users SET service_enc = ?, service_updated_at = ? WHERE id = ?").run(this.box.seal(JSON.stringify(next), userId), now(), userId);
       return true;
     });
   }
 
-  /** Mark (or clear) that the stored PADI sign-in no longer works. Keeps service_updated_at. */
-  setPadiNeedsReconnect(userId: string, needsReconnect: boolean): void {
-    this.db.prepare("UPDATE users SET padi_needs_reconnect = ? WHERE id = ? AND service_enc IS NOT NULL").run(needsReconnect ? 1 : 0, userId);
+  /** Mark (or clear) that Suunto refused the stored refresh token. Keeps service_updated_at. */
+  setSuuntoNeedsReconnect(userId: string, needsReconnect: boolean): void {
+    this.db.prepare("UPDATE users SET suunto_needs_reconnect = ? WHERE id = ? AND service_enc IS NOT NULL").run(needsReconnect ? 1 : 0, userId);
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // "Connect Suunto" states (only their hash is stored)
+  // -------------------------------------------------------------------------------------------
+
+  /**
+   * Start a "Connect Suunto": a random state (32 bytes, base64url) for Suunto's authorize URL.
+   * Only its SHA-256 hash is stored, with the user, `next` (a pending consent page) and the
+   * browser's time zone. At most MAX_OAUTH_STATES stay open per user: the oldest are dropped.
+   */
+  createOAuthState(userId: string, next?: string, timeZone?: string): string {
+    const state = randomToken("", 32);
+    const t = now();
+    transaction(this.db, () => {
+      this.db.prepare("DELETE FROM suunto_oauth_states WHERE created_at <= ?").run(t - OAUTH_STATE_TTL_MS);
+      this.db
+        .prepare("INSERT INTO suunto_oauth_states (state_hash, user_id, created_at, next, time_zone) VALUES (?, ?, ?, ?, ?)")
+        .run(sha256(state), userId, t, next ?? null, timeZone ?? null);
+      // rowid breaks ties between states made in the same millisecond.
+      this.db
+        .prepare(
+          `DELETE FROM suunto_oauth_states WHERE user_id = ? AND rowid NOT IN
+             (SELECT rowid FROM suunto_oauth_states WHERE user_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?)`,
+        )
+        .run(userId, userId, MAX_OAUTH_STATES);
+    });
+    return state;
+  }
+
+  /**
+   * Use a "Connect Suunto" state: only once, only within OAUTH_STATE_TTL_MS, and only by the user
+   * who started it. A state of another user stays as it is (its owner can still finish). Returns
+   * undefined when the state is unknown, used, expired or another user's.
+   */
+  consumeOAuthState(state: string, userId: string): OAuthStateInfo | undefined {
+    if (!state) return undefined;
+    const hash = sha256(state);
+    return transaction(this.db, () => {
+      const r = this.db.prepare("SELECT * FROM suunto_oauth_states WHERE state_hash = ? AND user_id = ?").get(hash, userId) as Row | undefined;
+      if (!r) return undefined;
+      this.db.prepare("DELETE FROM suunto_oauth_states WHERE state_hash = ?").run(hash);
+      const createdAt = Number(r.created_at);
+      if (createdAt <= now() - OAUTH_STATE_TTL_MS) return undefined;
+      return {
+        createdAt,
+        ...(r.next != null ? { next: String(r.next) } : {}),
+        ...(r.time_zone != null ? { timeZone: String(r.time_zone) } : {}),
+      };
+    });
   }
 
   // -------------------------------------------------------------------------------------------
@@ -628,7 +719,7 @@ export class Store {
   // -------------------------------------------------------------------------------------------
 
   createCode(p: PendingAuthorization, userId: string): string {
-    const code = randomToken("pdm_code_", 24);
+    const code = randomToken("sum_code_", 24);
     this.db
       .prepare("INSERT INTO oauth_codes (code_hash, client_id, user_id, data, expires_at) VALUES (?, ?, ?, ?, ?)")
       .run(
@@ -659,8 +750,8 @@ export class Store {
 
   issueTokens(opts: { clientId: string; userId: string; scopes: string[]; resource?: string; family?: string; accessTtlMs: number; refreshTtlMs: number }) {
     const family = opts.family ?? randomToken("", 12);
-    const access = randomToken("pdm_at_", 32);
-    const refresh = randomToken("pdm_rt_", 32);
+    const access = randomToken("sum_at_", 32);
+    const refresh = randomToken("sum_rt_", 32);
     const insert = this.db.prepare(
       `INSERT INTO oauth_tokens (token_hash, kind, client_id, user_id, family, scopes, resource, created_at, expires_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -780,6 +871,7 @@ export class Store {
     this.db.prepare("DELETE FROM sessions WHERE expires_at < ?").run(t);
     this.db.prepare("DELETE FROM oauth_pending WHERE expires_at < ?").run(t);
     this.db.prepare("DELETE FROM oauth_codes WHERE expires_at < ?").run(t);
+    this.db.prepare("DELETE FROM suunto_oauth_states WHERE created_at <= ?").run(t - OAUTH_STATE_TTL_MS);
     this.db.prepare("DELETE FROM oauth_tokens WHERE expires_at < ?").run(t - 86_400_000);
     this.db.prepare("DELETE FROM activity WHERE at < ?").run(t - 90 * 86_400_000);
     // Access requests nobody answered within 30 days.

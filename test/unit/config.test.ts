@@ -4,61 +4,136 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
-import { describeConfig, loadConfig, readSecret } from "../../src/config.js";
-import { DEFAULT_ENDPOINTS, customEndpoints, endpointsFromEnv } from "../../src/padi/endpoints.js";
-import { fileTokenSink, readTokenCache } from "../../src/server.js";
+import { DEFAULT_REDIRECT_URI, checkRedirectUri, describeConfig, loadConfig, loadLoginConfig, readSecret, suuntoKeysFromEnv } from "../../src/config.js";
+import { fileTokenSink, readTokenCache, writeTokenCache } from "../../src/server.js";
+import { DEFAULT_ENDPOINTS } from "../../src/suunto/endpoints.js";
+import { fakeJwt } from "../helpers/mock-suunto.js";
 
 // Invented test data only.
-const base = { PADI_EMAIL: "Diver.Test@Example.com", PADI_PASSWORD: "not-a-real-password", PADI_TIMEZONE: "Europe/Zurich" };
+const KEYS = { SUUNTO_CLIENT_ID: "client-invented", SUUNTO_CLIENT_SECRET: "secret-invented-value", SUUNTO_SUBSCRIPTION_KEY: "subkey-invented-value" };
+const base = { ...KEYS, SUUNTO_REFRESH_TOKEN: "rt-invented-value", SUUNTO_TIMEZONE: "Europe/Zurich" };
 
 describe("loadConfig", () => {
-  it("applies the PADI defaults", () => {
+  it("applies the Suunto defaults", () => {
     const c = loadConfig(base);
-    expect(c.padi).toMatchObject({ email: "diver.test@example.com", password: "not-a-real-password", loginMethod: "auto", apiMode: "proxy" });
-    expect(c.padi.endpoints).toEqual(DEFAULT_ENDPOINTS);
-    expect(c.units).toBe("auto");
+    expect(c.suunto.keys).toEqual({ clientId: "client-invented", clientSecret: "secret-invented-value", subscriptionKey: "subkey-invented-value" });
+    expect(c.suunto.refreshToken).toBe("rt-invented-value");
+    expect(c.suunto.tokenCache).toBeUndefined();
+    expect(c.suunto.redirectUri).toBe(DEFAULT_REDIRECT_URI);
+    expect(DEFAULT_REDIRECT_URI).toBe("http://localhost:8723/callback");
+    expect(c.suunto.endpoints).toEqual(DEFAULT_ENDPOINTS);
+    expect(c.units).toBe("metric");
     expect(c.readOnly).toBe(false);
     expect(c.timeZone).toBe("Europe/Zurich");
     expect(c.transport).toBe("stdio");
-    expect(c.secrets).toEqual(["not-a-real-password"]);
+    expect(c.http).toMatchObject({ host: "127.0.0.1", port: 3000, allowedHosts: [], allowedOrigins: [] });
+    expect(c.secrets.sort()).toEqual(["rt-invented-value", "secret-invented-value", "subkey-invented-value"]);
   });
 
-  it("accepts a refresh token instead of the password", () => {
-    const c = loadConfig({ PADI_REFRESH_TOKEN: "rt-invented-value", PADI_UNITS: "Imperial", PADI_READ_ONLY: "yes" });
-    expect(c.padi.refreshToken).toBe("rt-invented-value");
-    expect(c.padi.password).toBeUndefined();
+  it("reads units, read-only and the HTTP settings", () => {
+    const c = loadConfig({ ...base, SUUNTO_UNITS: "Imperial", SUUNTO_READ_ONLY: "yes", MCP_HTTP_PORT: "4100", MCP_HTTP_ALLOWED_HOSTS: "a.example.com, b.example.com" });
     expect(c.units).toBe("imperial");
     expect(c.readOnly).toBe(true);
-    expect(c.secrets).toContain("rt-invented-value");
+    expect(c.http.port).toBe(4100);
+    expect(c.http.allowedHosts).toEqual(["a.example.com", "b.example.com"]);
   });
 
   it("reads secrets from files", () => {
-    const dir = mkdtempSync(join(tmpdir(), "padi-mcp-config-"));
-    writeFileSync(join(dir, "pw"), "from-a-file\n");
-    expect(readSecret({ X_FILE: join(dir, "pw") }, "X")).toBe("from-a-file");
-    expect(loadConfig({ PADI_EMAIL: "a@example.com", PADI_PASSWORD_FILE: join(dir, "pw") }).padi.password).toBe("from-a-file");
+    const dir = mkdtempSync(join(tmpdir(), "suunto-mcp-config-"));
+    writeFileSync(join(dir, "secret"), "secret-from-a-file\n");
+    writeFileSync(join(dir, "key"), "key-from-a-file\n");
+    writeFileSync(join(dir, "rt"), "rt-from-a-file\n");
+    expect(readSecret({ X_FILE: join(dir, "secret") }, "X")).toBe("secret-from-a-file");
+    const c = loadConfig({
+      SUUNTO_CLIENT_ID: "client-invented",
+      SUUNTO_CLIENT_SECRET_FILE: join(dir, "secret"),
+      SUUNTO_SUBSCRIPTION_KEY_FILE: join(dir, "key"),
+      SUUNTO_REFRESH_TOKEN_FILE: join(dir, "rt"),
+    });
+    expect(c.suunto.keys).toEqual({ clientId: "client-invented", clientSecret: "secret-from-a-file", subscriptionKey: "key-from-a-file" });
+    expect(c.suunto.refreshToken).toBe("rt-from-a-file");
+    expect(c.secrets).toEqual(expect.arrayContaining(["secret-from-a-file", "key-from-a-file", "rt-from-a-file"]));
     expect(() => readSecret({ X_FILE: join(dir, "missing") }, "X")).toThrow(/X_FILE/);
   });
 
-  it("accepts a token cache file as the only sign-in", () => {
-    const dir = mkdtempSync(join(tmpdir(), "padi-mcp-cache-"));
-    const cache = join(dir, "token.json");
-    expect(() => loadConfig({ PADI_TOKEN_CACHE: cache })).toThrow(/PADI_EMAIL is not set/);
+  it("needs the three app keys, and says where to get them", () => {
+    expect(() => loadConfig({ SUUNTO_REFRESH_TOKEN: "rt" })).toThrow(/SUUNTO_CLIENT_ID, SUUNTO_CLIENT_SECRET and SUUNTO_SUBSCRIPTION_KEY are not set.*Suunto API Zone.*profile/);
+    expect(() => loadConfig({ SUUNTO_CLIENT_ID: "c", SUUNTO_REFRESH_TOKEN: "rt" })).toThrow(/SUUNTO_CLIENT_SECRET and SUUNTO_SUBSCRIPTION_KEY are not set, but the other/);
+    expect(() => loadConfig({ ...KEYS, SUUNTO_SUBSCRIPTION_KEY: "", SUUNTO_REFRESH_TOKEN: "rt" })).toThrow(/^SUUNTO_SUBSCRIPTION_KEY is not set, but the other/);
+  });
+
+  it("needs a sign-in: a refresh token or an existing token cache file", () => {
+    expect(() => loadConfig(KEYS)).toThrow(/No Suunto sign-in is set.*suunto-mcp --login.*SUUNTO_REFRESH_TOKEN/);
+    const dir = mkdtempSync(join(tmpdir(), "suunto-mcp-cache-"));
+    const cache = join(dir, "tokens.json");
+    expect(() => loadConfig({ ...KEYS, SUUNTO_TOKEN_CACHE: cache })).toThrow(/does not exist yet. Run suunto-mcp --login/);
     writeFileSync(cache, "{}");
-    expect(loadConfig({ PADI_TOKEN_CACHE: cache }).padi.tokenCache).toBe(cache);
+    expect(loadConfig({ ...KEYS, SUUNTO_TOKEN_CACHE: cache }).suunto.tokenCache).toBe(cache);
+  });
+
+  it("treats empty and blank values as unset (Docker Compose passes unset variables as empty strings)", () => {
+    const empty = { SUUNTO_CLIENT_ID: "", SUUNTO_CLIENT_SECRET: " ", SUUNTO_SUBSCRIPTION_KEY: "", SUUNTO_CLIENT_SECRET_FILE: "", SUUNTO_SUBSCRIPTION_KEY_FILE: "  " };
+    expect(suuntoKeysFromEnv(empty)).toBeUndefined();
+    // All three empty is "no keys", not "only some are set".
+    expect(() => loadConfig({ ...empty, SUUNTO_REFRESH_TOKEN: "rt" })).toThrow(/^SUUNTO_CLIENT_ID, SUUNTO_CLIENT_SECRET and SUUNTO_SUBSCRIPTION_KEY are not set/);
+    const c = loadConfig({
+      ...base,
+      SUUNTO_REDIRECT_URI: "",
+      SUUNTO_UNITS: "",
+      SUUNTO_READ_ONLY: "",
+      SUUNTO_TOKEN_CACHE: " ",
+      SUUNTO_OAUTH_URL: "",
+      SUUNTO_API_URL: " ",
+      SUUNTO_TIMEZONE: " ",
+      TZ: "America/New_York",
+      MCP_TRANSPORT: "",
+      MCP_HTTP_HOST: "",
+      MCP_HTTP_PORT: "",
+      PORT: "4200",
+      MCP_HTTP_TOKEN: "",
+    });
+    expect(c.suunto.redirectUri).toBe(DEFAULT_REDIRECT_URI);
+    expect(c.suunto.tokenCache).toBeUndefined();
+    expect(c.suunto.endpoints).toEqual(DEFAULT_ENDPOINTS);
+    expect(c.units).toBe("metric");
+    expect(c.readOnly).toBe(false);
+    expect(c.timeZone).toBe("America/New_York");
+    expect(c.transport).toBe("stdio");
+    expect(c.http).toMatchObject({ host: "127.0.0.1", port: 4200 });
+    expect(c.http.token).toBeUndefined();
+    expect(() => loadConfig({ ...KEYS, SUUNTO_REFRESH_TOKEN: "", SUUNTO_REFRESH_TOKEN_FILE: "" })).toThrow(/No Suunto sign-in/);
+  });
+
+  it("takes the time zone from SUUNTO_TIMEZONE, else an IANA TZ, else the system", () => {
+    expect(loadConfig({ ...base, TZ: "Asia/Tokyo" }).timeZone).toBe("Europe/Zurich");
+    const { SUUNTO_TIMEZONE: _unused, ...noZone } = base;
+    expect(loadConfig({ ...noZone, TZ: "Asia/Tokyo" }).timeZone).toBe("Asia/Tokyo");
+    const warnings: string[] = [];
+    const c = loadConfig({ ...noZone, TZ: ":/etc/localtime" }, {}, (w) => warnings.push(w));
+    expect(c.timeZone.length).toBeGreaterThan(0);
+    expect(warnings.join(" ")).toMatch(/TZ ":\/etc\/localtime" is not an IANA time zone/);
   });
 
   it("validates input", () => {
-    expect(() => loadConfig({})).toThrow(/PADI_EMAIL is not set/);
-    expect(() => loadConfig({ PADI_EMAIL: "a@example.com" })).toThrow(/PADI_PASSWORD is not set/);
-    expect(() => loadConfig({ PADI_PASSWORD: "x" })).toThrow(/PADI_EMAIL/);
-    expect(() => loadConfig({ ...base, PADI_EMAIL: "not an address" })).toThrow(/PADI_EMAIL/);
-    expect(() => loadConfig({ ...base, PADI_LOGIN_METHOD: "sso" })).toThrow(/PADI_LOGIN_METHOD/);
-    expect(() => loadConfig({ ...base, PADI_API_MODE: "graphql" })).toThrow(/PADI_API_MODE/);
-    expect(() => loadConfig({ ...base, PADI_UNITS: "nautical" })).toThrow(/PADI_UNITS/);
-    expect(() => loadConfig({ ...base, PADI_TIMEZONE: "Mars/Olympus" })).toThrow(/time zone/);
-    expect(() => loadConfig({ ...base, PADI_READ_ONLY: "maybe" })).toThrow(/PADI_READ_ONLY/);
+    expect(() => loadConfig({ ...base, SUUNTO_UNITS: "nautical" })).toThrow(/SUUNTO_UNITS/);
+    expect(() => loadConfig({ ...base, SUUNTO_TIMEZONE: "Mars/Olympus" })).toThrow(/SUUNTO_TIMEZONE.*time zone/);
+    expect(() => loadConfig({ ...base, SUUNTO_READ_ONLY: "maybe" })).toThrow(/SUUNTO_READ_ONLY/);
     expect(() => loadConfig({ ...base, MCP_HTTP_PORT: "99999" })).toThrow(/port/);
+    expect(() => loadConfig({ ...base, MCP_TRANSPORT: "carrier-pigeon" })).toThrow(/MCP_TRANSPORT/);
+    expect(() => loadConfig({ ...base, SUUNTO_CLIENT_ID: "has space" })).toThrow(/SUUNTO_CLIENT_ID must not contain spaces/);
+    expect(() => loadConfig({ ...base, SUUNTO_API_URL: "http://api.example.com" })).toThrow(/SUUNTO_API_URL must use https/);
+  });
+
+  it("only checks SUUNTO_REDIRECT_URI for --login (the web service sets an https one)", () => {
+    expect(loadConfig({ ...base, SUUNTO_REDIRECT_URI: "https://suunto.mcp.example/suunto/callback" }).suunto.redirectUri).toBe("https://suunto.mcp.example/suunto/callback");
+  });
+
+  it("warns about custom Suunto endpoints", () => {
+    const warnings: string[] = [];
+    const c = loadConfig({ ...base, SUUNTO_OAUTH_URL: "http://127.0.0.1:9999/oauth-mock/", SUUNTO_API_URL: "https://api.example.com" }, {}, (w) => warnings.push(w));
+    expect(c.suunto.endpoints).toEqual({ oauthUrl: "http://127.0.0.1:9999/oauth-mock", apiUrl: "https://api.example.com" });
+    expect(warnings.join(" ")).toMatch(/custom Suunto endpoints \(SUUNTO_OAUTH_URL, SUUNTO_API_URL\)/);
+    expect(describeConfig(c).custom_endpoints).toEqual(["SUUNTO_OAUTH_URL", "SUUNTO_API_URL"]);
   });
 
   it("refuses unauthenticated public HTTP binds", () => {
@@ -69,107 +144,133 @@ describe("loadConfig", () => {
     expect(loadConfig(base, { transport: "http" }).http.host).toBe("127.0.0.1");
   });
 
-  it("never exposes secrets in the description", () => {
-    const c = loadConfig({ ...base, PADI_REFRESH_TOKEN: "rt-invented-value", MCP_HTTP_TOKEN: "long-random-token-value" });
+  it("never exposes secrets or keys in the description", () => {
+    const c = loadConfig({ ...base, MCP_HTTP_TOKEN: "long-random-token-value" });
     const text = JSON.stringify(describeConfig(c));
     for (const secret of c.secrets) expect(text).not.toContain(secret);
-    expect(describeConfig(c)).toMatchObject({ email: "diver.test@example.com", login_method: "auto", api_mode: "proxy", units: "auto", read_only: false });
+    expect(text).not.toContain("client-invented");
+    expect(describeConfig(c)).toEqual({ app_keys: "set", sign_in: "SUUNTO_REFRESH_TOKEN", units: "metric", read_only: false, time_zone: "Europe/Zurich" });
   });
 });
 
-describe("PADI endpoints", () => {
-  it("defaults to the production hosts", () => {
-    expect(endpointsFromEnv({})).toEqual(DEFAULT_ENDPOINTS);
-    expect(DEFAULT_ENDPOINTS.clientId).toBe("2arn5r23p0ugce89a5moe95v1l");
-    expect(customEndpoints(DEFAULT_ENDPOINTS)).toEqual([]);
-  });
-
-  it("takes operator overrides and warns about them", () => {
-    const e = endpointsFromEnv({ PADI_LOGBOOK_URL: "http://127.0.0.1:9999/api/Logbook/", PADI_CLIENT_ID: "local-client" });
-    expect(e.logbookUrl).toBe("http://127.0.0.1:9999/api/Logbook");
-    expect(e.clientId).toBe("local-client");
-    expect(customEndpoints(e)).toEqual(["PADI_LOGBOOK_URL", "PADI_CLIENT_ID"]);
-    const warnings: string[] = [];
-    loadConfig({ ...base, PADI_LOGBOOK_URL: "http://127.0.0.1:9999/gql" }, {}, (w) => warnings.push(w));
-    expect(warnings.join(" ")).toContain("PADI_LOGBOOK_URL");
-  });
-
-  it("follows the region for Cognito and rejects bad values", () => {
-    expect(endpointsFromEnv({ PADI_COGNITO_REGION: "eu-central-1" }).cognitoUrl).toBe("https://cognito-idp.eu-central-1.amazonaws.com/");
-    expect(endpointsFromEnv({ PADI_COGNITO_URL: "http://127.0.0.1:1/" }).cognitoUrl).toBe("http://127.0.0.1:1/");
-    expect(() => endpointsFromEnv({ PADI_COGNITO_REGION: "moon" })).toThrow(/region/);
-    expect(() => endpointsFromEnv({ PADI_AUTH_URL: "ftp://example.com" })).toThrow(/PADI_AUTH_URL/);
-    expect(() => endpointsFromEnv({ PADI_DIRECT_URL: "not a url" })).toThrow(/PADI_DIRECT_URL/);
-    expect(() => endpointsFromEnv({ PADI_IMAGES_URL: "https://user:pw@example.com/" })).toThrow(/PADI_IMAGES_URL/);
+describe("suuntoKeysFromEnv (web service)", () => {
+  it("is undefined without keys and refuses only some of them", () => {
+    expect(suuntoKeysFromEnv({})).toBeUndefined();
+    expect(suuntoKeysFromEnv(KEYS)).toEqual({ clientId: "client-invented", clientSecret: "secret-invented-value", subscriptionKey: "subkey-invented-value" });
+    expect(() => suuntoKeysFromEnv({ SUUNTO_CLIENT_ID: "c", SUUNTO_SUBSCRIPTION_KEY: "k" })).toThrow(/^SUUNTO_CLIENT_SECRET is not set/);
+    // Never the values in a message.
+    try {
+      suuntoKeysFromEnv({ SUUNTO_CLIENT_SECRET: "secret-invented-value" });
+    } catch (error) {
+      expect((error as Error).message).not.toContain("secret-invented-value");
+    }
   });
 });
 
-describe("token cache (PADI_TOKEN_CACHE)", () => {
-  const tokens = { refreshToken: "rt-invented-cache-value", loginMethod: "cognito" as const, clientId: "client-invented" };
+describe("loadLoginConfig (--login)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "suunto-mcp-login-"));
+  const cache = join(dir, "tokens.json");
+
+  it("needs the app keys and SUUNTO_TOKEN_CACHE, but no sign-in", () => {
+    const c = loadLoginConfig({ ...KEYS, SUUNTO_TOKEN_CACHE: cache });
+    expect(c.suunto.tokenCache).toBe(cache);
+    expect(c.suunto.refreshToken).toBeUndefined();
+    expect(c.suunto.redirectUri).toBe(DEFAULT_REDIRECT_URI);
+    expect(c.transport).toBe("stdio");
+    expect(() => loadLoginConfig(KEYS)).toThrow(/SUUNTO_TOKEN_CACHE is not set/);
+    expect(() => loadLoginConfig({ SUUNTO_TOKEN_CACHE: cache })).toThrow(/SUUNTO_CLIENT_ID, SUUNTO_CLIENT_SECRET and SUUNTO_SUBSCRIPTION_KEY are not set/);
+  });
+
+  it("accepts only a loopback http redirect URI, as written", () => {
+    for (const ok of ["http://localhost:8723/callback", "http://127.0.0.1:9000/cb", "http://[::1]:8723/callback", "http://localhost:8723"]) {
+      expect(loadLoginConfig({ ...KEYS, SUUNTO_TOKEN_CACHE: cache, SUUNTO_REDIRECT_URI: ok }).suunto.redirectUri).toBe(ok);
+    }
+    expect(() => checkRedirectUri("https://localhost:8723/callback")).toThrow(/plain http address on this machine/);
+    expect(() => checkRedirectUri("http://suunto.mcp.example/callback")).toThrow(/plain http address on this machine/);
+    expect(() => checkRedirectUri("http://192.168.1.2:8723/callback")).toThrow(/plain http address on this machine/);
+    expect(() => checkRedirectUri("not a url")).toThrow(/not a valid URL/);
+    expect(() => checkRedirectUri("http://user:pw@localhost:8723/callback")).toThrow(/user name or password/);
+    expect(() => checkRedirectUri("http://localhost:8723/callback#x")).toThrow(/fragment/);
+  });
+});
+
+describe("token cache (SUUNTO_TOKEN_CACHE)", () => {
+  const access = fakeJwt({ claims: { user: "cachetester" } });
+  const tokens = { refreshToken: "rt-invented-cache-value", accessToken: access, accessTokenExpiresAt: 1_900_000_000_000, clientId: "client-invented" };
 
   it("is written atomically, readable by the owner only, and read back", () => {
-    const dir = mkdtempSync(join(tmpdir(), "padi-mcp-tokens-"));
-    const file = join(dir, "sub", "token.json");
+    const dir = mkdtempSync(join(tmpdir(), "suunto-mcp-tokens-"));
+    const file = join(dir, "sub", "tokens.json");
     const logs: string[] = [];
-    fileTokenSink(file, "diver.test@example.com", (m) => logs.push(m)).save({ ...tokens, idToken: "eyJ.not.stored", idTokenExpiresAt: 1 });
+    fileTokenSink(file, (m) => logs.push(m)).save(tokens);
     expect(statSync(file).mode & 0o777).toBe(0o600);
-    const saved = JSON.parse(readFileSync(file, "utf8"));
-    // Only the refresh token and how it was issued: never the ID token.
-    expect(saved).toEqual({ ...tokens, email: "diver.test@example.com" });
-    expect(readTokenCache(file, "diver.test@example.com")).toEqual(tokens);
+    // The username comes from the access token's "user" claim.
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ ...tokens, username: "cachetester" });
+    expect(readTokenCache(file, "client-invented")).toEqual(tokens);
     expect(readTokenCache(file)).toEqual(tokens);
     expect(logs).toEqual([]);
+    writeTokenCache(file, { refreshToken: "rt-only", clientId: "client-invented" }, "named");
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ refreshToken: "rt-only", clientId: "client-invented", username: "named" });
+    expect(readTokenCache(file)).toEqual({ refreshToken: "rt-only", clientId: "client-invented" });
   });
 
   it("never writes through a file or symlink placed at a temporary path", () => {
-    const dir = mkdtempSync(join(tmpdir(), "padi-mcp-tokens-"));
-    const file = join(dir, "token.json");
-    // The old predictable temporary name: a world-readable file, then a symlink to a file of someone else.
+    const dir = mkdtempSync(join(tmpdir(), "suunto-mcp-tokens-"));
+    const file = join(dir, "tokens.json");
+    // A predictable temporary name: a world-readable file, then a symlink to a file of someone else.
     const planted = `${file}.${process.pid}.tmp`;
     writeFileSync(planted, "");
     chmodSync(planted, 0o666);
-    fileTokenSink(file, undefined, () => {}).save(tokens);
+    fileTokenSink(file, () => {}).save(tokens);
     expect(lstatSync(file).isFile()).toBe(true);
     expect(statSync(file).mode & 0o777).toBe(0o600);
     expect(readFileSync(planted, "utf8")).toBe("");
 
-    const dir2 = mkdtempSync(join(tmpdir(), "padi-mcp-tokens-"));
-    const file2 = join(dir2, "token.json");
+    const dir2 = mkdtempSync(join(tmpdir(), "suunto-mcp-tokens-"));
+    const file2 = join(dir2, "tokens.json");
     const target = join(dir2, "someone-elses-file");
     writeFileSync(target, "");
     symlinkSync(target, `${file2}.${process.pid}.tmp`);
-    fileTokenSink(file2, undefined, () => {}).save(tokens);
+    fileTokenSink(file2, () => {}).save(tokens);
     expect(lstatSync(file2).isFile()).toBe(true);
     expect(lstatSync(file2).isSymbolicLink()).toBe(false);
     expect(statSync(file2).mode & 0o777).toBe(0o600);
     expect(readFileSync(target, "utf8")).toBe("");
     // No temporary file of ours is left behind.
-    expect(readdirSync(dir2).filter((n) => n.endsWith(".tmp") && n !== `token.json.${process.pid}.tmp`)).toEqual([]);
+    expect(readdirSync(dir2).filter((n) => n.endsWith(".tmp") && n !== `tokens.json.${process.pid}.tmp`)).toEqual([]);
   });
 
-  it("ignores a cache of another account, and broken or missing files", () => {
-    const dir = mkdtempSync(join(tmpdir(), "padi-mcp-tokens-"));
-    const file = join(dir, "token.json");
-    fileTokenSink(file, "diver.test@example.com", () => {}).save(tokens);
-    expect(readTokenCache(file, "someone.else@example.com")).toBeUndefined();
+  it("ignores a cache of another app, and broken or missing files", () => {
+    const dir = mkdtempSync(join(tmpdir(), "suunto-mcp-tokens-"));
+    const file = join(dir, "tokens.json");
+    writeTokenCache(file, tokens);
+    expect(readTokenCache(file, "another-client")).toBeUndefined();
     writeFileSync(file, "not json");
     expect(readTokenCache(file)).toBeUndefined();
-    writeFileSync(file, JSON.stringify({ ...tokens, loginMethod: "sso" }));
+    writeFileSync(file, JSON.stringify({ refreshToken: "", clientId: "c" }));
     expect(readTokenCache(file)).toBeUndefined();
+    writeFileSync(file, JSON.stringify({ refreshToken: "rt" }));
+    expect(readTokenCache(file)).toBeUndefined();
+    // An expiry without an access token is dropped; a bad expiry too.
+    writeFileSync(file, JSON.stringify({ refreshToken: "rt", clientId: "c", accessTokenExpiresAt: 5, accessToken: access + "x", extra: 1 }));
+    expect(readTokenCache(file)).toEqual({ refreshToken: "rt", clientId: "c", accessToken: access + "x", accessTokenExpiresAt: 5 });
+    writeFileSync(file, JSON.stringify({ refreshToken: "rt", clientId: "c", accessTokenExpiresAt: "soon", accessToken: access }));
+    expect(readTokenCache(file)).toEqual({ refreshToken: "rt", clientId: "c", accessToken: access });
     expect(readTokenCache(join(dir, "missing.json"))).toBeUndefined();
   });
 
   it("logs a failed write without the token, and an invalid sign-in", () => {
-    const dir = mkdtempSync(join(tmpdir(), "padi-mcp-tokens-"));
+    const dir = mkdtempSync(join(tmpdir(), "suunto-mcp-tokens-"));
     writeFileSync(join(dir, "file"), "x");
     const logs: string[] = [];
     // A path below a regular file cannot be created.
-    const sink = fileTokenSink(join(dir, "file", "token.json"), undefined, (m) => logs.push(m));
+    const sink = fileTokenSink(join(dir, "file", "tokens.json"), (m) => logs.push(m));
     sink.save(tokens);
-    sink.invalid("expired");
-    expect(logs.join("\n")).toMatch(/Could not write the PADI token cache/);
-    expect(logs.join("\n")).toMatch(/Sign in again/);
+    sink.invalid("Suunto refused the refresh token");
+    expect(logs.join("\n")).toMatch(/Could not write the Suunto token cache .*\((ENOTDIR|EEXIST)\)/);
+    expect(logs.join("\n")).toMatch(/Run suunto-mcp --login again/);
     expect(logs.join("\n")).not.toContain(tokens.refreshToken);
+    expect(logs.join("\n")).not.toContain(access);
   });
 });
 
@@ -184,35 +285,59 @@ describe("command line", () => {
   it("prints the help with the settings and the trademark notice", async () => {
     const { code, stdout } = await cli(["--help"]);
     expect(code).toBe(0);
-    for (const word of ["PADI_EMAIL", "PADI_PASSWORD", "PADI_REFRESH_TOKEN", "PADI_TOKEN_CACHE", "PADI_UNITS", "PADI_READ_ONLY", "PADI_TIMEZONE", "--check", "MCP_HTTP_TOKEN"]) {
+    for (const word of [
+      "SUUNTO_CLIENT_ID",
+      "SUUNTO_CLIENT_SECRET",
+      "SUUNTO_SUBSCRIPTION_KEY",
+      "SUUNTO_REFRESH_TOKEN",
+      "SUUNTO_TOKEN_CACHE",
+      "SUUNTO_REDIRECT_URI",
+      "SUUNTO_UNITS",
+      "SUUNTO_READ_ONLY",
+      "SUUNTO_TIMEZONE",
+      "--login",
+      "--check",
+      "--web",
+      "MCP_HTTP_TOKEN",
+      "http://localhost:8723/callback",
+    ]) {
       expect(stdout).toContain(word);
     }
-    expect(stdout).toContain("not made by, affiliated with, or endorsed by PADI");
+    expect(stdout).toContain("not made by, affiliated with, or endorsed by Suunto");
+    expect(stdout).toContain("not medical advice");
+    expect(stdout).not.toMatch(/padi/i);
     expect(stdout).not.toContain("\u2014");
   });
 
   it("explains configuration errors and unknown arguments", async () => {
     const bad = await cli(["--bogus"]);
     expect(bad.code).toBe(2);
-    expect(bad.stderr).toMatch(/Unknown argument: --bogus/);
+    expect(bad.stderr).toMatch(/\[suunto-mcp\] Unknown argument: --bogus/);
+    const both = await cli(["--login", "--check"]);
+    expect(both.code).toBe(2);
     const noConfig = await cli(["--check"]);
     expect(noConfig.code).toBe(1);
-    expect(noConfig.stderr).toMatch(/PADI_EMAIL is not set/);
+    expect(noConfig.stderr).toMatch(/configuration error: SUUNTO_CLIENT_ID, SUUNTO_CLIENT_SECRET and SUUNTO_SUBSCRIPTION_KEY are not set/);
+    const noCache = await cli(["--login"], KEYS);
+    expect(noCache.code).toBe(1);
+    expect(noCache.stderr).toMatch(/SUUNTO_TOKEN_CACHE is not set/);
   });
 
-  it("--check fails cleanly when PADI cannot be reached, without printing secrets", async () => {
-    const { code, stdout } = await cli(["--check"], {
-      PADI_EMAIL: "diver.test@example.com",
-      PADI_PASSWORD: "not-a-real-password",
-      // Closed local ports: nothing is ever sent to PADI from a test.
-      PADI_COGNITO_URL: "http://127.0.0.1:1/",
-      PADI_AUTH_URL: "http://127.0.0.1:1/auth/api",
-      PADI_LOGBOOK_URL: "http://127.0.0.1:1/api/Logbook",
+  it("--check fails cleanly when Suunto cannot be reached, without printing secrets", async () => {
+    const { code, stdout, stderr } = await cli(["--check"], {
+      ...base,
+      // Closed local ports: nothing is ever sent to Suunto from a test.
+      SUUNTO_OAUTH_URL: "http://127.0.0.1:1",
+      SUUNTO_API_URL: "http://127.0.0.1:1",
     });
     expect(code).toBe(1);
     const result = JSON.parse(stdout);
-    expect(result.logbook.ok).toBe(false);
-    expect(result.config).toMatchObject({ email: "diver.test@example.com", custom_endpoints: expect.arrayContaining(["PADI_COGNITO_URL"]) });
-    expect(stdout).not.toContain("not-a-real-password");
+    expect(result.account).toMatchObject({ connected: false, demo: false, time_zone: "Europe/Zurich", check: { ok: false } });
+    expect(result.account.check.error).toMatch(/Could not reach Suunto/);
+    expect(result.config).toMatchObject({ app_keys: "set", custom_endpoints: ["SUUNTO_OAUTH_URL", "SUUNTO_API_URL"] });
+    for (const secret of [base.SUUNTO_CLIENT_SECRET, base.SUUNTO_SUBSCRIPTION_KEY, base.SUUNTO_REFRESH_TOKEN]) {
+      expect(stdout).not.toContain(secret);
+      expect(stderr).not.toContain(secret);
+    }
   });
 });

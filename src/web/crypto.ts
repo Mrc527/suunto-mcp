@@ -2,7 +2,7 @@
  * Cryptographic helpers for the web mode:
  * - scrypt password hashing
  * - random tokens stored only as SHA-256 hashes
- * - AES-256-GCM encryption of per-user PADI connections with a server master key
+ * - AES-256-GCM encryption of per-user Suunto connections with a server master key
  */
 
 import { createCipheriv, createDecipheriv, createHash, hkdfSync, randomBytes, randomInt, scrypt, timingSafeEqual } from "node:crypto";
@@ -121,7 +121,7 @@ export function loadMasterKey(dataDir: string, envValue: string | undefined, log
   } catch {
     // best effort on platforms without POSIX permissions
   }
-  log(`Created a new master key in ${file}. Back it up: without it the stored PADI connections cannot be decrypted.`);
+  log(`Created a new master key in ${file}. Back it up: without it the stored Suunto connections cannot be decrypted.`);
   return key;
 }
 
@@ -129,7 +129,7 @@ export class SecretBox {
   private readonly key: Buffer;
 
   constructor(masterKey: Buffer) {
-    this.key = Buffer.from(hkdfSync("sha256", masterKey, Buffer.alloc(0), Buffer.from("padi-mcp user settings v1"), 32));
+    this.key = Buffer.from(hkdfSync("sha256", masterKey, Buffer.alloc(0), Buffer.from("suunto-mcp user settings v1"), 32));
   }
 
   /** Encrypt `plaintext`, binding it to `context` (e.g. the user id) as additional authenticated data. */

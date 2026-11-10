@@ -4,7 +4,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadConfig } from "../../src/config.js";
-import { startHttpServer } from "../../src/http.js";
+import { MAX_REQUEST_BODY_BYTES, startHttpServer } from "../../src/http.js";
 import { closeServices, createMcpServer, createServices, type Services } from "../../src/server.js";
 
 const TOKEN = "test-token-0123456789";
@@ -15,11 +15,13 @@ let url = "";
 beforeAll(async () => {
   const config = loadConfig(
     {
-      // Invented test data; the PADI hosts point at a closed local port.
-      PADI_EMAIL: "diver.test@example.com",
-      PADI_PASSWORD: "pw-pw-pw-pw",
-      PADI_COGNITO_URL: "http://127.0.0.1:1/",
-      PADI_LOGBOOK_URL: "http://127.0.0.1:1/api/Logbook",
+      // Invented test data; the Suunto hosts point at a closed local port.
+      SUUNTO_CLIENT_ID: "client-invented",
+      SUUNTO_CLIENT_SECRET: "secret-invented-value",
+      SUUNTO_SUBSCRIPTION_KEY: "subkey-invented-value",
+      SUUNTO_REFRESH_TOKEN: "rt-invented-value",
+      SUUNTO_OAUTH_URL: "http://127.0.0.1:1",
+      SUUNTO_API_URL: "http://127.0.0.1:1",
       MCP_HTTP_TOKEN: TOKEN,
     },
     { transport: "http", port: 0, host: "127.0.0.1" },
@@ -48,7 +50,7 @@ describe("HTTP transport", () => {
   it("requires the bearer token", async () => {
     const res = await fetch(url, { method: "POST", headers, body: initBody });
     expect(res.status).toBe(401);
-    expect(res.headers.get("www-authenticate")).toMatch(/Bearer/);
+    expect(res.headers.get("www-authenticate")).toBe('Bearer realm="suunto-mcp"');
     const wrong = await fetch(url, { method: "POST", headers: { ...headers, authorization: "Bearer nope" }, body: initBody });
     expect(wrong.status).toBe(401);
   });
@@ -72,9 +74,27 @@ describe("HTTP transport", () => {
     const client = new Client({ name: "http-test", version: "1.0.0" });
     await client.connect(new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers: { authorization: `Bearer ${TOKEN}` } } }));
     const { tools } = await client.listTools();
-    expect(tools.map((t) => t.name)).toContain("padi_account_info");
-    expect(client.getServerVersion()?.name).toBe("padi-mcp");
+    expect(tools.map((t) => t.name)).toEqual(expect.arrayContaining(["suunto_account_info", "suunto_list_workouts", "suunto_import_route"]));
+    expect(client.getServerVersion()?.name).toBe("suunto-mcp");
     await client.close();
+  });
+
+  it("accepts a tool call with a 5 MB GPX (8 MB body limit) and refuses larger bodies", async () => {
+    expect(MAX_REQUEST_BODY_BYTES).toBe(8 * 1024 * 1024);
+    const call = (gpx: string) =>
+      JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "suunto_import_route", arguments: { gpx, sprots: ["x"] } } });
+    // About 5 MB of GPX text with quotes and new lines, as JSON escapes them.
+    const point = '<trkpt lat="46.5" lon="7.9"><ele>1000</ele></trkpt>\n';
+    const gpx = `<gpx><trk><trkseg>\n${point.repeat(Math.floor((5 * 1024 * 1024 - 64) / point.length))}</trkseg></trk></gpx>`;
+    const body = call(gpx);
+    expect(body.length).toBeGreaterThan(5 * 1024 * 1024);
+    const res = await fetch(url, { method: "POST", headers: { ...headers, authorization: `Bearer ${TOKEN}` }, body });
+    expect(res.status).toBe(200);
+    // The strict input check answered (the misspelled argument), so the body reached the tool.
+    expect(await res.text()).toMatch(/sprots/);
+
+    const tooLarge = await fetch(url, { method: "POST", headers: { ...headers, authorization: `Bearer ${TOKEN}` }, body: call("x".repeat(MAX_REQUEST_BODY_BYTES)) });
+    expect(tooLarge.status).toBe(413);
   });
 
   it("answers health checks and rejects GET on the MCP endpoint", async () => {

@@ -67,7 +67,7 @@ export function protectedResourceMetadata(ctx: WebContext) {
     authorization_servers: [issuerOf(ctx.publicUrl)],
     scopes_supported: [SCOPE],
     bearer_methods_supported: ["header"],
-    resource_name: "PADI dive logbook",
+    resource_name: "Suunto workouts and health data",
     resource_documentation: `${issuerOf(ctx.publicUrl)}/`,
   };
 }
@@ -179,9 +179,9 @@ export function oauthRoutes(ctx: WebContext): Router {
     const name = fullName.length > 60 ? `${fullName.slice(0, 57)}...` : fullName;
     const target = classifyReturn(pending.redirectUri, client?.client_name);
     const settings = ctx.store.getSettings();
-    // A demo account counts as set up: it has its sample data instead of a PADI connection.
-    const padi = s.user.demo ? undefined : ctx.store.getPadiSettings(s.user.id);
-    const readOnly = settings.forceReadOnly || (s.user.demo ? s.user.demoReadOnly : padi?.readOnly);
+    // A demo account counts as set up: it has its sample data instead of a Suunto connection.
+    const suunto = s.user.demo ? undefined : ctx.store.getSuuntoSettings(s.user.id);
+    const readOnly = settings.forceReadOnly || (s.user.demo ? s.user.demoReadOnly : suunto?.readOnly);
     page(
       req,
       res,
@@ -203,14 +203,15 @@ export function oauthRoutes(ctx: WebContext): Router {
                   <p>${th("oauth.consent.unknown.text", { host: target.host })}</p>
                 </div>`}
           <ul class="perm-list">
-            <li>${serviceIcon("logbook")}<div><strong>${t("oauth.consent.logbook")}</strong><span class="what">${t(readOnly ? "oauth.consent.logbookRead" : "oauth.consent.logbookWrite")}</span></div></li>
-            <li>${serviceIcon("cards")}<div><strong>${t("oauth.consent.cards")}</strong><span class="what">${t("oauth.consent.cardsRead")}</span></div></li>
+            <li>${serviceIcon("workouts")}<div><strong>${t("oauth.consent.workouts")}</strong><span class="what">${t("oauth.consent.workoutsRead")}</span></div></li>
+            <li>${serviceIcon("health")}<div><strong>${t("oauth.consent.health")}</strong><span class="what">${t("oauth.consent.healthRead")}</span></div></li>
+            <li>${serviceIcon("routes")}<div><strong>${t("oauth.consent.routes")}</strong><span class="what">${t(readOnly ? "oauth.consent.routesRead" : "oauth.consent.routesWrite")}</span></div></li>
           </ul>
           ${s.user.demo
             ? html`<div class="flash info">${t("oauth.consent.demo")}</div>`
-            : padi
+            : suunto
               ? ""
-              : html`<div class="flash info">${th("oauth.consent.noPadi", { url: `/account?next=${encodeURIComponent(`/oauth/consent?request=${pending.id}`)}` })}</div>`}
+              : html`<div class="flash info">${th("oauth.consent.noSuunto", { url: `/account?next=${encodeURIComponent(`/oauth/consent?request=${pending.id}`)}` })}</div>`}
           <form method="post" action="/oauth/consent">
             <input type="hidden" name="_csrf" value="${s.csrf}">
             <input type="hidden" name="request" value="${pending.id}">
@@ -314,7 +315,7 @@ export function oauthRoutes(ctx: WebContext): Router {
     }
     const target = provider.deny(id);
     if (target) returnTo(res, target);
-    else res.redirect(303, "/account?m=denied");
+    else res.redirect(303, "/account?m=appdenied");
   });
 
   return r;

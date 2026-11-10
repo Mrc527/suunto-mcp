@@ -14,6 +14,13 @@ describe("isAllowedHost", () => {
     expect(isAllowedHost(undefined, settings("127.0.0.1"))).toBe(false);
   });
 
+  it("accepts any host when bound to all interfaces (a token is required there), else only the bind address", () => {
+    expect(isAllowedHost("suunto.mcp.example:3000", settings("0.0.0.0"))).toBe(true);
+    expect(isAllowedHost("suunto.mcp.example", settings("::"))).toBe(true);
+    expect(isAllowedHost("10.0.0.5:3000", settings("10.0.0.5"))).toBe(true);
+    expect(isAllowedHost("10.0.0.6:3000", settings("10.0.0.5"))).toBe(false);
+  });
+
   it("supports an explicit allow list", () => {
     expect(isAllowedHost("mcp.example.com", settings("127.0.0.1", ["mcp.example.com"]))).toBe(true);
     expect(isAllowedHost("mcp.example.com:443", settings("10.0.0.5", ["mcp.example.com"]))).toBe(true);

@@ -1,65 +1,83 @@
 #!/usr/bin/env node
 /**
- * MCP for PADI (command: padi-mcp): MCP server for the PADI online dive logbook.
+ * MCP for Suunto (command: suunto-mcp): MCP server for Suunto workouts, sleep and recovery.
  *
- *   padi-mcp              # stdio transport (Claude Desktop, Claude Code, Cursor, ...)
- *   padi-mcp --web        # multi-user web service for AI apps (OAuth, admin page)
- *   padi-mcp --http       # single-user Streamable HTTP transport with a static bearer token
- *   padi-mcp --check      # sign in to PADI, count the dives and exit
+ *   suunto-mcp              # stdio transport (Claude Desktop, Claude Code, Cursor, ...)
+ *   suunto-mcp --web        # multi-user web service for AI apps (OAuth, admin page)
+ *   suunto-mcp --http       # single-user Streamable HTTP transport with a static bearer token
+ *   suunto-mcp --check      # test the Suunto connection and exit
+ *   suunto-mcp --login      # sign in to Suunto once and save the tokens to SUUNTO_TOKEN_CACHE
  */
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { loadConfig, describeConfig, type CliOverrides } from "./config.js";
+import { describeConfig, loadConfig, loadLoginConfig, type AppConfig, type CliOverrides } from "./config.js";
 import { startHttpServer } from "./http.js";
-import { closeServices, createMcpServer, createServices } from "./server.js";
-import { describeError, redact, redactForLog } from "./util/errors.js";
+import { accountInfo, closeServices, createMcpServer, createServices, runLogin } from "./server.js";
+import { describeError, redact, redactForLog, UserFacingError } from "./util/errors.js";
 import { VERSION } from "./version.js";
 
-const HELP = `MCP for PADI (padi-mcp) ${VERSION}
-MCP server for your PADI online dive logbook.
-MCP for PADI is an independent open-source project.
-It is not made by, affiliated with, or endorsed by PADI.
+const HELP = `MCP for Suunto (suunto-mcp) ${VERSION}
+MCP server for your Suunto workouts, daily activity, sleep, recovery, routes and points of interest.
+MCP for Suunto is an independent open-source project. It uses the official Suunto Cloud API,
+but it is not made by, affiliated with, or endorsed by Suunto.
+Suunto is a registered trademark of Suunto Oy.
 
 Usage:
-  padi-mcp                           single user, stdio (Claude Desktop, Claude Code, ...)
-  padi-mcp --web [--port <n>] [--host <addr>]
+  suunto-mcp                         single user, stdio (Claude Desktop, Claude Code, ...)
+  suunto-mcp --login                 sign in to Suunto in your browser once and save the tokens
+                                     to SUUNTO_TOKEN_CACHE (prints the address to open)
+  suunto-mcp --check                 test the Suunto connection and exit (single-user settings)
+  suunto-mcp --http [--port <n>] [--host <addr>]
+                                     single user over HTTP with MCP_HTTP_TOKEN
+  suunto-mcp --web [--port <n>] [--host <addr>]
                                      multi-user web service for AI apps (OAuth, accounts,
                                      admin page). Configure with PUBLIC_URL, DATA_DIR,
                                      MASTER_KEY, TRUST_PROXY, ADMIN_EMAIL, ADMIN_PASSWORD,
-                                     and optionally SMTP_URL, NOTIFY_FROM.
-  padi-mcp --http [--port <n>] [--host <addr>]
-                                     single user over HTTP with MCP_HTTP_TOKEN
-  padi-mcp --check                   sign in to PADI and count the dives (single-user settings)
-  padi-mcp --help | --version
+                                     SUUNTO_CLIENT_ID, SUUNTO_CLIENT_SECRET,
+                                     SUUNTO_SUBSCRIPTION_KEY, and optionally SMTP_URL, NOTIFY_FROM.
+  suunto-mcp --help | --version
 
-Single-user settings (one PADI account):
-  PADI_EMAIL             The e-mail you sign in to PADI with
-  PADI_PASSWORD          Your PADI password (or PADI_PASSWORD_FILE)
-  PADI_REFRESH_TOKEN     Instead of the password: a PADI refresh token (or PADI_REFRESH_TOKEN_FILE)
-  PADI_TOKEN_CACHE       File that keeps the current refresh token between runs (mode 0600).
-                         Default: none (memory only)
-  PADI_UNITS             auto (your PADI logbook setting, default) | metric | imperial
-  PADI_READ_ONLY         true to disable adding, changing and deleting dives
-  PADI_TIMEZONE          IANA time zone for "today" (default: the system time zone)
-  PADI_LOGIN_METHOD      auto (default) | cognito | padi
-  PADI_API_MODE          proxy (default) | direct | auto
+Suunto app keys (your app in the Suunto API Zone, https://apizone.suunto.com):
+  SUUNTO_CLIENT_ID         Client id (OAuth settings of your app)
+  SUUNTO_CLIENT_SECRET     Client secret (or SUUNTO_CLIENT_SECRET_FILE)
+  SUUNTO_SUBSCRIPTION_KEY  Subscription key from your API Zone profile
+                           (or SUUNTO_SUBSCRIPTION_KEY_FILE)
+
+Single-user settings (one Suunto account):
+  SUUNTO_TOKEN_CACHE       File that keeps the current Suunto tokens between runs (mode 0600).
+                           --login writes it. Default: none (memory only)
+  SUUNTO_REFRESH_TOKEN     Instead of the token cache: a Suunto refresh token
+                           (or SUUNTO_REFRESH_TOKEN_FILE)
+  SUUNTO_REDIRECT_URI      Address Suunto sends the browser back to after --login
+                           (default http://localhost:8723/callback; it must be on this machine
+                           and registered in the OAuth settings of your app)
+  SUUNTO_UNITS             metric (default) | imperial
+  SUUNTO_READ_ONLY         true to disable adding routes and points of interest
+  SUUNTO_TIMEZONE          IANA time zone of your dates (default: TZ, else the system time zone)
 
 HTTP mode (--http):
-  MCP_HTTP_TOKEN         Bearer token required on every request (or MCP_HTTP_TOKEN_FILE)
-  MCP_HTTP_HOST          Address to listen on (default 127.0.0.1)
-  MCP_HTTP_PORT          Port (default 3000)
+  MCP_HTTP_TOKEN           Bearer token required on every request (or MCP_HTTP_TOKEN_FILE)
+  MCP_HTTP_HOST            Address to listen on (default 127.0.0.1)
+  MCP_HTTP_PORT            Port (default 3000)
   MCP_HTTP_ALLOWED_HOSTS, MCP_HTTP_ALLOWED_ORIGINS
-                         Extra Host header values and browser origins to accept
+                           Extra Host header values and browser origins to accept
 
-Operator only (tests against a local mock PADI API): PADI_COGNITO_URL, PADI_AUTH_URL,
-PADI_LOGBOOK_URL, PADI_DIRECT_URL, PADI_INSTRUCTOR_URL, PADI_DIRECT_INSTRUCTOR_URL,
-PADI_ECARD_URL, PADI_IMAGES_URL, PADI_CLIENT_ID, PADI_COGNITO_REGION.
+Operator only (tests against a local mock Suunto API): SUUNTO_OAUTH_URL, SUUNTO_API_URL.
 
+Heart rate, sleep and recovery values come from the watch and are not medical advice.
 See README.md for every option.`;
 
-function parseArgs(argv: string[]): { cli: CliOverrides; check: boolean; web: boolean } {
+interface ParsedArgs {
+  cli: CliOverrides;
+  check: boolean;
+  login: boolean;
+  web: boolean;
+}
+
+function parseArgs(argv: string[]): ParsedArgs {
   const cli: CliOverrides = {};
   let check = false;
+  let login = false;
   let web = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
@@ -98,19 +116,23 @@ function parseArgs(argv: string[]): { cli: CliOverrides; check: boolean; web: bo
       case "--check":
         check = true;
         break;
+      case "--login":
+        login = true;
+        break;
       default:
         throw new Error(`Unknown argument: ${arg}. Use --help for usage.`);
     }
   }
-  return { cli, check, web };
+  if (login && (check || web || cli.transport)) throw new Error("--login cannot be combined with --check, --web, --http or --stdio.");
+  return { cli, check, login, web };
 }
 
 function log(message: string): void {
-  process.stderr.write(`[padi-mcp] ${message}\n`);
+  process.stderr.write(`[suunto-mcp] ${message}\n`);
 }
 
 async function main(): Promise<void> {
-  let parsed;
+  let parsed: ParsedArgs;
   try {
     parsed = parseArgs(process.argv.slice(2));
   } catch (error) {
@@ -118,14 +140,19 @@ async function main(): Promise<void> {
     process.exit(2);
   }
 
+  if (parsed.login) {
+    await runLoginCommand();
+    return;
+  }
+
   // MCP_TRANSPORT=web applies unless another mode was chosen explicitly on the command line.
-  const envWeb = (process.env.MCP_TRANSPORT ?? "").toLowerCase() === "web" && !parsed.check && !parsed.cli.transport;
+  const envWeb = (process.env.MCP_TRANSPORT ?? "").trim().toLowerCase() === "web" && !parsed.check && !parsed.cli.transport;
   if (parsed.web || envWeb) {
     await runWeb(parsed.cli);
     return;
   }
 
-  let config;
+  let config: AppConfig;
   try {
     // --check does not serve anything: ignore MCP_TRANSPORT (which may say "web").
     const cli = parsed.check ? { ...parsed.cli, transport: parsed.cli.transport ?? ("stdio" as const) } : parsed.cli;
@@ -139,20 +166,17 @@ async function main(): Promise<void> {
   const services = createServices(config, { log: safeLog });
 
   if (parsed.check) {
-    const result: Record<string, unknown> = { version: VERSION, config: describeConfig(config) };
-    const logbook = services.logbook;
-    result.logbook = logbook
-      ? await logbook.check().catch((e: unknown) => ({ ok: false, error: describeError(e) }))
-      : { ok: false, error: "No way to sign in to PADI: set PADI_EMAIL and PADI_PASSWORD, or PADI_REFRESH_TOKEN." };
-    if (logbook && (result.logbook as { ok?: boolean }).ok) {
-      // Who is signed in: the name and the affiliate id (never a token).
-      const account = await logbook.account().catch(() => undefined);
-      if (account) result.account = { ...(account.name ? { name: account.name } : {}), affiliate_id: account.affiliateId, is_pro: account.isPro };
+    let info: Record<string, unknown>;
+    try {
+      info = await accountInfo(config, services, true);
+    } catch (error) {
+      info = { connected: false, check: { ok: false, error: describeError(error) } };
     }
+    const result = { version: VERSION, config: describeConfig(config), account: info };
     process.stdout.write(`${redact(JSON.stringify(result, null, 2), config.secrets)}\n`);
     await closeServices(services);
-    const failed = JSON.stringify(result).includes('"ok":false');
-    process.exit(failed ? 1 : 0);
+    const ok = (info.check as { ok?: boolean } | undefined)?.ok === true;
+    process.exit(ok ? 0 : 1);
   }
 
   let shuttingDown = false;
@@ -181,7 +205,34 @@ async function main(): Promise<void> {
   transport.onclose = () => void shutdown(0);
   process.stdin.on("end", () => void shutdown(0));
   await server.connect(transport);
-  safeLog(`ready (stdio). PADI logbook, units ${config.units}, API mode ${config.padi.apiMode}${config.readOnly ? " [read-only]" : ""}`);
+  safeLog(`ready (stdio). Suunto, units ${config.units}, time zone ${config.timeZone}${config.readOnly ? " [read-only]" : ""}${services.activity ? "" : " [no sign-in: run suunto-mcp --login]"}`);
+}
+
+/** suunto-mcp --login (DESIGN.md section 7): sign in once, save the tokens, print the username. */
+async function runLoginCommand(): Promise<void> {
+  let config: AppConfig;
+  try {
+    config = loadLoginConfig(process.env, (w) => log(`warning: ${w}`));
+  } catch (error) {
+    log(`configuration error: ${(error as Error).message}`);
+    process.exit(1);
+  }
+  const stop = () => {
+    log("login stopped.");
+    process.exit(130);
+  };
+  process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
+  try {
+    // The authorize URL goes on its own lines, without the prefix, so it is easy to copy.
+    const result = await runLogin(config, { print: (line) => process.stderr.write(`${line}\n`) });
+    log(`Signed in to Suunto as ${result.username}. The tokens are saved in ${result.tokenCache}; use the same SUUNTO_TOKEN_CACHE when you start the server.`);
+    process.exit(0);
+  } catch (error) {
+    const text = error instanceof UserFacingError ? error.message : describeError(error);
+    log(`login failed: ${redactForLog(text, config.secrets)}`);
+    process.exit(1);
+  }
 }
 
 async function runWeb(cli: CliOverrides): Promise<void> {

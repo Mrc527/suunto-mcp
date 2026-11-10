@@ -1,38 +1,37 @@
 /**
- * The service pool keeps one PADI session per user and connection. When the user signs in to
- * PADI again, a session of the older connection can still be running (a tool call in flight).
- * It must never write over the new connection: neither a refresh token it got from PADI nor a
- * "needs reconnect" mark when its own refresh token stops working. PADI is the in-process mock:
- * nothing is ever sent to PADI.
+ * The service pool keeps one Suunto session per user and connection. When the user connects
+ * Suunto again, a session of the older connection can still be running (a tool call in flight).
+ * It must never write over the new connection: neither tokens it got from Suunto nor a "needs
+ * reconnect" mark when its own refresh token stops working. Suunto is the in-process mock:
+ * nothing is ever sent to Suunto.
  */
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { signIn } from "../../src/padi/auth.js";
-import { endpointsFromEnv } from "../../src/padi/endpoints.js";
+import type { ActivityBackend, ListWorkoutsQuery } from "../../src/activity/types.js";
 import { createWebApp, type WebApp } from "../../src/web/server.js";
-import type { PadiAccountSettings } from "../../src/web/store.js";
-import { MOCK_ACCOUNT, startMockPadi, type MockPadi } from "../helpers/mock-padi.js";
-import { Browser, setBase } from "../helpers/web-client.js";
+import type { SuuntoAccountSettings } from "../../src/web/store.js";
+import { MOCK_CLIENT_ID, MOCK_USERNAME, startMockSuunto, type MockSuunto } from "../helpers/mock-suunto.js";
+import { Browser, connectSuunto, setBase } from "../helpers/web-client.js";
 
 const PASSWORD = "correct horse battery";
 
-let mock: MockPadi;
+let mock: MockSuunto;
 let web: WebApp;
 let server: Server;
-const diver = new Browser();
+const athlete = new Browser();
 let userId = "";
 
-/** While set, every token refresh sent to PADI waits until it is released. */
+/** While set, every token refresh sent to Suunto waits until it is released. */
 let gate: { held: () => void; released: Promise<void> } | undefined;
 
-/** A token refresh (Cognito REFRESH_TOKEN_AUTH or the PADI auth API's /oauth/refresh). */
+/** A token refresh (POST /oauth/token with grant_type=refresh_token), not a code exchange. */
 function isRefresh(input: string | URL | Request, init?: RequestInit): boolean {
   const url = input instanceof Request ? input.url : String(input);
-  return url.endsWith("/oauth/refresh") || (typeof init?.body === "string" && init.body.includes('"REFRESH_TOKEN_AUTH"'));
+  return url.endsWith("/oauth/token") && String(init?.body ?? "").includes("grant_type=refresh_token");
 }
 
-const padiFetch: typeof fetch = async (input, init) => {
+const suuntoFetch: typeof fetch = async (input, init) => {
   const g = gate;
   if (g && isRefresh(input, init)) {
     g.held();
@@ -59,27 +58,32 @@ function holdRefreshes(): { held: Promise<void>; release: () => void } {
 
 const store = () => web.ctx.store;
 const user = () => store().getUser(userId)!;
-/** The logbook of the user's current pool entry. */
-const logbook = () => web.ctx.pool.get(user())!.services.logbook!;
+/** The backend of the user's current pool entry. */
+const backend = (): ActivityBackend => web.ctx.pool.get(user())!.services.backend!;
+
+/** A workout list query that no earlier call used (the pool caches answers for 2 minutes). */
+let page = 0;
+const fresh = (): ListWorkoutsQuery => ({ limit: 1, offset: page++, byModificationTime: false });
 
 beforeAll(async () => {
-  mock = await startMockPadi();
   server = createServer();
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   setBase(base);
+  mock = await startMockSuunto();
   web = await createWebApp({
     publicUrl: new URL(base),
     host: "127.0.0.1",
     port: 0,
     dataDir: ":memory:",
-    operator: mock.env(),
-    padiFetch,
+    operator: { SUUNTO_OAUTH_URL: mock.oauthUrl, SUUNTO_API_URL: mock.apiUrl },
+    suuntoKeys: mock.keys,
+    suuntoFetch,
     log: () => {},
   });
   server.on("request", web.app);
-  expect((await diver.signup("diver@example.com", PASSWORD)).status).toBe(303);
-  userId = store().getUserByEmail("diver@example.com")!.id;
+  expect((await athlete.signup("athlete@example.com", PASSWORD)).status).toBe(303);
+  userId = store().getUserByEmail("athlete@example.com")!.id;
 });
 
 afterAll(async () => {
@@ -89,90 +93,99 @@ afterAll(async () => {
   await mock.close();
 });
 
-/** "Save and test" on the account page. */
-async function connect(): Promise<PadiAccountSettings> {
-  const { csrf } = await diver.page("/account");
-  const res = await diver.post("/account/padi", { _csrf: csrf, email: MOCK_ACCOUNT.email, password: MOCK_ACCOUNT.password });
-  expect(res.headers.get("location")).toBe("/account?m=connected");
-  return store().getPadiSettings(userId)!;
+/** "Connect Suunto" on the account page. */
+async function connect(): Promise<SuuntoAccountSettings> {
+  const run = await connectSuunto(athlete);
+  expect(run.res.headers.get("location")).toBe("/account?m=connected");
+  return store().getSuuntoSettings(userId)!;
 }
 
-describe("a session of an older PADI connection", () => {
+/** A stored connection with live tokens of the mock (no OAuth dance). */
+function storedConnection(connectedAt: number): SuuntoAccountSettings {
+  return { username: MOCK_USERNAME, ...mock.issueTokens(), clientId: MOCK_CLIENT_ID, units: "metric", readOnly: false, connectedAt };
+}
+
+describe("a session of an older Suunto connection", () => {
   it("does not mark a new connection for reconnect when its own refresh fails", async () => {
     const first = await connect();
-    const old = web.ctx.pool.get(user())!.services.logbook!;
-    await old.listDives({ limit: 1 });
-    // The first connection's sign-in ends at PADI, while a tool call is about to refresh it.
-    mock.expireIdTokens();
-    mock.revokeRefreshTokens();
+    const old = backend();
+    await old.listWorkouts(fresh());
+    // Suunto ends the first connection, while a tool call is about to refresh it.
+    mock.revokeAll();
     const hold = holdRefreshes();
-    const inFlight = old.listDives({ limit: 1 }).then(
+    const inFlight = old.listWorkouts(fresh()).then(
       () => undefined,
       (error: unknown) => error as Error,
     );
     await hold.held;
-    // Meanwhile the user signs in to PADI again on the account page.
+    // Meanwhile the user connects Suunto again on the account page.
     await new Promise((r) => setTimeout(r, 5));
     const second = await connect();
     expect(second.connectedAt).not.toBe(first.connectedAt);
     expect(second.refreshToken).not.toBe(first.refreshToken);
     hold.release();
     // The old call fails, but the new connection is not touched.
-    expect((await inFlight)?.message).toMatch(/sign-in expired/i);
-    expect(user().padiNeedsReconnect).toBe(false);
-    expect(store().getPadiSettings(userId)).toEqual(second);
+    expect((await inFlight)?.message).toMatch(/connection expired/i);
+    expect(user().suuntoNeedsReconnect).toBe(false);
+    expect(store().getSuuntoSettings(userId)).toEqual(second);
     // The new connection works, and the account page says so.
-    expect((await logbook().listDives({ limit: 1 })).total).toBe(mock.account.store.sorted().length);
-    expect((await diver.page("/account")).html).not.toContain("sign-in expired");
+    expect((await backend().listWorkouts(fresh())).payload).toHaveLength(1);
+    expect((await athlete.page("/account")).html).not.toContain("Suunto refused your saved connection");
   });
 
-  it("does mark its own connection when its refresh token stops working", async () => {
-    const current = store().getPadiSettings(userId)!;
-    await logbook().listDives({ limit: 1 });
-    mock.expireIdTokens();
-    mock.revokeRefreshTokens();
-    await expect(logbook().listDives({ limit: 1 })).rejects.toThrow(/sign-in expired/i);
-    expect(user().padiNeedsReconnect).toBe(true);
-    expect(store().getPadiSettings(userId)).toEqual(current);
+  it("does mark its own connection when its refresh token stops working, and keeps the tokens", async () => {
+    const current = store().getSuuntoSettings(userId)!;
+    await backend().listWorkouts(fresh());
+    mock.revokeAll();
+    await expect(backend().listWorkouts(fresh())).rejects.toThrow(/connection expired/i);
+    expect(user().suuntoNeedsReconnect).toBe(true);
+    // Suunto has refused tokens by mistake: they are kept for a later try.
+    expect(store().getSuuntoSettings(userId)).toEqual(current);
     await connect();
-    expect(user().padiNeedsReconnect).toBe(false);
+    expect(user().suuntoNeedsReconnect).toBe(false);
   });
 
-  it("does not save a refresh token from PADI over a new connection", async () => {
-    // Signed in through the PADI auth API, whose refresh hands out a new refresh token.
-    const endpoints = endpointsFromEnv(mock.env());
-    const signInPadi = async (connectedAt: number): Promise<PadiAccountSettings> => {
-      const r = await signIn(MOCK_ACCOUNT.email, MOCK_ACCOUNT.password, { method: "padi", endpoints, backoffMs: 0 });
-      return {
-        email: MOCK_ACCOUNT.email,
-        refreshToken: r.tokens.refreshToken,
-        loginMethod: "padi",
-        clientId: r.tokens.clientId,
-        affiliateId: r.claims.affiliateId,
-        units: "auto",
-        readOnly: false,
-        connectedAt,
-      };
-    };
-    store().savePadiSettings(userId, await signInPadi(1_000));
-    const old = logbook();
-    await old.listDives({ limit: 1 });
-    // The user connects again; then the old session refreshes and PADI rotates its token.
-    const second = await signInPadi(2_000);
-    store().savePadiSettings(userId, second);
-    mock.expireIdTokens();
-    mock.rotateRefreshTokens = true;
+  it("clears the mark when a refresh works again, without blocking calls", async () => {
+    store().saveSuuntoSettings(userId, storedConnection(500));
+    store().setSuuntoNeedsReconnect(userId, true);
+    // The mark does not stop a call: the access token expires, the refresh works, the mark goes.
+    mock.expireAccessTokens();
+    expect((await backend().listWorkouts(fresh())).payload).toHaveLength(1);
+    expect(user().suuntoNeedsReconnect).toBe(false);
+    expect(store().getSuuntoSettings(userId)!.connectedAt).toBe(500);
+  });
+
+  it("does not save tokens from Suunto over a new connection", async () => {
+    store().saveSuuntoSettings(userId, storedConnection(1_000));
+    const old = backend();
+    await old.listWorkouts(fresh());
+    // The user connects again; then the old session refreshes and Suunto rotates its token.
+    const second = storedConnection(2_000);
+    store().saveSuuntoSettings(userId, second);
+    mock.expireAccessTokens();
+    const refreshes = mock.count("/oauth/token");
+    await old.listWorkouts(fresh());
+    expect(mock.count("/oauth/token") - refreshes).toBe(1);
+    expect(store().getSuuntoSettings(userId)).toEqual(second);
+    // The current connection's own rotated token is kept.
+    await backend().listWorkouts(fresh());
+    const kept = store().getSuuntoSettings(userId)!;
+    expect(kept.connectedAt).toBe(2_000);
+    expect(kept.refreshToken).not.toBe(second.refreshToken);
+    expect(kept.accessToken).not.toBe(second.accessToken);
+    expect(user().suuntoNeedsReconnect).toBe(false);
+  });
+
+  it("gives real users no services without the operator's app keys, and demo accounts still work", async () => {
+    const { ServicePool } = await import("../../src/web/accounts.js");
+    const pool = new ServicePool(store(), { operator: {}, demo: web.ctx.demo });
     try {
-      await old.listDives({ limit: 1 });
-      expect(store().getPadiSettings(userId)).toEqual(second);
-      // The current connection's own rotated token is kept.
-      await logbook().listDives({ limit: 1 });
-      const kept = store().getPadiSettings(userId)!;
-      expect(kept.connectedAt).toBe(2_000);
-      expect(kept.refreshToken).not.toBe(second.refreshToken);
+      expect(pool.configured).toBe(false);
+      expect(pool.get(user())).toBeUndefined();
+      const demo = store().createDemoUser("demo-pool@example.com", "x");
+      expect(pool.get(demo)?.services.backend?.kind).toBe("demo");
     } finally {
-      mock.rotateRefreshTokens = false;
+      await pool.closeAll();
     }
-    expect(user().padiNeedsReconnect).toBe(false);
   });
 });

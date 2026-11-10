@@ -7,7 +7,10 @@ import type { Server } from "node:http";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { suuntoKeysFromEnv } from "../config.js";
 import { demoRegistry, type DemoRegistry } from "../demo/index.js";
+import { endpointsFromEnv, isLoopbackHost } from "../suunto/endpoints.js";
+import type { SuuntoAppKeys } from "../suunto/oauth.js";
 import { ConfigError, redactForLog } from "../util/errors.js";
 import { VERSION } from "../version.js";
 import { operatorOverrides, ServicePool } from "./accounts.js";
@@ -46,8 +49,15 @@ export interface WebOptions {
   adminPassword?: string;
   /** Allow client metadata documents on private addresses (tests only). */
   allowPrivateClientMetadata?: boolean;
-  /** Operator overrides (PADI_LOGBOOK_URL, PADI_API_MODE, ...) applied to every user. */
+  /**
+   * The operator's Suunto host overrides (SUUNTO_OAUTH_URL, SUUNTO_API_URL), for tests against a
+   * mock. Suunto app keys found here are used when `suuntoKeys` is not given, but never kept in it.
+   */
   operator: Record<string, string>;
+  /** The operator's Suunto app keys (SUUNTO_CLIENT_ID, SUUNTO_CLIENT_SECRET, SUUNTO_SUBSCRIPTION_KEY). */
+  suuntoKeys?: SuuntoAppKeys;
+  /** SUUNTO_REDIRECT_URI (default: <PUBLIC_URL>/suunto/callback). */
+  suuntoRedirectUri?: string;
   /** The operator's SMTP server for e-mails to administrators (none: no e-mails). */
   smtpUrl?: string;
   /** Sender address of those e-mails (default: the SMTP user when it is an e-mail address; one of them is needed). */
@@ -57,8 +67,8 @@ export interface WebOptions {
   liveHeartbeatMs?: number;
   /** The demo accounts' in-memory stores (default: the process-wide registry; tests pass their own). */
   demo?: DemoRegistry;
-  /** fetch for every request to PADI (tests pass a mock; default: the global fetch). */
-  padiFetch?: typeof fetch;
+  /** fetch for every request to Suunto (tests pass a mock; default: the global fetch). */
+  suuntoFetch?: typeof fetch;
   /** How e-mails about access requests are sent, and when (tests). */
   sendNotice?: NoticeSender;
   noticeTiming?: NoticeTiming;
@@ -76,6 +86,26 @@ const NO_SENDER = "Set NOTIFY_FROM to a sender address your SMTP server accepts 
 
 /** An example administrator password that must never be used. */
 const EXAMPLE_ADMIN_PASSWORD = "change-me-to-a-long-password";
+
+/**
+ * The address Suunto sends the browser back to after "Connect Suunto". It must be registered in
+ * the Suunto API Zone exactly as it is here.
+ */
+export function suuntoRedirectUri(publicUrl: URL, configured: string | undefined): string {
+  const value = configured?.trim();
+  if (!value) return `${publicUrl.href.replace(/\/+$/, "")}/suunto/callback`;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new ConfigError(`SUUNTO_REDIRECT_URI is not a valid URL. Leave it empty to use ${publicUrl.href.replace(/\/+$/, "")}/suunto/callback.`);
+  }
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopbackHost(url.hostname))) {
+    throw new ConfigError("SUUNTO_REDIRECT_URI must be an https URL (plain http only on localhost).");
+  }
+  if (url.hash) throw new ConfigError("SUUNTO_REDIRECT_URI must not contain a fragment.");
+  return value;
+}
 
 function readSecret(env: Env, name: string): string | undefined {
   const direct = env[name]?.trim();
@@ -106,7 +136,7 @@ export function webOptionsFromEnv(env: Env, cli: { host?: string; port?: number 
   const smtpProblem = smtpUrl ? smtpUrlProblem(smtpUrl) : undefined;
   if (smtpProblem) throw new ConfigError(smtpProblem);
   const notifyFrom = env.NOTIFY_FROM?.trim();
-  // An address, or a name and an address: "MCP for PADI <noreply@example.com>".
+  // An address, or a name and an address: "MCP for Suunto <noreply@example.com>".
   const fromAddress = notifyFrom?.match(/^[^<>\r\n]*<([^<>\s]+)>$/)?.[1] ?? notifyFrom;
   if (fromAddress && !isEmail(fromAddress)) throw new ConfigError("NOTIFY_FROM must be an e-mail address (or a name and an address in < >)");
   if (smtpUrl && !notifyFrom && !smtpUserAddress(smtpUrl)) throw new ConfigError(NO_SENDER);
@@ -121,10 +151,17 @@ export function webOptionsFromEnv(env: Env, cli: { host?: string; port?: number 
     ...(readSecret(env, "ADMIN_PASSWORD") ? { adminPassword: readSecret(env, "ADMIN_PASSWORD")! } : {}),
     allowPrivateClientMetadata: env.ALLOW_PRIVATE_CLIENT_METADATA === "true",
     operator: operatorOverrides(env),
+    // Undefined unless all three are set; a ConfigError when only some are.
+    ...withKeys(suuntoKeysFromEnv(env)),
+    ...(env.SUUNTO_REDIRECT_URI?.trim() ? { suuntoRedirectUri: suuntoRedirectUri(publicUrl, env.SUUNTO_REDIRECT_URI) } : {}),
     ...(smtpUrl ? { smtpUrl } : {}),
     ...(notifyFrom ? { notifyFrom } : {}),
     log,
   };
+}
+
+function withKeys(keys: SuuntoAppKeys | undefined): { suuntoKeys?: SuuntoAppKeys } {
+  return keys ? { suuntoKeys: keys } : {};
 }
 
 function trustProxyValue(v: string | undefined): boolean | number | string {
@@ -158,7 +195,25 @@ export async function createWebApp(opts: WebOptions): Promise<WebApp> {
     log: opts.log,
   });
   const demo = opts.demo ?? demoRegistry;
-  const pool = new ServicePool(store, opts.operator, undefined, demo, opts.log, opts.padiFetch);
+  // The operator's Suunto settings. Only the host overrides are kept as "operator": the keys stay
+  // out of it, so nothing that shows or passes on operator settings can leak them.
+  const operator = operatorOverrides(opts.operator);
+  const suuntoEndpoints = endpointsFromEnv(operator);
+  const suuntoKeys = opts.suuntoKeys ?? suuntoKeysFromEnv(opts.operator);
+  const redirectUri = suuntoRedirectUri(publicUrl, opts.suuntoRedirectUri ?? opts.operator.SUUNTO_REDIRECT_URI);
+  if (!suuntoKeys) {
+    opts.log(
+      `warning: SUUNTO_CLIENT_ID, SUUNTO_CLIENT_SECRET and SUUNTO_SUBSCRIPTION_KEY are not set. Nobody can connect Suunto until they are (demo accounts work). Register ${redirectUri} as the redirect URI of your app in the Suunto API Zone.`,
+    );
+  }
+  const pool = new ServicePool(store, {
+    operator,
+    ...(suuntoKeys ? { keys: suuntoKeys } : {}),
+    demo,
+    log: opts.log,
+    ...(opts.suuntoFetch ? { fetch: opts.suuntoFetch } : {}),
+    connectAgain: `Connect Suunto again at ${publicUrl.href.replace(/\/+$/, "")}/account.`,
+  });
   const send = opts.sendNotice ?? (opts.smtpUrl ? smtpSender(opts.smtpUrl) : undefined);
   const from = opts.notifyFrom ?? (opts.smtpUrl ? smtpUserAddress(opts.smtpUrl) : undefined);
   if (send && !from) throw new ConfigError(NO_SENDER);
@@ -180,10 +235,13 @@ export async function createWebApp(opts: WebOptions): Promise<WebApp> {
     cookies,
     publicUrl,
     mcpUrl,
-    operator: opts.operator,
+    operator,
+    ...(suuntoKeys ? { suuntoKeys } : {}),
+    suuntoRedirectUri: redirectUri,
+    suuntoEndpoints,
+    ...(opts.suuntoFetch ? { suuntoFetch: opts.suuntoFetch } : {}),
     version: VERSION,
     platform: opts.platform ?? process.platform,
-    ...(opts.padiFetch ? { padiFetch: opts.padiFetch } : {}),
     log: opts.log,
   };
 
@@ -301,11 +359,12 @@ export async function startWebServer(opts: WebOptions): Promise<{ server: Server
   });
   opts.log(`Web mode listening on http://${opts.host}:${opts.port} (public URL ${web.ctx.publicUrl.href})`);
   opts.log(`MCP endpoint for AI apps: ${web.ctx.mcpUrl.href}`);
+  opts.log(`Suunto redirect URI (register it in the Suunto API Zone): ${web.ctx.suuntoRedirectUri}`);
   if (web.ctx.store.countUsers() === 0) opts.log(`No accounts yet: open ${web.ctx.publicUrl.href}signup to create the administrator account.`);
   const unreadable = web.ctx.store.countUnreadableSettings();
   if (unreadable > 0) {
     opts.log(
-      `warning: the PADI connection of ${unreadable} user(s) cannot be decrypted with the current key (MASTER_KEY or ${opts.dataDir}/master.key changed?). They will be asked to sign in to PADI again.`,
+      `warning: the Suunto connection of ${unreadable} user(s) cannot be decrypted with the current key (MASTER_KEY or ${opts.dataDir}/master.key changed?). They will be asked to connect Suunto again.`,
     );
   }
   return { server, web };

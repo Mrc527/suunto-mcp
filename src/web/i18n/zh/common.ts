@@ -2,11 +2,11 @@ import type en from "../en/common.js";
 
 /** Translations (zh): common. Every key of ../en/common.ts, the same placeholders and markup. */
 export default {
-  "common.appName": "MCP for PADI",
+  "common.appName": "MCP for Suunto",
 
   "common.nav.main": "主导航",
-  "common.nav.account": "PADI 账户",
-  "common.nav.accountShort": "PADI",
+  "common.nav.account": "Suunto 账户",
+  "common.nav.accountShort": "Suunto",
   "common.nav.connections": "已连接的应用",
   "common.nav.connectionsShort": "应用",
   "common.nav.security": "安全性",
@@ -17,9 +17,9 @@ export default {
   "common.nav.signIn": "登录",
 
   "common.footer.author": "作者：<a href=\"https://marco.visin.ch\" target=\"_blank\" rel=\"noopener noreferrer\">Marco Visin</a>",
-  "common.footer.about": "MCP for PADI 可将你的 AI 助手（Claude、ChatGPT、Gemini、Cursor、VS Code 等）连接到你的 PADI 潜水日志。",
+  "common.footer.about": "MCP for Suunto 可将你的 AI 助手（Claude、ChatGPT、Gemini、Cursor、VS Code 等）连接到你在 Suunto 的运动记录、睡眠、恢复和路线。",
   "common.footer.disclaimer":
-    "MCP for PADI 是一个独立的开源项目。它并非由 PADI（国际专业潜水教练协会）开发，与 PADI 没有关联，也未获得 PADI 认可。PADI 是 PADI Worldwide Corp. 的注册商标。",
+    "MCP for Suunto 是一个独立的开源项目。它使用官方的 Suunto Cloud API，但并非由 Suunto 开发，与 Suunto 没有关联，也未获得 Suunto 认可。Suunto 是 Suunto Oy 的注册商标。",
   "common.footer.language": "语言",
   "common.footer.legal": "法律信息与联系方式",
   "common.footer.privacy": "隐私",
@@ -29,7 +29,7 @@ export default {
   "common.never": "从未",
 
   "common.flash.saved": "已保存。",
-  "common.flash.removed": "你的 PADI 连接已移除。",
+  "common.flash.removed": "你的 Suunto 连接已移除。",
   "common.flash.revoked": "已撤销访问权限。",
   "common.flash.password": "密码已更改。",
   "common.flash.sessions": "已从所有其他浏览器退出登录。",
@@ -38,7 +38,7 @@ export default {
   "common.flash.approved": "申请已批准。系统不会自动通知对方，请告诉对方现在可以登录了。",
   "common.flash.rejected": "申请已拒绝并删除。",
   "common.flash.deleted": "已删除。",
-  "common.flash.welcome": "欢迎！请先在下方登录 PADI，然后连接你的 AI 应用。",
+  "common.flash.welcome": "欢迎！请先在下方连接你的 Suunto 账户，然后连接你的 AI 应用。",
   "common.flash.denied": "已拒绝访问。",
   "common.flash.csrf": "表单已过期。请重试。",
   "common.flash.lastadmin": "你不能移除最后一位管理员。",

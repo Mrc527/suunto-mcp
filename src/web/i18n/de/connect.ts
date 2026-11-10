@@ -4,7 +4,7 @@ import type en from "../en/connect.js";
 export default {
   "connect.title": "KI-App verbinden",
   "connect.intro":
-    "MCP for PADI funktioniert mit jeder KI-App, die MCP-Server unterstützt: Claude, ChatGPT, Gemini, Codex, Cursor, VS Code und vielen mehr. Alle verwenden dieselbe Adresse und melden sich hier mit ihrem eigenen Account an. Wähle deine App, um die Schritte zu sehen.",
+    "MCP for Suunto funktioniert mit jeder KI-App, die MCP-Server unterstützt: Claude, ChatGPT, Gemini, Codex, Cursor, VS Code und vielen mehr. Alle verwenden dieselbe Adresse und melden sich hier mit ihrem eigenen Account an. Wähle deine App, um die Schritte zu sehen.",
 
   "connect.group.chat": "Chat-Assistenten",
   "connect.group.code": "Entwicklertools",
@@ -26,7 +26,7 @@ export default {
     "Klicke auf <strong>{button}</strong>. Claude öffnet sich, Name und Adresse sind bereits ausgefüllt. (Oder öffne <strong>Customize &gt; Connectors &gt; Add custom connector</strong> und füge die Adresse ein.)",
   "connect.claude.step2": "Behalte die Standardeinstellungen („Use Claude's published identity“) bei und klicke auf <strong>Add</strong> und dann auf <strong>Connect</strong>.",
   "connect.claude.step4":
-    "Aktiviere MCP for PADI in einem Chat über <strong>+ &gt; Connectors</strong>. Das funktioniert im Web, auf dem Desktop und auf dem Smartphone (füge es zuerst im Web oder auf dem Desktop hinzu).",
+    "Aktiviere MCP for Suunto in einem Chat über <strong>+ &gt; Connectors</strong>. Das funktioniert im Web, auf dem Desktop und auf dem Smartphone (füge es zuerst im Web oder auf dem Desktop hinzu).",
   "connect.claude.note":
     "Im kostenlosen Plan kannst du nur einen eigenen Connector hinzufügen. In Team- und Enterprise-Plänen fügt ein Owner ihn einmal unter <a href=\"{url}\" target=\"_blank\" rel=\"noopener noreferrer\">Organization settings &gt; Connectors</a> hinzu. Danach klickt jedes Mitglied auf Connect und meldet sich mit seinem eigenen Account an.",
 
@@ -34,11 +34,11 @@ export default {
   "connect.chatgpt.link": "ChatGPT-Plugins öffnen",
   "connect.chatgpt.step1": "Öffne auf chatgpt.com <strong>Plugins</strong>, klicke auf <strong>+</strong> und wähle <strong>Add custom MCP server</strong>.",
   "connect.chatgpt.step2":
-    "Gib als Namen „MCP for PADI“ ein, füge die Adresse von oben als <strong>Server URL</strong> ein und wähle <strong>OAuth</strong> für die Authentifizierung. Bestätige die Warnung und erstelle den Server.",
-  "connect.chatgpt.step3": "Öffne deine Plugins und füge MCP for PADI hinzu. {signIn}",
-  "connect.chatgpt.step4": "Gib in einem Chat <strong>@</strong> ein und wähle MCP for PADI.",
+    "Gib als Namen „MCP for Suunto“ ein, füge die Adresse von oben als <strong>Server URL</strong> ein und wähle <strong>OAuth</strong> für die Authentifizierung. Bestätige die Warnung und erstelle den Server.",
+  "connect.chatgpt.step3": "Öffne deine Plugins und füge MCP for Suunto hinzu. {signIn}",
+  "connect.chatgpt.step4": "Gib in einem Chat <strong>@</strong> ein und wähle MCP for Suunto.",
   "connect.chatgpt.note":
-    "Ob eigene MCP-Server möglich sind, hängt von deinem ChatGPT-Plan und den Workspace-Einstellungen ab. In einigen privaten Plänen erlaubt ChatGPT nur Lesezugriff, sodass das Eintragen oder Ändern von Tauchgängen dort blockiert sein kann.",
+    "Ob eigene MCP-Server möglich sind, hängt von deinem ChatGPT-Plan und den Workspace-Einstellungen ab. In einigen privaten Plänen erlaubt ChatGPT nur Lesezugriff, sodass das Hinzufügen von Routen oder interessanten Orten dort blockiert sein kann.",
 
   "connect.gemini.hint": "gemini.google.com (private Google-Konten in den USA)",
   "connect.gemini.step1":
@@ -54,11 +54,11 @@ export default {
   "connect.perplexity.step1":
     "Öffne <strong>Plugins</strong> (oder <strong>Settings &gt; Connectors</strong>) und dann <strong>Add custom &gt; Add MCP connector &gt; Remote</strong>.",
   "connect.perplexity.step2":
-    "Gib als Namen „MCP for PADI“ ein und füge die Adresse ein. Wähle unter <strong>Advanced</strong> die Optionen <strong>OAuth</strong> und <strong>Streamable HTTP</strong>. Speichere, aktiviere den Connector und melde dich an. {signIn}",
+    "Gib als Namen „MCP for Suunto“ ein und füge die Adresse ein. Wähle unter <strong>Advanced</strong> die Optionen <strong>OAuth</strong> und <strong>Streamable HTTP</strong>. Speichere, aktiviere den Connector und melde dich an. {signIn}",
 
   "connect.claudeCode.hint": "Terminal, VS Code und JetBrains",
   "connect.claudeCode.step1": "Führe die beiden Befehle aus (oder gib <code>{command}</code> in Claude Code ein). Ein Browser öffnet sich. {signIn}",
-  "connect.claudeCode.note": "Hast du MCP for PADI schon auf claude.ai hinzugefügt? Dann zeigt Claude Code es automatisch an, wenn du mit demselben Claude-Account angemeldet bist.",
+  "connect.claudeCode.note": "Hast du MCP for Suunto schon auf claude.ai hinzugefügt? Dann zeigt Claude Code es automatisch an, wenn du mit demselben Claude-Account angemeldet bist.",
 
   "connect.codex.hint": "der Coding-Agent von OpenAI: Terminal, IDE-Erweiterung, ChatGPT-Desktop-App",
   "connect.codex.step1": "Führe den Befehl aus. Codex öffnet einen Browser. {signIn}",
@@ -67,7 +67,7 @@ export default {
 
   "connect.cursor.hint": "der Editor und sein Agent-Befehl",
   "connect.cursor.step1": "Klicke auf <strong>{button}</strong> und bestätige in Cursor mit <strong>Install</strong>.",
-  "connect.cursor.step2": "Cursor fordert dich zur Anmeldung auf, wenn es MCP for PADI zum ersten Mal verwendet (im Terminal: <code>{command}</code>). {signIn}",
+  "connect.cursor.step2": "Cursor fordert dich zur Anmeldung auf, wenn es MCP for Suunto zum ersten Mal verwendet (im Terminal: <code>{command}</code>). {signIn}",
 
   "connect.vscode.hint": "GitHub Copilot im Agent-Modus",
   "connect.vscode.step1": "Klicke auf <strong>{button}</strong> und bestätige in VS Code mit <strong>Install</strong>.",
@@ -83,7 +83,7 @@ export default {
   "connect.copilotCli.step1": "Führe den Befehl aus. Wenn Copilot dich zur Anmeldung auffordert (oder nach <code>{command}</code>), öffnet sich ein Browser. {signIn}",
 
   "connect.geminiCli.hint": "der Kommandozeilen-Agent von Google",
-  "connect.geminiCli.step1": "Führe den Befehl aus. Wenn Gemini CLI MCP for PADI zum ersten Mal verwendet, öffnet es einen Browser. {signIn}",
+  "connect.geminiCli.step1": "Führe den Befehl aus. Wenn Gemini CLI MCP for Suunto zum ersten Mal verwendet, öffnet es einen Browser. {signIn}",
 
   "connect.windsurf.hint": "Devin Local, Devin CLI und das ältere Cascade",
   "connect.windsurf.step1": "Führe die beiden Befehle aus. Devin Desktop liest dieselben Einstellungen. {signIn}",
@@ -118,7 +118,7 @@ export default {
 
   "connect.raycast.hint": "Mac, Windows und iPhone, Raycast Pro",
   "connect.raycast.step1":
-    "Führe <strong>Install MCP Server</strong> aus. Name „MCP for PADI“, Transport <strong>HTTP</strong>, Adresse einfügen, OAuth-Typ <strong>Dynamic</strong>, dann <strong>Install</strong>.",
+    "Führe <strong>Install MCP Server</strong> aus. Name „MCP for Suunto“, Transport <strong>HTTP</strong>, Adresse einfügen, OAuth-Typ <strong>Dynamic</strong>, dann <strong>Install</strong>.",
   "connect.raycast.step2": "Klicke auf <strong>Sign In</strong>. {signIn}",
 
   "connect.lmStudio.hint": "lokale Modelle, Version 0.4.10 oder neuer",
@@ -138,13 +138,13 @@ export default {
 
   "connect.msty.hint": "Desktop-App",
   "connect.msty.step1":
-    "Öffne <strong>Toolbox &gt; Tools &gt; Add New Tool</strong>, gib als Namen „MCP for PADI“ ein, wähle <strong>HTTP</strong>, füge die Adresse ein und wähle <strong>OAuth</strong>.",
+    "Öffne <strong>Toolbox &gt; Tools &gt; Add New Tool</strong>, gib als Namen „MCP for Suunto“ ein, wähle <strong>HTTP</strong>, füge die Adresse ein und wähle <strong>OAuth</strong>.",
   "connect.msty.step2": "Klicke auf <strong>Test tool</strong>, melde dich an und klicke dann auf <strong>Save</strong>. {signIn}",
 
   "connect.openWebui.hint": "selbst gehostet, Version 0.6.31 oder neuer, wird von einem Administrator hinzugefügt",
   "connect.openWebui.step1":
     "Administrator: Öffne <strong>Settings &gt; Admin &gt; Integrations &gt; External Tool Servers &gt; Add Connection</strong>, wähle den Typ <strong>MCP (Streamable HTTP)</strong>, füge die Adresse ein, wähle als Auth <strong>OAuth 2.1</strong>, klicke auf <strong>Register Client</strong> und speichere.",
-  "connect.openWebui.step2": "Jede Person: Öffne in einem Chat <strong>+ &gt; Integrations &gt; Tools</strong>, aktiviere MCP for PADI und melde dich an. {signIn}",
+  "connect.openWebui.step2": "Jede Person: Öffne in einem Chat <strong>+ &gt; Integrations &gt; Tools</strong>, aktiviere MCP for Suunto und melde dich an. {signIn}",
 
   "connect.librechat.hint": "selbst gehostet",
   "connect.librechat.copy": "{file} (Administrator)",

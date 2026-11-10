@@ -58,9 +58,9 @@ export class Cookies {
 
   constructor(readonly secure: boolean) {
     // The __Host- prefix makes browsers enforce Secure, Path=/ and no Domain attribute.
-    this.session = secure ? "__Host-pdm_session" : "pdm_session";
-    this.pre = secure ? "__Host-pdm_pre" : "pdm_pre";
-    this.lang = secure ? "__Host-pdm_lang" : "pdm_lang";
+    this.session = secure ? "__Host-sum_session" : "sum_session";
+    this.pre = secure ? "__Host-sum_pre" : "sum_pre";
+    this.lang = secure ? "__Host-sum_lang" : "sum_lang";
   }
 
   serialize(name: string, value: string, maxAgeSeconds: number): string {
@@ -126,8 +126,8 @@ export function csrfOk(req: Request, res: Response, cookies: Cookies): boolean {
 }
 
 /**
- * Per-user limit for expensive or sensitive actions (password checks run scrypt; "Save and test"
- * signs in to PADI). Keyed by the signed-in user, falling back to the IP.
+ * Per-user limit for expensive or sensitive actions (password checks run scrypt; "Connect Suunto"
+ * starts a sign-in at Suunto). Keyed by the signed-in user, falling back to the IP.
  */
 export function perUserLimit(max: number, windowMs = 15 * 60_000): RequestHandler {
   return rateLimit({
@@ -171,6 +171,12 @@ export function safeNext(value: unknown): string {
   return v;
 }
 
+/**
+ * The security headers of a page. `extraFormAction`: origins a form on the page may lead to.
+ * Chrome applies form-action also to the redirect that follows a form POST, so a form whose
+ * answer redirects to another site (Suunto's sign-in page, an AI app's callback) needs that
+ * site's origin here.
+ */
 export function securityHeaders(extraFormAction: string[] = []): RequestHandler {
   return (_req, res, next) => {
     res.setHeader(

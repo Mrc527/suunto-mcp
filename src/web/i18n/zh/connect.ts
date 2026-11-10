@@ -4,7 +4,7 @@ import type en from "../en/connect.js";
 export default {
   "connect.title": "连接你的 AI 应用",
   "connect.intro":
-    "MCP for PADI 适用于任何支持 MCP 服务器的 AI 应用：Claude、ChatGPT、Gemini、Codex、Cursor、VS Code 等众多应用。所有人都使用同一个地址，并在这里用自己的账户登录。选择你的应用以查看操作步骤。",
+    "MCP for Suunto 适用于任何支持 MCP 服务器的 AI 应用：Claude、ChatGPT、Gemini、Codex、Cursor、VS Code 等众多应用。所有人都使用同一个地址，并在这里用自己的账户登录。选择你的应用以查看操作步骤。",
 
   "connect.group.chat": "聊天助手",
   "connect.group.code": "编程工具",
@@ -26,7 +26,7 @@ export default {
     "点击<strong>{button}</strong>。这会打开 Claude，并自动填好名称和地址。（或者打开 <strong>Customize &gt; Connectors &gt; Add custom connector</strong> 并粘贴地址。）",
   "connect.claude.step2": "保留默认设置（“Use Claude's published identity”），点击 <strong>Add</strong>，然后点击 <strong>Connect</strong>。",
   "connect.claude.step4":
-    "在聊天中，通过 <strong>+ &gt; Connectors</strong> 打开 MCP for PADI。它可以在网页版、桌面应用和手机上使用（请先在网页版或桌面应用中添加）。",
+    "在聊天中，通过 <strong>+ &gt; Connectors</strong> 打开 MCP for Suunto。它可以在网页版、桌面应用和手机上使用（请先在网页版或桌面应用中添加）。",
   "connect.claude.note":
     "免费套餐可以添加一个自定义连接器。在 Team 和 Enterprise 套餐中，由所有者在 <a href=\"{url}\" target=\"_blank\" rel=\"noopener noreferrer\">Organization settings &gt; Connectors</a> 中添加一次，然后每位成员点击 Connect 并使用自己的账户登录。",
 
@@ -34,11 +34,11 @@ export default {
   "connect.chatgpt.link": "打开 ChatGPT 插件",
   "connect.chatgpt.step1": "在 chatgpt.com 上打开 <strong>Plugins</strong>，点击 <strong>+</strong> 并选择 <strong>Add custom MCP server</strong>。",
   "connect.chatgpt.step2":
-    "将其命名为“MCP for PADI”，将上方的地址粘贴到 <strong>Server URL</strong>，并选择 <strong>OAuth</strong> 作为认证方式。确认警告并创建。",
-  "connect.chatgpt.step3": "打开你的插件并添加 MCP for PADI。{signIn}",
-  "connect.chatgpt.step4": "在聊天中输入 <strong>@</strong> 并选择 MCP for PADI。",
+    "将其命名为“MCP for Suunto”，将上方的地址粘贴到 <strong>Server URL</strong>，并选择 <strong>OAuth</strong> 作为认证方式。确认警告并创建。",
+  "connect.chatgpt.step3": "打开你的插件并添加 MCP for Suunto。{signIn}",
+  "connect.chatgpt.step4": "在聊天中输入 <strong>@</strong> 并选择 MCP for Suunto。",
   "connect.chatgpt.note":
-    "能否使用自定义 MCP 服务器取决于你的 ChatGPT 套餐和工作区设置。在某些个人套餐中，ChatGPT 只允许读取，因此可能无法记录或更改潜水。",
+    "能否使用自定义 MCP 服务器取决于你的 ChatGPT 套餐和工作区设置。在某些个人套餐中，ChatGPT 只允许读取，因此可能无法添加路线或兴趣点。",
 
   "connect.gemini.hint": "gemini.google.com（美国的个人 Google 账户）",
   "connect.gemini.step1":
@@ -54,11 +54,11 @@ export default {
   "connect.perplexity.step1":
     "打开 <strong>Plugins</strong>（或 <strong>Settings &gt; Connectors</strong>），选择 <strong>Add custom &gt; Add MCP connector &gt; Remote</strong>。",
   "connect.perplexity.step2":
-    "名称填写“MCP for PADI”，然后粘贴地址。在 <strong>Advanced</strong> 下选择 <strong>OAuth</strong> 和 <strong>Streamable HTTP</strong>。保存，将其打开并登录。{signIn}",
+    "名称填写“MCP for Suunto”，然后粘贴地址。在 <strong>Advanced</strong> 下选择 <strong>OAuth</strong> 和 <strong>Streamable HTTP</strong>。保存，将其打开并登录。{signIn}",
 
   "connect.claudeCode.hint": "终端、VS Code 和 JetBrains",
   "connect.claudeCode.step1": "运行这两条命令（或在 Claude Code 中输入 <code>{command}</code>）。浏览器会随之打开。{signIn}",
-  "connect.claudeCode.note": "已经在 claude.ai 上添加了 MCP for PADI？使用同一 Claude 账户登录的 Claude Code 会自动列出它。",
+  "connect.claudeCode.note": "已经在 claude.ai 上添加了 MCP for Suunto？使用同一 Claude 账户登录的 Claude Code 会自动列出它。",
 
   "connect.codex.hint": "OpenAI 的编程智能体：终端、IDE 扩展、ChatGPT 桌面应用",
   "connect.codex.step1": "运行该命令。Codex 会打开浏览器。{signIn}",
@@ -67,7 +67,7 @@ export default {
 
   "connect.cursor.hint": "编辑器及其 agent 命令",
   "connect.cursor.step1": "点击<strong>{button}</strong>，然后在 Cursor 中确认 <strong>Install</strong>。",
-  "connect.cursor.step2": "Cursor 第一次使用 MCP for PADI 时会要求你登录（在终端中：<code>{command}</code>）。{signIn}",
+  "connect.cursor.step2": "Cursor 第一次使用 MCP for Suunto 时会要求你登录（在终端中：<code>{command}</code>）。{signIn}",
 
   "connect.vscode.hint": "Agent 模式下的 GitHub Copilot",
   "connect.vscode.step1": "点击<strong>{button}</strong>，然后在 VS Code 中确认 <strong>Install</strong>。",
@@ -83,7 +83,7 @@ export default {
   "connect.copilotCli.step1": "运行该命令。当 Copilot 要求你登录时（或运行 <code>{command}</code> 后），浏览器会随之打开。{signIn}",
 
   "connect.geminiCli.hint": "Google 的命令行智能体",
-  "connect.geminiCli.step1": "运行该命令。Gemini CLI 第一次使用 MCP for PADI 时会打开浏览器。{signIn}",
+  "connect.geminiCli.step1": "运行该命令。Gemini CLI 第一次使用 MCP for Suunto 时会打开浏览器。{signIn}",
 
   "connect.windsurf.hint": "Devin Local、Devin CLI 和旧版 Cascade",
   "connect.windsurf.step1": "运行这两条命令。Devin Desktop 会读取相同的设置。{signIn}",
@@ -118,7 +118,7 @@ export default {
 
   "connect.raycast.hint": "Mac、Windows 和 iPhone，Raycast Pro",
   "connect.raycast.step1":
-    "运行 <strong>Install MCP Server</strong>。名称填写“MCP for PADI”，Transport 选择 <strong>HTTP</strong>，粘贴地址，OAuth 类型选择 <strong>Dynamic</strong>，然后点击 <strong>Install</strong>。",
+    "运行 <strong>Install MCP Server</strong>。名称填写“MCP for Suunto”，Transport 选择 <strong>HTTP</strong>，粘贴地址，OAuth 类型选择 <strong>Dynamic</strong>，然后点击 <strong>Install</strong>。",
   "connect.raycast.step2": "点击 <strong>Sign In</strong>。{signIn}",
 
   "connect.lmStudio.hint": "本地模型，0.4.10 或更高版本",
@@ -138,13 +138,13 @@ export default {
 
   "connect.msty.hint": "桌面应用",
   "connect.msty.step1":
-    "打开 <strong>Toolbox &gt; Tools &gt; Add New Tool</strong>，名称填写“MCP for PADI”，选择 <strong>HTTP</strong>，粘贴地址并选择 <strong>OAuth</strong>。",
+    "打开 <strong>Toolbox &gt; Tools &gt; Add New Tool</strong>，名称填写“MCP for Suunto”，选择 <strong>HTTP</strong>，粘贴地址并选择 <strong>OAuth</strong>。",
   "connect.msty.step2": "点击 <strong>Test tool</strong> 并登录，然后点击 <strong>Save</strong>。{signIn}",
 
   "connect.openWebui.hint": "自托管，0.6.31 或更高版本，由管理员添加",
   "connect.openWebui.step1":
     "管理员：打开 <strong>Settings &gt; Admin &gt; Integrations &gt; External Tool Servers &gt; Add Connection</strong>，类型选择 <strong>MCP (Streamable HTTP)</strong>，粘贴地址，认证方式选择 <strong>OAuth 2.1</strong>，点击 <strong>Register Client</strong> 并保存。",
-  "connect.openWebui.step2": "每位用户：在聊天中选择 <strong>+ &gt; Integrations &gt; Tools</strong>，打开 MCP for PADI 并登录。{signIn}",
+  "connect.openWebui.step2": "每位用户：在聊天中选择 <strong>+ &gt; Integrations &gt; Tools</strong>，打开 MCP for Suunto 并登录。{signIn}",
 
   "connect.librechat.hint": "自托管",
   "connect.librechat.copy": "{file}（管理员）",

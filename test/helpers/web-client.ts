@@ -46,6 +46,37 @@ export class Browser {
   }
 }
 
+/** The steps of a "Connect Suunto" run against the mock Suunto (test/helpers/mock-suunto.ts). */
+export interface SuuntoConnectRun {
+  /** Suunto's authorize URL the connect form redirected to. */
+  authorize: URL;
+  /** Where the mock's sign-in page sent the browser back (code and state, or error). */
+  callback: URL;
+  /** The answer of /suunto/callback (a 303 to the account page or a consent page). */
+  res: Response;
+}
+
+/**
+ * "Connect Suunto" in a signed-in browser: the form on the account page, Suunto's sign-in page
+ * (the mock approves at once, or refuses with mock.deny), then the callback. `from` is the page
+ * with the form (for example "/account?next=/oauth/consent?request=..."); `timeZone` the value
+ * the page script would put in the hidden field.
+ */
+export async function connectSuunto(browser: Browser, opts: { from?: string; timeZone?: string } = {}): Promise<SuuntoConnectRun> {
+  const page = await browser.page(opts.from ?? "/account");
+  expect(page.html).toContain('action="/account/suunto/connect"');
+  const next = page.html.match(/action="\/account\/suunto\/connect"[^>]*>\s*<input type="hidden" name="_csrf" value="[^"]+"><input type="hidden" name="next" value="([^"]+)">/)?.[1];
+  const started = await browser.post("/account/suunto/connect", { _csrf: page.csrf, timeZone: opts.timeZone ?? "", ...(next ? { next: next.replace(/&amp;/g, "&") } : {}) });
+  expect(started.status).toBe(303);
+  const authorize = new URL(started.headers.get("location")!);
+  // Suunto's page is another site: no cookies of this server go there.
+  const signIn = await fetch(authorize, { redirect: "manual" });
+  expect(signIn.status).toBe(302);
+  const callback = new URL(signIn.headers.get("location")!);
+  const res = await browser.fetch(callback.pathname + callback.search);
+  return { authorize, callback, res };
+}
+
 /** In-memory OAuth client provider that completes the consent page with a signed-in browser. */
 export class TestOAuthClient implements OAuthClientProvider {
   info: OAuthClientInformationMixed | undefined;
@@ -91,7 +122,7 @@ export class TestOAuthClient implements OAuthClientProvider {
     expect(consentUrl).toMatch(/^\/oauth\/consent\?request=/);
     const consent = await this.browser.page(consentUrl);
     expect(consent.res.status).toBe(200);
-    expect(consent.html).toContain("Allow access to your PADI logbook?");
+    expect(consent.html).toContain("Allow access to your Suunto data?");
     expect(consent.res.headers.get("content-security-policy")).toContain("form-action 'self' https://claude.ai");
     const request = consent.html.match(/name="request" value="([^"]+)"/)![1]!;
     const done = await this.browser.post("/oauth/consent", { _csrf: consent.csrf, request, decision: this.decision });
