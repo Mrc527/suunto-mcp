@@ -966,6 +966,27 @@ Record real shapes in this file once seen. For dive data the documented source i
 
 ---
 
+## 6b. Confirmed by real calls (2026-11-10)
+
+These answers come from real calls made while setting up the hosted service's own Suunto app.
+No user data was involved.
+
+| Call | Answer |
+| --- | --- |
+| `POST /oauth/token` with the right client id and secret, `grant_type=authorization_code`, a made-up code | HTTP 400, JSON `{"error":"invalid_grant"}` |
+| the same with a wrong client secret | HTTP 401, JSON `{"error":"invalid_client"}` |
+| `GET https://cloudapi.suunto.com/v3/workouts?limit=1` with a valid subscription key and no `Authorization` header | HTTP 401, plain text: `JWT not present. (TokenNotPresent)` followed by the lines `APIM Url: ...` and `Backend Url: ...` |
+| the same with a wrong subscription key | HTTP 401, plain text: `Access denied due to invalid subscription key. Make sure to provide a valid key for an active subscription. (SubscriptionKeyInvalid)` followed by the same two URL lines |
+
+So data API errors from the gateway are **plain text, not JSON**, with a code in brackets at the
+end of the first line. Show only the first line to users. A 401 with `(SubscriptionKeyInvalid)` is
+an operator problem; a 401 with a `Token...` code is a user token problem (refresh once).
+
+The API Zone's "OAuth application settings" form takes several redirect URIs (one per line), and
+the client secret is chosen by the partner (the form keeps the current one when the field is left
+empty). An app that was never saved has `isNew: true` and a client id that changes on every page
+load until the form is saved once.
+
 ## 7. Open questions
 
 These need a real account and a real call.
