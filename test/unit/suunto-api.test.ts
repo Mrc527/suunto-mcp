@@ -3,6 +3,7 @@ import type { WirePoiInput } from "../../src/activity/types.js";
 import { SuuntoApi, type SuuntoApiOptions } from "../../src/suunto/api.js";
 import type { SuuntoEndpoints } from "../../src/suunto/endpoints.js";
 import { formatWait, quotaWaitMs, SuuntoHttpError } from "../../src/suunto/http.js";
+import { CallLimiter } from "../../src/suunto/limiter.js";
 import { authorizeUrl, exchangeCode } from "../../src/suunto/oauth.js";
 import { SuuntoSession, type StoredSuuntoTokens, type TokenSink } from "../../src/suunto/session.js";
 import { NotFoundError, UnconfirmedWriteError, UserFacingError } from "../../src/util/errors.js";
@@ -76,6 +77,22 @@ async function failure(p: Promise<unknown>): Promise<Error> {
 }
 
 const query = (r: RecordedFetch) => Object.fromEntries(new URL(r.url).searchParams);
+
+/** A response whose body breaks after the first bytes (by default like a socket that closed). */
+function brokenBody(status: number, error: Error = Object.assign(new TypeError("terminated"), { cause: Object.assign(new Error("other side closed"), { code: "UND_ERR_SOCKET" }) })): Response {
+  let sent = false;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (!sent) {
+        sent = true;
+        controller.enqueue(new TextEncoder().encode('{"error":null,"payl'));
+        return;
+      }
+      controller.error(error);
+    },
+  });
+  return new Response(body, { status, headers: { "content-type": "application/json" } });
+}
 
 describe("SuuntoApi requests", () => {
   it("sends the bearer token, the subscription key, Accept and the User-Agent", async () => {
@@ -193,6 +210,30 @@ describe("SuuntoApi requests", () => {
     // Saved, but the answer did not carry the point: what was sent comes back.
     createAnswer = () => new Response("", { status: 200 });
     expect((await a.createPoi(input)).pointOfInterest.point.name).toBe("Spring");
+    // The documented PointOfInterestResult with errorCode 0 is a success.
+    createAnswer = () => jsonResponse({ pointOfInterest: { ...input, key: "k2" }, errorCode: 0 });
+    expect((await a.createPoi(input)).pointOfInterest.key).toBe("k2");
+  });
+
+  it("does not report a point of interest as saved when Suunto answers an error code or no point", async () => {
+    const input: WirePoiInput = { point: { x: 8.5, y: 47.3, name: "Spring", type: 75 }, watchEnabled: true };
+    let answer: () => Response = () => jsonResponse({ pointOfInterest: null, errorCode: 3 });
+    const { api: a, requests } = api(() => answer());
+    const e = await failure(a.createPoi(input));
+    expect(e).toBeInstanceOf(UnconfirmedWriteError);
+    expect(e.message).toBe(
+      "Suunto answered the new point of interest with an error (code 3), so it is not clear whether it was saved. Check in the Suunto App (or list the points of interest) before you try again.",
+    );
+    // A non-zero code next to a point is not trusted either; a code that is not plain text is not shown.
+    answer = () => jsonResponse({ pointOfInterest: { ...input, key: "k1" }, errorCode: "<b>bad</b>" });
+    const e2 = await failure(a.createPoi(input));
+    expect(e2).toBeInstanceOf(UnconfirmedWriteError);
+    expect(e2.message).toMatch(/^Suunto answered the new point of interest with an error, so/);
+    // An empty pointOfInterest without a code: not confirmed.
+    answer = () => jsonResponse({ pointOfInterest: null });
+    expect(await failure(a.createPoi(input))).toBeInstanceOf(UnconfirmedWriteError);
+    // A write is never sent again.
+    expect(requests).toHaveLength(3);
   });
 
   it("answers account() from the token claims, without a request", async () => {
@@ -259,7 +300,11 @@ describe("SuuntoApi sign-in rules", () => {
 describe("SuuntoApi errors and retries", () => {
   it("maps 403, 404 and 400", async () => {
     const forbidden = api(() => new Response("", { status: 403 }));
-    expect((await failure(forbidden.api.sleep(1, 2))).message).toMatch(/Suunto refused the sleep data \(HTTP 403\)\. Either this server's Suunto API subscription/);
+    const f = (await failure(forbidden.api.sleep(1, 2))) as SuuntoHttpError;
+    expect(f.kind).toBe("http");
+    expect(f.message).toBe("Suunto refused the sleep data (HTTP 403). This server's Suunto API subscription may not cover this data, or Suunto does not allow it for this account.");
+    // Suunto's consent page has no choices, so connecting again cannot change what was allowed.
+    expect(f.message).not.toMatch(/connect/i);
     const missing = api(() => jsonResponse({ message: "Route not found" }, 404));
     const nf = await failure(missing.api.getRoute("r1"));
     expect(nf).toBeInstanceOf(NotFoundError);
@@ -282,6 +327,17 @@ describe("SuuntoApi errors and retries", () => {
     expect(e.message).toBe("Suunto's call limit for this service is reached (HTTP 403). Try again in 27 hours.");
     expect(requests).toHaveLength(1);
     expect(quotaWaitMs("Quota will be replenished in 00:00:40")).toBe(40_000);
+    // The quota policy also answers 403 with only a Retry-After (empty body).
+    const bare = api(() => new Response("", { status: 403, headers: { "retry-after": "86400" } }));
+    const b = (await failure(bare.api.listWorkouts({ limit: 1, offset: 0, byModificationTime: false }))) as SuuntoHttpError;
+    expect(b.kind).toBe("rate_limit");
+    expect(b.message).toBe("Suunto's call limit for this service is reached (HTTP 403). Try again in 24 hours.");
+    expect(bare.requests).toHaveLength(1);
+    // The quota text can be in any field of the body, not only the first one.
+    const detail = api(() => jsonResponse({ message: "Forbidden", detail: "quota exceeded" }, 403));
+    const d = (await failure(detail.api.listPois({ limit: 1, offset: 0 }))) as SuuntoHttpError;
+    expect(d.kind).toBe("rate_limit");
+    expect(d.message).toBe("Suunto's call limit for this service is reached (HTTP 403). Try again later.");
     expect(quotaWaitMs("nothing")).toBeUndefined();
     expect([formatWait(1000), formatWait(40_000), formatWait(600_000), formatWait(5 * 3_600_000), formatWait(3 * DAY)]).toEqual([
       "1 second",
@@ -316,12 +372,43 @@ describe("SuuntoApi errors and retries", () => {
     expect(waits).toEqual([]);
   });
 
-  it("tries a read again on 5xx and network errors, then says what failed", async () => {
+  it("does not try a 429 without Retry-After again (a per-minute limit does not clear in a second)", async () => {
+    const { api: a, requests, waits } = api(() => jsonResponse({ statusCode: 429, message: "Rate limit is exceeded." }, 429));
+    const e = (await failure(a.listWorkouts({ limit: 1, offset: 0, byModificationTime: false }))) as SuuntoHttpError;
+    expect(e.kind).toBe("rate_limit");
+    expect(e.message).toBe("Suunto's call limit for this service is reached (HTTP 429). Try again later.");
+    expect(requests).toHaveLength(1);
+    expect(waits).toEqual([]);
+  });
+
+  it("never tries HTTP 500 again (Suunto answers a wrong workout key with 500)", async () => {
+    const wrongKey = api(() => jsonResponse({ error: { code: "500", description: "Internal server error" }, payload: null }, 500));
+    const e = await failure(wrongKey.api.getWorkout("notakey", []));
+    expect(e.message).toBe(
+      "Suunto could not answer (HTTP 500, the workout). Suunto also answers this way for a workout key that does not exist: check the key (from suunto_list_workouts).",
+    );
+    // No "try again": the same call would fail the same way.
+    expect(e.message).not.toMatch(/try again/i);
+    expect(wrongKey.requests).toHaveLength(1);
+    const fit = api(() => new Response("", { status: 500 }));
+    expect((await failure(fit.api.exportFit("Running"))).message).toMatch(/^Suunto could not answer \(HTTP 500, the FIT file of the workout\)\. Suunto also answers/);
+    expect(fit.requests).toHaveLength(1);
+    // Without a key hint, a 500 is a plain server problem, still not tried again.
+    const list = api(() => new Response("", { status: 500 }));
+    expect((await failure(list.api.listRoutes({ page: 0, size: 5, sort: "desc" }))).message).toBe("Suunto has a problem right now (HTTP 500, the route list). Try again later.");
+    expect(list.requests).toHaveLength(1);
+    expect(list.waits).toEqual([]);
+  });
+
+  it("tries a read again on 502, 503 and 504 and network errors, then says what failed", async () => {
     const busy = api(() => new Response("Service capacity exceeded. Try again later.", { status: 503 }));
     expect((await failure(busy.api.recovery(1, 2))).message).toBe("Suunto is busy right now (HTTP 503, the recovery data). Try again later.");
     expect(busy.requests).toHaveLength(3);
-    const wrongKey = api(() => new Response("", { status: 500 }));
-    expect((await failure(wrongKey.api.getWorkout(KEY, []))).message).toMatch(/HTTP 500, the workout\)\. Suunto also answers this way for a workout key that does not exist/);
+    for (const status of [502, 504]) {
+      const gateway = api(() => new Response("", { status }));
+      expect((await failure(gateway.api.listPois({ limit: 1, offset: 0 }))).message).toBe(`Suunto has a problem right now (HTTP ${status}, the points of interest). Try again later.`);
+      expect(gateway.requests).toHaveLength(3);
+    }
     let calls = 0;
     const flaky = api(() => {
       if (++calls < 3) throw resetError();
@@ -331,6 +418,52 @@ describe("SuuntoApi errors and retries", () => {
     expect(flaky.requests).toHaveLength(3);
     const slow = api(() => Promise.reject(timeoutError()));
     expect((await failure(slow.api.listPois({ limit: 1, offset: 0 }))).message).toBe("Suunto did not answer within 20 s (the points of interest). Try again later.");
+  });
+
+  it("tries a timed-out read again at most once, and the FIT export never", async () => {
+    // A timeout means the request reached Suunto and counted against the call limit.
+    const slow = api(() => Promise.reject(timeoutError()));
+    expect(((await failure(slow.api.listPois({ limit: 1, offset: 0 }))) as SuuntoHttpError).kind).toBe("timeout");
+    expect(slow.requests).toHaveLength(2);
+    let calls = 0;
+    const once = api(() => (++calls === 1 ? Promise.reject(timeoutError()) : jsonResponse([])));
+    expect(await once.api.listPois({ limit: 1, offset: 0 })).toEqual([]);
+    expect(once.requests).toHaveLength(2);
+    // A broken connection after a timeout is still tried again (3 tries in all).
+    calls = 0;
+    const mixed = api(() => (++calls === 1 ? Promise.reject(timeoutError()) : Promise.reject(resetError())));
+    expect(((await failure(mixed.api.listPois({ limit: 1, offset: 0 }))) as SuuntoHttpError).kind).toBe("network");
+    expect(mixed.requests).toHaveLength(3);
+    // The FIT export waits 60 s per try: one try only, so a tool call cannot take minutes.
+    const fit = api(() => Promise.reject(timeoutError()));
+    const e = (await failure(fit.api.exportFit(KEY))) as SuuntoHttpError;
+    expect(e.kind).toBe("timeout");
+    expect(e.message).toBe("Suunto did not answer within 60 s (the FIT file of the workout). Try again later.");
+    expect(fit.requests).toHaveLength(1);
+  });
+
+  it("tries a read again when the connection breaks while the answer downloads", async () => {
+    let calls = 0;
+    const { api: a, requests } = api(() => (++calls === 1 ? brokenBody(200) : jsonResponse({ error: null, payload: [{ workoutKey: KEY }], metadata: {} })));
+    expect((await a.listWorkouts({ limit: 1, offset: 0, byModificationTime: false })).payload).toEqual([{ workoutKey: KEY }]);
+    expect(requests).toHaveLength(2);
+    // Every try broken: the error says so after 3 tries.
+    const broken = api(() => brokenBody(200));
+    const e = (await failure(broken.api.listWorkouts({ limit: 1, offset: 0, byModificationTime: false }))) as SuuntoHttpError;
+    expect(e.kind).toBe("network");
+    expect(e.message).toBe("The connection to Suunto broke (the workout list). Try again later.");
+    expect(broken.requests).toHaveLength(3);
+    // A body that stops in a timeout counts as a timeout: the FIT export does not try again.
+    const stalled = api(() => brokenBody(200, timeoutError()));
+    const t = (await failure(stalled.api.exportFit(KEY))) as SuuntoHttpError;
+    expect(t.kind).toBe("timeout");
+    expect(t.message).toBe("Suunto stopped answering (the FIT file of the workout). Try again later.");
+    expect(stalled.requests).toHaveLength(1);
+    // A write is never sent again: its 2xx answer means it was saved.
+    const input: WirePoiInput = { point: { x: 8.5, y: 47.3, name: "Spring", type: 75 }, watchEnabled: true };
+    const write = api(() => brokenBody(200));
+    expect((await write.api.createPoi(input)).pointOfInterest.point.name).toBe("Spring");
+    expect(write.requests).toHaveLength(1);
   });
 
   it("never sends a write again once it may have reached Suunto", async () => {
@@ -358,6 +491,44 @@ describe("SuuntoApi errors and retries", () => {
     });
     expect((await refused.api.createPoi(input)).pointOfInterest.key).toBe("k");
     expect(refused.requests).toHaveLength(2);
+  });
+
+  it("asks the call limiter before every data request, retries included, but not for token calls", async () => {
+    const keys: string[] = [];
+    class Counting extends CallLimiter {
+      override async acquire(key: string): Promise<void> {
+        keys.push(key);
+      }
+    }
+    let calls = 0;
+    const { api: a, requests } = api(
+      () => {
+        calls++;
+        if (calls === 1) return new Response("", { status: 503 });
+        if (calls === 2) return jsonResponse({ error: "invalid_token" }, 401);
+        return jsonResponse([]);
+      },
+      { limiter: new Counting({ perMinute: 10 }), limiterKey: "user-1" },
+    );
+    expect(await a.listRoutes({ page: 0, size: 5, sort: "desc" })).toEqual([]);
+    // 503, then 401, a refresh (not counted) and the request again.
+    expect(requests.map((r) => new URL(r.url).pathname)).toEqual(["/v2/route", "/v2/route", "/oauth/token", "/v2/route"]);
+    expect(keys).toEqual(["user-1", "user-1", "user-1"]);
+  });
+
+  it("fails without a request when the limiter says no", async () => {
+    const limiter = new CallLimiter({ perMinute: 0, perKeyPerDay: 1, now: () => T0 });
+    const { api: a, requests } = api(() => jsonResponse([]), { limiter, limiterKey: "user-1" });
+    expect(await a.listPois({ limit: 1, offset: 0 })).toEqual([]);
+    const e = (await failure(a.listPois({ limit: 1, offset: 0 }))) as SuuntoHttpError;
+    expect(e.kind).toBe("rate_limit");
+    expect(e.sent).toBe(false);
+    expect(e.message).toBe("You reached this service's daily limit of 1 Suunto requests for your account. Try again tomorrow.");
+    expect(requests).toHaveLength(1);
+    // A write is refused the same way, before anything is sent.
+    const input: WirePoiInput = { point: { x: 8.5, y: 47.3, name: "Spring", type: 75 }, watchEnabled: true };
+    expect(await failure(a.createPoi(input))).not.toBeInstanceOf(UnconfirmedWriteError);
+    expect(requests).toHaveLength(1);
   });
 
   it("refuses an answer above the size limit", async () => {
