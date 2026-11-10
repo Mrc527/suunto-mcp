@@ -107,14 +107,30 @@ traefik_settings() {
 # compose.override.yml, with the settings of a container Traefik already routes here. The same as
 # setup-server.sh, without logging in to the server. An existing .env is never touched.
 first_setup() {
-  local settings net entrypoint resolver tmp
+  local settings net entrypoint resolver tmp sibling email password admin_from="the GitHub secrets"
+  # No administrator from the pipeline: use the one of another MCP server this user deploys on
+  # this machine (MCP for PADI, MCP for iCloud), so the operator signs in with the same account.
+  # The values stay on this server and are never printed.
+  if [ -z "$NEW_ADMIN_EMAIL" ] || [ -z "$NEW_ADMIN_PASSWORD" ]; then
+    for sibling in ../padi-mcp/.env ../icloud-mcp/.env; do
+      [ -r "$sibling" ] || continue
+      email=$(env_get_from "$sibling" ADMIN_EMAIL)
+      password=$(env_get_from "$sibling" ADMIN_PASSWORD)
+      if [ -n "$email" ] && [ -n "$password" ]; then
+        NEW_ADMIN_EMAIL=$email
+        NEW_ADMIN_PASSWORD=$password
+        admin_from="the settings of $(basename "$(dirname "$sibling")") on this server"
+        break
+      fi
+    done
+  fi
   if [ -z "$NEW_DOMAIN" ] || [ -z "$NEW_ADMIN_EMAIL" ] || [ -z "$NEW_ADMIN_PASSWORD" ]; then
-    die "$PWD/.env does not exist. Set the GitHub secrets SUUNTO_ADMIN_EMAIL and SUUNTO_ADMIN_PASSWORD (the next deploy then sets this server up by itself), or run setup-server.sh on this server once (see 'One-time setup' in README.md). Then deploy again."
+    die "$PWD/.env does not exist, and no administrator was found (none in ../padi-mcp/.env or ../icloud-mcp/.env). Set the GitHub secrets SUUNTO_ADMIN_EMAIL and SUUNTO_ADMIN_PASSWORD (the next deploy then sets this server up by itself), or run setup-server.sh on this server once (see 'One-time setup' in README.md). Then deploy again."
   fi
   [[ $NEW_DOMAIN =~ ^[A-Za-z0-9.-]+$ ]] || die "the service's host name is not valid: $NEW_DOMAIN"
-  [[ $NEW_ADMIN_EMAIL =~ ^[^[:space:]@\']+@[^[:space:]@\']+\.[^[:space:]@\']+$ ]] || die "the GitHub secret SUUNTO_ADMIN_EMAIL is not an e-mail address"
+  [[ $NEW_ADMIN_EMAIL =~ ^[^[:space:]@\']+@[^[:space:]@\']+\.[^[:space:]@\']+$ ]] || die "the administrator e-mail from $admin_from is not an e-mail address"
   if [ "${#NEW_ADMIN_PASSWORD}" -lt 10 ] || [ "${#NEW_ADMIN_PASSWORD}" -gt 200 ] || [[ $NEW_ADMIN_PASSWORD == *"'"* ]] || [[ ! $NEW_ADMIN_PASSWORD =~ ^[[:print:]]+$ ]]; then
-    die "the GitHub secret SUUNTO_ADMIN_PASSWORD must have 10 to 200 characters, without the ' character"
+    die "the administrator password from $admin_from must have 10 to 200 characters, without the ' character"
   fi
   if [ ! -f compose.override.yml ] && [ -z "${COMPOSE_FILE:-}" ]; then
     settings=$(traefik_settings)
@@ -159,7 +175,7 @@ first_setup() {
     echo "ADMIN_PASSWORD='$NEW_ADMIN_PASSWORD'"
   } >"$tmp"
   mv -f "$tmp" .env
-  log "first deploy: created .env for https://$NEW_DOMAIN with the administrator from the GitHub secrets"
+  log "first deploy: created .env for https://$NEW_DOMAIN with the administrator from $admin_from"
 }
 
 preflight() {
@@ -218,6 +234,19 @@ lock() {
 env_get() {
   local line
   line=$(grep -E "^$1=" .env | tail -n 1) || true
+  line=${line#*=}
+  line=${line%$'\r'}
+  line=${line%\"}
+  line=${line#\"}
+  line=${line%\'}
+  line=${line#\'}
+  printf '%s' "$line"
+}
+
+# Value of KEY in another .env file (same rules as env_get).
+env_get_from() {
+  local line
+  line=$(grep -E "^$2=" "$1" 2>/dev/null | tail -n 1) || true
   line=${line#*=}
   line=${line%$'\r'}
   line=${line%\"}
