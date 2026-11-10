@@ -4,11 +4,12 @@
 
 import express, { type Request, type Response, type Router } from "express";
 import { customEndpoints } from "../suunto/endpoints.js";
+import type { CallLimits } from "../suunto/limiter.js";
 import { isValidTimeZone } from "../util/dates.js";
 import { deauthorizeAtSuunto } from "./accounts.js";
 import { bool, page, str, type WebContext } from "./context.js";
 import { hashPassword, randomToken, readablePassword } from "./crypto.js";
-import { formatDate, html } from "./html.js";
+import { formatDate, html, type SafeHtml } from "./html.js";
 import { locale, t, th, tn, type MessageKey } from "./i18n/index.js";
 import type { NoticeProblem } from "./request-notices.js";
 import { isEmail } from "./routes-auth.js";
@@ -76,6 +77,13 @@ async function selfTest(ctx: WebContext): Promise<SelfTestRow[]> {
   rows.push({ label: t("admin.suunto.keys"), ok: !!ctx.suuntoKeys, detail: ctx.suuntoKeys ? t("admin.suunto.keysSet") : t("admin.suunto.keysMissing") });
   rows.push({ label: t("admin.selfTest.suunto"), ok: suuntoServers(ctx).custom.length === 0, detail: suuntoServers(ctx).text });
   return rows;
+}
+
+/** The limits of the Suunto call limiter (DESIGN.md section 4), one per line. */
+function callLimits(limits: CallLimits | undefined): SafeHtml {
+  const perMinute = limits?.perMinute ?? 0;
+  const perUser = limits?.perUserPerDay ?? 0;
+  return html`${perMinute > 0 ? t("admin.suunto.perMinute", { n: perMinute }) : t("admin.suunto.perMinuteOff")}<br>${perUser > 0 ? t("admin.suunto.perUser", { n: perUser }) : t("admin.suunto.perUserOff")}`;
 }
 
 /** Which Suunto servers the users' requests go to, as a phrase. */
@@ -155,6 +163,7 @@ export function adminRoutes(ctx: WebContext): Router {
           <div><dt>${t("admin.suunto.keys")}</dt><dd>${ctx.suuntoKeys ? t("admin.suunto.keysSet") : t("admin.suunto.keysMissing")} <span class="muted">${t("admin.suunto.keysHint")}</span></dd></div>
           <div><dt>${t("admin.suunto.redirectUri")}</dt><dd><code>${ctx.suuntoRedirectUri}</code> <span class="muted">${t("admin.suunto.redirectUriHint")}</span></dd></div>
           <div><dt>${t("admin.suunto.servers")}</dt><dd>${suuntoServers(ctx).text}</dd></div>
+          <div><dt>${t("admin.suunto.limits")}</dt><dd>${callLimits(ctx.pool.limits)} <span class="muted">${t("admin.suunto.limitsHint")}</span></dd></div>
         </dl>
         <p class="muted">${t("admin.suunto.plan")}</p>
       </div>

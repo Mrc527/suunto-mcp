@@ -434,8 +434,8 @@ export class SuuntoHttp {
   }
 
   /**
-   * Suunto's call limit for this service is reached (429, 403 with a quota text, 401 with
-   * "RateLimitExceeded"). Never a sign-in problem: the tokens stay as they are.
+   * Suunto's call limit for this service is reached (429, 403 with a quota text or Retry-After,
+   * 401 with "RateLimitExceeded"). Never a sign-in problem: the tokens stay as they are.
    */
   private rateLimited(res: Response, body: string): SuuntoHttpError {
     const wait = retryAfterMs(res, this.now()) ?? quotaWaitMs(body);

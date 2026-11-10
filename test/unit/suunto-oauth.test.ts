@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { SuuntoEndpoints } from "../../src/suunto/endpoints.js";
-import { authorizeUrl, callbackError, deauthorize, exchangeCode, refreshTokens, SuuntoAuthError, type OAuthOptions } from "../../src/suunto/oauth.js";
+import { AUTH_MESSAGES, authorizeUrl, callbackError, deauthorize, exchangeCode, refreshTokens, SuuntoAuthError, type OAuthOptions } from "../../src/suunto/oauth.js";
 import { UserFacingError } from "../../src/util/errors.js";
 import { VERSION } from "../../src/version.js";
 import { fakeJwt, jsonResponse, MOCK_USERNAME, refusedError, resetError, scriptedFetch, timeoutError, tokenResponse, type FetchResponder } from "../helpers/mock-suunto.js";
@@ -111,11 +111,28 @@ describe("exchangeCode", () => {
     expect((await authError(exchangeCode("", REDIRECT, opts))).code).toBe("invalid_grant");
   });
 
-  it("maps a refused client to bad_client", async () => {
+  it("maps the confirmed answer to a bad code (400 invalid_grant) to invalid_grant", async () => {
+    const e = await authError(exchangeCode(CODE, REDIRECT, options(() => jsonResponse({ error: "invalid_grant" }, 400)).opts));
+    expect(e.code).toBe("invalid_grant");
+    expect(e.message).toBe(AUTH_MESSAGES.codeRefused);
+  });
+
+  it("maps a refused client to bad_client, and after a sign-in names the Suunto App account too", async () => {
+    // Confirmed with a real call: a wrong client secret answers 401 {"error":"invalid_client"}.
+    const e0 = await authError(exchangeCode(CODE, REDIRECT, options(() => jsonResponse({ error: "invalid_client" }, 401)).opts));
+    expect(e0.code).toBe("bad_client");
+    expect(e0.status).toBe(401);
     const e1 = await authError(exchangeCode(CODE, REDIRECT, options(() => jsonResponse({ error: "invalid_client", error_description: "Bad client credentials" }, 401)).opts));
     expect(e1.code).toBe("bad_client");
-    expect(e1.message).toMatch(/SUUNTO_CLIENT_ID and SUUNTO_CLIENT_SECRET/);
+    // The FAQ: Movescount credentials get the same answer, so the user is told first.
+    expect(e1.message).toBe(
+      "Suunto refused the sign-in. Sign in on the Suunto page with your Suunto App account (not an old Movescount account) and start again with Connect Suunto. If that does not help, the operator must check SUUNTO_CLIENT_ID and SUUNTO_CLIENT_SECRET.",
+    );
     expect(e1.message).not.toContain(KEYS.clientSecret);
+    // A refresh involves no sign-in by the user: only the operator's keys can be wrong.
+    const e2 = await authError(refreshTokens("refresh-1", options(() => jsonResponse({ error: "invalid_client" }, 401)).opts));
+    expect(e2.code).toBe("bad_client");
+    expect(e2.message).toBe(AUTH_MESSAGES.badClient);
     // A 401 without a body on the token endpoint is the same.
     expect((await authError(exchangeCode(CODE, REDIRECT, options(() => new Response("", { status: 401 })).opts))).code).toBe("bad_client");
     expect((await authError(exchangeCode(CODE, REDIRECT, options(() => jsonResponse({ error: "unauthorized", error_description: "Bad credentials" }, 401)).opts))).code).toBe("bad_client");
@@ -154,6 +171,15 @@ describe("refreshTokens", () => {
     expect(result.tokens).toEqual({ refreshToken: "refresh-2", accessToken: access, accessTokenExpiresAt: T0 + 86_400_000, clientId: KEYS.clientId });
     expect(result.username).toBe(MOCK_USERNAME);
     expect(Object.fromEntries(new URLSearchParams(requests[0]!.body))).toEqual({ grant_type: "refresh_token", refresh_token: "refresh-1" });
+  });
+
+  it("keeps a new refresh token when the answer has no readable username", async () => {
+    const { opts } = options(() => tokenResponse("opaque-token", "NEW-RT", { expires_in: 86_400 }));
+    const result = await refreshTokens("OLD-RT", opts);
+    expect(result.tokens).toEqual({ refreshToken: "NEW-RT", accessToken: "opaque-token", accessTokenExpiresAt: T0 + 86_400_000, clientId: KEYS.clientId });
+    expect(result.username).toBeUndefined();
+    const noUser = fakeJwt({ nowMs: T0, claims: { user: undefined } });
+    expect((await refreshTokens("OLD-RT", options(() => tokenResponse(noUser, "NEW-RT")).opts)).tokens.refreshToken).toBe("NEW-RT");
   });
 
   it("keeps the old refresh token when the answer has none", async () => {

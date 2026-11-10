@@ -22,6 +22,8 @@ import { MOCK_CLIENT_ID, MOCK_CLIENT_SECRET, MOCK_SUBSCRIPTION_KEY, startMockSuu
 import { Browser, connectMcp, connectSuunto, setBase, TestOAuthClient } from "../helpers/web-client.js";
 
 const PASSWORD = "correct horse battery";
+/** These tests make many Suunto calls in a minute: no call limits. */
+const NO_LIMITS = { perMinute: 0, perUserPerDay: 0 };
 
 let web: WebApp;
 let server: Server;
@@ -45,7 +47,7 @@ beforeAll(async () => {
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   setBase(base);
   mock = await startMockSuunto({ redirectUris: [`${base}/suunto/callback`] });
-  web = await createWebApp({ publicUrl: new URL(base), host: "127.0.0.1", port: 0, dataDir: ":memory:", operator: mock.env(), log: (m) => void logs.push(m) });
+  web = await createWebApp({ publicUrl: new URL(base), host: "127.0.0.1", port: 0, dataDir: ":memory:", operator: mock.env(), callLimits: NO_LIMITS, log: (m) => void logs.push(m) });
   server.on("request", web.app);
   expect((await admin.signup("admin@example.com", PASSWORD)).status).toBe(303);
   web.ctx.store.saveSettings({ ...web.ctx.store.getSettings(), registration: "open" });
@@ -74,9 +76,15 @@ async function connectedUser(email: string): Promise<{ browser: Browser; client:
   return { browser, client, id: web.ctx.store.getUserByEmail(email)!.id };
 }
 
-/** A workout list query no earlier call used (the services cache answers for 2 minutes). */
-let offset = 0;
-const freshList = () => ({ limit: 1, offset: offset++ });
+/**
+ * A workout list query no earlier call used: one day further back each time. The services read
+ * pages of 100 workouts and cache them for 2 minutes, so only another time window needs Suunto.
+ */
+let daysBack = 0;
+const freshList = () => {
+  const day = new Date(Date.now() - ++daysBack * 86_400_000).toISOString().slice(0, 10);
+  return { from: day, to: day, limit: 1 };
+};
 
 describe("the forced read-only of the administrator", () => {
   it("hides the write tools of every account, demo accounts too, and shows read_only", async () => {

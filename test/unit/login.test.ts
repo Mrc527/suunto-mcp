@@ -1,12 +1,12 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, statSync } from "node:fs";
 import { createServer, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
+import { createServer as createNetServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { loadConfig, loadLoginConfig, type AppConfig } from "../../src/config.js";
-import { closeServices, createServices, readTokenCache, runLogin, type LoginResult } from "../../src/server.js";
+import { closeServices, createServices, isNoIpv6Error, readTokenCache, runLogin, type LoginResult } from "../../src/server.js";
 import { SuuntoAuthError } from "../../src/suunto/oauth.js";
 import { startMockSuunto, type MockSuunto } from "../helpers/mock-suunto.js";
 
@@ -39,6 +39,22 @@ async function setup(host = "127.0.0.1"): Promise<{ config: AppConfig; cache: st
   const redirectUri = `http://${host}:${await freePort()}/callback`;
   const config = loadLoginConfig({ ...mock.env(), SUUNTO_TOKEN_CACHE: cache, SUUNTO_REDIRECT_URI: redirectUri, SUUNTO_TIMEZONE: "Europe/Zurich" });
   return { config, cache, redirectUri };
+}
+
+/** True when this machine can listen on [::1]. */
+async function hasIpv6(): Promise<boolean> {
+  const server = createNetServer();
+  return new Promise((resolve) => {
+    server.once("error", () => resolve(false));
+    server.listen(0, "::1", () => server.close(() => resolve(true)));
+  });
+}
+
+/** A callback with the right state (taken from the authorize URL) and this query. */
+async function callback(authorizeUrl: string, redirectUri: string, query: Record<string, string>): Promise<{ status: number; text: string }> {
+  const state = new URL(authorizeUrl).searchParams.get("state")!;
+  const res = await fetch(`${redirectUri}?${new URLSearchParams({ ...query, state }).toString()}`);
+  return { status: res.status, text: await res.text() };
 }
 
 /** What a browser does with the authorize URL: Suunto's page answers with a redirect to us. */
@@ -146,18 +162,44 @@ describe("suunto-mcp --login", () => {
     const error = (run as { error: unknown }).error;
     expect(error).toBeInstanceOf(SuuntoAuthError);
     expect((error as SuuntoAuthError).code).toBe("denied");
-    expect((error as Error).message).toMatch(/You did not allow access/);
+    expect((error as Error).message).toBe("You did not allow access on the Suunto page, so Suunto is not connected. Run suunto-mcp --login again and allow access.");
     expect(run.page).toMatchObject({ status: 400 });
     expect(existsSync(cache)).toBe(false);
+  });
+
+  it("says to run --login again, never to use a Connect Suunto button", async () => {
+    const { config, redirectUri } = await setup();
+    const odd = await login(config, (url) => callback(url, redirectUri, { error: "something_odd" }));
+    expect((odd as { error: Error }).error).toBeInstanceOf(SuuntoAuthError);
+    expect((odd as { error: Error }).error.message).toBe("The Suunto sign-in did not finish. Run suunto-mcp --login again.");
+    expect((odd.page as { text: string }).text).toContain("Run suunto-mcp --login again.");
+    expect((odd.page as { text: string }).text).not.toContain("Connect Suunto");
+
+    // A wrong client secret: Suunto answers 401 invalid_client. The user is the operator here.
+    const keys = await setup();
+    mock.failNext("/oauth/token", 401, { error: "invalid_client" });
+    const bad = await login(keys.config, browse);
+    const error = (bad as { error: SuuntoAuthError }).error;
+    expect(error.code).toBe("bad_client");
+    expect(error.message).toBe(
+      "Suunto refused the app keys (client id or client secret). Check SUUNTO_CLIENT_ID and SUUNTO_CLIENT_SECRET against your app's OAuth settings in the Suunto API Zone, then run suunto-mcp --login again.",
+    );
+    expect(bad.page).toMatchObject({ status: 502 });
   });
 
   it("ends with a clear error when the code exchange fails, and writes nothing", async () => {
     const { config, cache } = await setup();
     mock.failNext("/oauth/token", 400, { error: "invalid_grant", error_description: "Invalid authorization code" });
     const run = await login(config, browse);
-    expect((run as { error: Error }).error.message).toMatch(/Suunto did not accept the sign-in/);
+    const error = (run as { error: SuuntoAuthError }).error;
+    expect(error.code).toBe("invalid_grant");
+    // The redirect URI is the usual cause: the message names the setting and the address.
+    expect(error.message).toBe(
+      `Suunto did not accept the sign-in (the code is expired or was used already). Run suunto-mcp --login again. If it keeps happening, check that the redirect URI in your app's OAuth settings in the Suunto API Zone is exactly ${config.suunto.redirectUri} (SUUNTO_REDIRECT_URI).`,
+    );
     expect(run.page).toMatchObject({ status: 502 });
     expect((run.page as { text: string }).text).toMatch(/Suunto did not accept the sign-in/);
+    expect((run.page as { text: string }).text).not.toContain("Connect Suunto");
     expect(existsSync(cache)).toBe(false);
   });
 
@@ -182,6 +224,29 @@ describe("suunto-mcp --login", () => {
     const { config } = await setup("localhost");
     const run = await login(config, browse);
     expect("ok" in run && run.ok.username).toBe(mock.username);
+  });
+
+  it("does without [::1] only when the machine has no IPv6", () => {
+    const failure = (code: string) => Object.assign(new Error(code), { code });
+    expect(isNoIpv6Error(failure("EADDRNOTAVAIL"))).toBe(true);
+    expect(isNoIpv6Error(failure("EAFNOSUPPORT"))).toBe(true);
+    // Another program on [::1] could receive Suunto's answer with the code: never ignored.
+    expect(isNoIpv6Error(failure("EADDRINUSE"))).toBe(false);
+    expect(isNoIpv6Error(failure("EACCES"))).toBe(false);
+    expect(isNoIpv6Error(new Error("no code"))).toBe(false);
+    expect(isNoIpv6Error(undefined)).toBe(false);
+  });
+
+  it("stops when another program listens on [::1] at the port of localhost", async (ctx) => {
+    if (!(await hasIpv6())) ctx.skip();
+    const { config, redirectUri } = await setup("localhost");
+    const blocker: Server = createServer();
+    await new Promise<void>((resolve) => blocker.listen(Number(new URL(redirectUri).port), "::1", resolve));
+    try {
+      await expect(runLogin(config, { print: () => {} })).rejects.toThrow(/is in use.*SUUNTO_REDIRECT_URI/);
+    } finally {
+      await new Promise<void>((resolve) => blocker.close(() => resolve()));
+    }
   });
 });
 
@@ -220,5 +285,6 @@ describe("suunto-mcp --login (command line)", () => {
     const refused = await cli({ ...env, SUUNTO_REDIRECT_URI: `http://127.0.0.1:${await freePort()}/callback` });
     expect(refused.code).toBe(1);
     expect(refused.stderr).toMatch(/\[suunto-mcp\] login failed: You did not allow access/);
+    expect(refused.stderr).not.toContain("Connect Suunto");
   });
 });

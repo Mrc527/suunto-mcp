@@ -55,6 +55,8 @@ beforeAll(async () => {
     allowPrivateClientMetadata: true,
     // Never reach real Suunto from tests: the mock (its hosts and app keys).
     operator: mock.env(),
+    // Many Suunto calls in a minute: no call limits (web-limits tests check them).
+    callLimits: { perMinute: 0, perUserPerDay: 0 },
     log: (m) => void logs.push(m),
   });
   server.on("request", web.app);
@@ -86,6 +88,16 @@ afterAll(async () => {
 /** The JSON text of a tool answer. */
 const text = (res: unknown) => JSON.stringify((res as { content?: unknown }).content);
 const json = (res: unknown) => JSON.parse((res as { content: { text: string }[] }).content[0]!.text) as Record<string, unknown>;
+
+/**
+ * Arguments of a workout list for a day no earlier call read: the services cache pages of
+ * workouts for 2 minutes, so only another time window needs Suunto.
+ */
+let daysBack = 60;
+const freshWindow = (limit: number) => {
+  const day = new Date(Date.now() - ++daysBack * DAY).toISOString().slice(0, 10);
+  return { from: day, to: day, limit };
+};
 
 /** Workouts of the mock that started in the last 30 days (what the connect check counts). */
 const recentWorkouts = () => mock.state.workouts.filter((w) => Number(w.startTime) >= Date.now() - 30 * DAY && Number(w.startTime) < Date.now()).length;
@@ -528,14 +540,14 @@ describe("OAuth and MCP", () => {
   it("asks the user to connect again when Suunto refuses the stored sign-in", async () => {
     const id = userId();
     mock.revokeAll();
-    const failed = await client.callTool({ name: "suunto_list_workouts", arguments: { limit: 6 } });
+    const failed = await client.callTool({ name: "suunto_list_workouts", arguments: freshWindow(6) });
     expect(failed.isError).toBe(true);
     // The call that finds the dead sign-in already says where to connect again.
     expect(text(failed)).toContain(`Your Suunto connection expired. Connect Suunto again at ${base}/account.`);
     expect(web.ctx.store.getUser(id)!.suuntoNeedsReconnect).toBe(true);
     // Tool calls are not blocked by the mark: the session answers (during its cool-down without a request).
     const tokenCalls = mock.count("/oauth/token");
-    const info = await client.callTool({ name: "suunto_list_workouts", arguments: { limit: 7 } });
+    const info = await client.callTool({ name: "suunto_list_workouts", arguments: freshWindow(7) });
     expect(info.isError).toBe(true);
     expect(text(info)).toContain(`Connect Suunto again at ${base}/account.`);
     expect(mock.count("/oauth/token")).toBe(tokenCalls);
@@ -544,7 +556,7 @@ describe("OAuth and MCP", () => {
     expect(html).toContain("Suunto refused your saved connection");
     expect((await connectSuunto(userBrowser)).res.headers.get("location")).toBe("/account?m=connected");
     expect(web.ctx.store.getUser(id)!.suuntoNeedsReconnect).toBe(false);
-    expect((await client.callTool({ name: "suunto_list_workouts", arguments: { limit: 8 } })).isError).toBeFalsy();
+    expect((await client.callTool({ name: "suunto_list_workouts", arguments: freshWindow(8) })).isError).toBeFalsy();
   });
 
   it("refreshes expired access tokens and rotates the refresh token", async () => {
@@ -936,8 +948,18 @@ describe("a server without Suunto app keys", () => {
     expect(bare.ctx.pool.get(bare.ctx.store.getUser(user.id)!)).toBeUndefined();
     const { html } = await b.page("/account");
     expect(html).toContain("invented-runner");
-    expect(html).toContain("The administrator of this server has not set up the Suunto connection yet");
+    // Not "connected" and "On": the saved connection cannot be used right now.
+    expect(html).toContain("Your Suunto connection is saved, but it is not available right now.");
+    expect(html).toContain('<span class="badge warn">Not available right now</span>');
+    expect(html).toContain('<span class="badge warn">not available right now</span>');
+    expect(html).toContain("The Suunto connection of this server is not set up right now");
+    expect(html).not.toContain("Suunto connected.");
+    expect(html).not.toContain('<span class="badge ok">');
     expect(html).not.toContain('<details id="reconnect">');
+    // Remove cannot tell Suunto without the app keys, and says so.
+    expect(html).toContain("This server cannot tell Suunto right now");
+    expect(html).not.toContain("This server tells Suunto to end its access");
+    expect((await b.page("/account/security")).html).toContain("This server cannot tell Suunto right now");
     const client = await connectMcp(new TestOAuthClient(b));
     const res = await client.callTool({ name: "suunto_account_info", arguments: {} });
     expect(res.isError).toBe(true);

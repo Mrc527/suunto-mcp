@@ -15,13 +15,13 @@ import {
   formatInZone,
   formatOffset,
   formatWithOffset,
-  hasLocalOffset,
   HOUR_MS,
   localDateOf,
   localHourStart,
   parseUtcTimestamp,
   startOfDay,
   tzOffsetMinutes,
+  writtenOffsetMinutes,
 } from "../util/dates.js";
 import type {
   DaySummary,
@@ -86,11 +86,11 @@ export function epochMs(value: unknown): number | undefined {
   return n < 1e11 ? n * 1000 : n;
 }
 
-/** "avgTemperature" -> "avg_temperature", "HRExt" -> "hr_ext". */
+/** "avgTemperature" -> "avg_temperature", "HRExt" -> "hr_ext". Every step is linear in the key. */
 export function snakeCase(key: string): string {
   return key
     .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
-    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
+    .replace(/([A-Z])(?=[A-Z][a-z])/g, "$1_")
     .replace(/[^A-Za-z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "")
     .toLowerCase();
@@ -106,6 +106,23 @@ function compact<T extends object>(value: T): T {
     if (value[key] === undefined) delete value[key];
   }
   return value;
+}
+
+/**
+ * The smallest and the largest number of a list, with a loop. Math.min(...list) and
+ * Math.max(...list) pass every value as an argument and overflow the stack for long wire
+ * arrays (more than about 125,000 values, a 1 Hz stream of 35 hours).
+ */
+export function minMax(values: Iterable<number>): { min: number; max: number } | undefined {
+  let min = Infinity;
+  let max = -Infinity;
+  let any = false;
+  for (const v of values) {
+    any = true;
+    if (v < min) min = v;
+    if (v > max) max = v;
+  }
+  return any ? { min, max } : undefined;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -740,8 +757,7 @@ export function relativeTimes(raw: ReadonlyArray<number | string | undefined>, s
     rel.push(l);
   }
   const base = startMs ?? abs.find((a) => a !== undefined);
-  const relValues = rel.filter((v): v is number => v !== undefined);
-  const relMax = relValues.length ? Math.max(...relValues) : 0;
+  const relMax = minMax(rel.filter((v): v is number => v !== undefined))?.max ?? 0;
   const relScale = durationS !== undefined && durationS > 0 && relMax > durationS * 5 + 60 ? 1 / 1000 : 1;
   const out = raw.map((_, i) => {
     const a = abs[i];
@@ -843,8 +859,7 @@ function isCumulative(values: readonly number[], total: number | undefined): boo
 
 /** A converter from wire values (SI) to the stream's unit, chosen from all values (Hz or not). */
 function streamConverter(name: SampleName, values: readonly number[], units: UnitChoice): (v: number) => number | undefined {
-  const finite = values.filter((v) => Number.isFinite(v));
-  const max = finite.length ? Math.max(...finite) : 0;
+  const max = minMax(values.filter((v) => Number.isFinite(v)))?.max ?? 0;
   const hz = max > 0 && max < U.HZ_THRESHOLD;
   switch (name) {
     case "heart_rate":
@@ -1143,12 +1158,13 @@ export function toRecoveryPoints(samples: readonly WireSample<WireRecoveryEntry>
     .sort((a, b) => a.bucket.start - b.bucket.start)
     .map((g) => {
       const b = g.balances;
+      const range = minMax(b);
       return compact<RecoveryPoint>({
         start: formatInZone(new Date(g.bucket.start), opts.tz),
         end: formatInZone(new Date(g.bucket.end), opts.tz),
         balance_pct_avg: b.length ? U.percent(b.reduce((x, y) => x + y, 0) / b.length) : undefined,
-        balance_pct_min: b.length ? U.percent(Math.min(...b)) : undefined,
-        balance_pct_max: b.length ? U.percent(Math.max(...b)) : undefined,
+        balance_pct_min: range ? U.percent(range.min) : undefined,
+        balance_pct_max: range ? U.percent(range.max) : undefined,
         stress_states: Object.keys(g.states).length ? g.states : undefined,
         samples: g.n,
       });
@@ -1219,14 +1235,17 @@ const DAY_MATCH_MS = 3 * HOUR_MS;
 
 /**
  * The local date a daily statistics sample belongs to. With a local offset in the time
- * ("2026-09-27T12:00:00+02:00") the date part is the local date. Without one the time is UTC: the
- * date is the one whose local midnight is nearest (Suunto steps 24 hours from the `startdate` we
- * sent, so after a DST change its times are one hour off local midnight), else the local date.
+ * ("2026-09-27T12:00:00+02:00") the date part is the local date. A time in UTC ("Z", "+00:00" or
+ * no zone at all) is a UTC instant, unless UTC is also the user's offset at that time: the date
+ * is the one whose local midnight is nearest (Suunto steps 24 hours from the `startdate` we sent,
+ * which is a local midnight in UTC, and after a DST change its times are one hour off local
+ * midnight), else the local date. So "2026-10-23T22:00:00+00:00" is 2026-10-24 in Zurich.
  */
 export function dateOfDailySample(time: string, starts: readonly DayStart[], tz: string): string | undefined {
-  if (hasLocalOffset(time)) return time.trim().slice(0, 10);
   const ms = parseUtcTimestamp(time);
   if (ms === undefined) return undefined;
+  const offset = writtenOffsetMinutes(time);
+  if (offset !== undefined && (offset !== 0 || offset === tzOffsetMinutes(new Date(ms), tz))) return time.trim().slice(0, 10);
   let best: DayStart | undefined;
   let bestDiff = Infinity;
   for (const s of starts) {

@@ -9,6 +9,7 @@ export default {
   "account.profile.reconnect": "Suunto ha rifiutato il collegamento salvato. Collega di nuovo Suunto qui sotto.",
   "account.profile.getStarted": "Per iniziare, collega il tuo account Suunto qui sotto.",
   "account.profile.notConfigured": "Su questo server non è ancora possibile collegare Suunto.",
+  "account.profile.unavailable": "Il tuo collegamento con Suunto è salvato, ma al momento non è disponibile.",
   "account.profile.demo": "Account demo con dati Suunto di esempio.",
   "account.profile.demoReadOnly": "Account demo con dati Suunto di esempio, in sola lettura.",
 
@@ -24,16 +25,19 @@ export default {
   "account.state.connectAgain": "Collega di nuovo",
   "account.state.on": "Attivo",
   "account.state.onReadOnly": "Attivo, sola lettura",
+  "account.state.unavailable": "Al momento non disponibile",
 
   // The Suunto connection
   "account.suunto.heading": "Il tuo account Suunto",
   "account.suunto.badgeConnected": "collegato",
   "account.suunto.badgeNotConnected": "non collegato",
   "account.suunto.badgeReconnect": "da ricollegare",
+  "account.suunto.badgeUnavailable": "al momento non disponibile",
   "account.suunto.intro": "\"Collega Suunto\" ti porta alla pagina di accesso di Suunto. Accedi lì e autorizza il collegamento, poi Suunto ti rimanda qui. La tua password Suunto resta a Suunto: questo server conserva solo i token di accesso che Suunto rilascia, in forma crittografata.",
   "account.suunto.syncHint": "Le tue app di IA vedono ciò che c'è nel tuo account Suunto: prima sincronizza l'orologio con la Suunto App.",
   "account.suunto.connect": "Collega Suunto",
   "account.suunto.notConfigured": "L'amministratore di questo server non ha ancora configurato il collegamento con Suunto, quindi al momento non è possibile collegare Suunto. Riprova più tardi.",
+  "account.suunto.unavailable": "Il collegamento con Suunto di questo server al momento non è configurato, quindi le tue app di IA non raggiungono i tuoi dati Suunto. Il collegamento salvato resta qui. Riprova più tardi.",
   "account.suunto.unreadable": "Il collegamento con Suunto salvato non è più leggibile perché la chiave di crittografia del server è cambiata. Collega di nuovo Suunto.",
   "account.suunto.expired": "Suunto ha rifiutato il collegamento salvato, ad esempio perché l'accesso di questa app è stato rimosso su Suunto. Le tue app di IA potrebbero non raggiungere i tuoi dati Suunto finché non colleghi di nuovo Suunto.",
   "account.suunto.connectAgain": "Collega di nuovo Suunto",
@@ -50,6 +54,7 @@ export default {
   "account.suunto.units.imperial": "Imperiali (mi, ft, mph, °F)",
   "account.suunto.timeZone": "Fuso orario",
   "account.suunto.timeZoneHint": "La tua app di IA lo usa per date e orari, ad esempio per sapere quali giorni intendi con \"la settimana scorsa\".",
+  "account.suunto.timeZoneDefault": "Predefinito del server ({timeZone})",
   "account.suunto.readOnly": "Sola lettura",
   "account.suunto.readOnlyHint": "Le app di IA possono leggere i tuoi dati Suunto, ma non possono mai aggiungere percorsi o punti di interesse.",
   "account.suunto.readOnlyEnforced": "Imposta dall'amministratore.",
@@ -59,6 +64,7 @@ export default {
   "account.suunto.reconnectHint": "Collega di nuovo Suunto, ad esempio dopo che l'accesso di questa app è stato rimosso su Suunto, oppure per collegare un altro account Suunto. Le tue impostazioni restano invariate.",
   "account.suunto.remove": "Rimuovi il collegamento con Suunto",
   "account.suunto.removeConfirm": "Vuoi rimuovere il collegamento con Suunto? Questo server chiede a Suunto di revocare il suo accesso e le tue app di IA perderanno l'accesso ai tuoi dati Suunto finché non colleghi di nuovo Suunto. I tuoi dati su Suunto non vengono modificati.",
+  "account.suunto.removeConfirmUnavailable": "Vuoi rimuovere il collegamento con Suunto? Al momento questo server non può avvisare Suunto, quindi Suunto potrebbe mostrare ancora questa app come collegata. Puoi rimuoverla nella Suunto App. I tuoi dati su Suunto non vengono modificati.",
 
   // After "Connect Suunto" (shown when Suunto sends the browser back)
   "account.flash.connected": "Suunto è collegato. Ora le tue app di IA possono usare i tuoi dati Suunto.",
@@ -116,6 +122,7 @@ export default {
   "account.security.signOutOthers": "Esci da tutti gli altri browser",
   "account.security.deleteHeading": "Elimina account",
   "account.security.deleteText": "Elimina il tuo account, il collegamento con Suunto salvato e tutti i collegamenti con le app. Questo server chiede anche a Suunto di revocare il suo accesso. I tuoi dati su Suunto restano intatti.",
+  "account.security.deleteTextUnavailable": "Elimina il tuo account, il collegamento con Suunto salvato e tutti i collegamenti con le app. Al momento questo server non può avvisare Suunto, quindi Suunto potrebbe mostrare ancora questa app come collegata. Puoi rimuoverla nella Suunto App. I tuoi dati su Suunto restano intatti.",
   "account.security.deleteConfirmLabel": "Digita la tua e-mail ({email}) per confermare",
   "account.security.deleteButton": "Elimina il mio account",
   "account.security.wrongPassword": "La password attuale non è corretta.",

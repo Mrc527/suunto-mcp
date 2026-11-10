@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { ActivityService, checkGpx, ReadOnlyError, type ServiceOptions } from "../../src/activity/service.js";
+import { CachedBackend } from "../../src/activity/cache.js";
+import { ActivityService, checkGpx, ReadOnlyError, type ListWorkoutsResult, type ServiceOptions } from "../../src/activity/service.js";
 import type {
   ActivityBackend,
   ListRoutesQuery,
@@ -28,13 +29,30 @@ interface Call {
   args: unknown[];
 }
 
+/** A number from a text that looks random but is always the same (for a shuffled list). */
+function hash(text: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 16777619);
+  return h >>> 0;
+}
+
+/** An error like the HTTP layer's (and the call limiter's) when Suunto's call limit is reached. */
+function rateLimitError(): Error {
+  return Object.assign(new UserFacingError("Suunto's call limit for this service is reached. Try again in 50 seconds."), { kind: "rate_limit" });
+}
+
 /** An in-memory backend that records every call and checks the API's window rules. */
 class FakeBackend implements ActivityBackend {
   readonly kind = "demo" as const;
   calls: Call[] = [];
   workouts: WireWorkout[] = [];
-  /** The order the fake "Suunto" lists workouts in. */
-  order: "desc" | "asc" = "desc";
+  /**
+   * The order the fake "Suunto" lists workouts in: by start time (newest or oldest first), by
+   * modification time (newest first), or shuffled. The real order is not documented.
+   */
+  order: "desc" | "asc" | "modified" | "shuffled" = "desc";
+  /** After this many workout list requests, every further one fails with the call limit. */
+  rateLimitAfter?: number;
   activity: WireSample<WireActivityEntry>[] = [];
   sleeps: WireSample<WireSleepEntry>[] = [];
   recoveries: WireSample<WireRecoveryEntry>[] = [];
@@ -58,11 +76,18 @@ class FakeBackend implements ActivityBackend {
 
   async listWorkouts(q: ListWorkoutsQuery): Promise<WireWorkoutList> {
     this.record("listWorkouts", q);
+    if (this.rateLimitAfter !== undefined && this.ops("listWorkouts").length > this.rateLimitAfter) throw rateLimitError();
     expect(q.limit).toBeGreaterThanOrEqual(1);
     expect(q.limit).toBeLessThanOrEqual(100);
     expect(q.byModificationTime).toBe(false);
     const inRange = this.workouts.filter((w) => (q.since === undefined || w.startTime! >= q.since) && (q.until === undefined || w.startTime! < q.until));
-    inRange.sort((a, b) => (this.order === "desc" ? b.startTime! - a.startTime! : a.startTime! - b.startTime!));
+    const sortKey = (w: WireWorkout): number => {
+      if (this.order === "desc") return -w.startTime!;
+      if (this.order === "asc") return w.startTime!;
+      if (this.order === "modified") return -(w.lastModified ?? w.startTime!);
+      return hash(w.workoutKey!);
+    };
+    inRange.sort((a, b) => sortKey(a) - sortKey(b));
     const payload = inRange.slice(q.offset, q.offset + q.limit);
     return { error: null, payload, metadata: { workoutcount: String(payload.length) } };
   }
@@ -172,83 +197,136 @@ function workout(n: number, hoursAgo: number, activityId = 1, extra: Partial<Wir
 
 const ms = (iso: string) => Date.parse(iso);
 
+/** A workout key as Suunto writes it: 24 hex characters. */
+const KEY = "5b190f5c52ce7b316acbd520";
+
+const keys = (r: ListWorkoutsResult) => r.workouts.map((w) => w.workout_key);
+
+/** The keys of the workouts by start time, newest first: what every page must show. */
+function newestKeys(list: readonly WireWorkout[], filter: (w: WireWorkout) => boolean = () => true): string[] {
+  return list
+    .filter(filter)
+    .sort((a, b) => b.startTime! - a.startTime!)
+    .map((w) => w.workoutKey!);
+}
+
 describe("workout list", () => {
-  it("asks for the last 30 local days by start time, newest first, one request", async () => {
+  it("asks for the last 30 local days by start time, in one request", async () => {
     const b = new FakeBackend();
     b.workouts = Array.from({ length: 30 }, (_, i) => workout(i, i * 12));
     const r = await service(b).listWorkouts({});
-    const q = b.ops("listWorkouts")[0]!.args[0] as ListWorkoutsQuery;
-    expect(q).toMatchObject({ since: ms("2026-10-11T22:00:00Z"), until: ms("2026-11-10T23:00:00Z"), limit: 21, offset: 0 });
-    expect(b.calls).toHaveLength(1);
-    expect(r.from).toBe("2026-10-12");
-    expect(r.to).toBe("2026-11-10");
-    expect(r.count).toBe(20);
+    expect(b.ops("listWorkouts").map((c) => c.args[0])).toEqual([
+      { since: ms("2026-10-11T22:00:00Z"), until: ms("2026-11-10T23:00:00Z"), limit: 100, offset: 0, byModificationTime: false },
+    ]);
+    expect(r).toMatchObject({ from: "2026-10-12", to: "2026-11-10", count: 20, total_in_range: 30, next_offset: 20, units: { distance: "km" } });
     expect(r.workouts[0]!.workout_key).toBe("w0000");
-    expect(r.next_offset).toBe(20);
-    expect(r.total_in_range).toBeUndefined();
-    expect(r.units.distance).toBe("km");
+    expect(r.note).toBeUndefined();
     const next = await service(b).listWorkouts({ offset: 20 });
-    expect(next.workouts.map((w) => w.workout_key)).toEqual(["w0020", "w0021", "w0022", "w0023", "w0024", "w0025", "w0026", "w0027", "w0028", "w0029"]);
+    expect(keys(next)).toEqual(["w0020", "w0021", "w0022", "w0023", "w0024", "w0025", "w0026", "w0027", "w0028", "w0029"]);
     expect(next.total_in_range).toBe(30);
     expect(next.next_offset).toBeUndefined();
   });
 
-  it("reads the whole range and sorts here when Suunto lists oldest first", async () => {
-    const b = new FakeBackend();
-    b.order = "asc";
-    b.workouts = Array.from({ length: 150 }, (_, i) => workout(i, i * 4));
-    const page1 = await service(b).listWorkouts({ limit: 10 });
-    expect(page1.workouts.map((w) => w.workout_key)).toEqual(["w0000", "w0001", "w0002", "w0003", "w0004", "w0005", "w0006", "w0007", "w0008", "w0009"]);
-    expect(page1.total_in_range).toBe(150);
-    expect(page1.next_offset).toBe(10);
-    // One page to find the order, then pages of 100.
-    expect(b.ops("listWorkouts").map((c) => (c.args[0] as ListWorkoutsQuery).limit)).toEqual([11, 100, 100]);
-    b.calls = [];
-    const page2 = await service(b).listWorkouts({ limit: 10, offset: 145 });
-    expect(page2.workouts.map((w) => w.workout_key)).toEqual(["w0145", "w0146", "w0147", "w0148", "w0149"]);
-    expect(page2.next_offset).toBeUndefined();
-    expect(page2.total_in_range).toBe(150);
-    // A short last page tells the total: one more request instead of reading the whole range.
-    expect(b.ops("listWorkouts").map((c) => (c.args[0] as ListWorkoutsQuery).limit)).toEqual([11, 5]);
-  });
-
-  it("finds the last workout of a page of one, in either order", async () => {
-    for (const order of ["asc", "desc"] as const) {
+  it("gives the same pages in any order of Suunto's list: by start time either way, by modification time, or none", async () => {
+    // 400 workouts, 2 hours apart. Every 7th was edited lately, so by modification time old
+    // workouts come before newer ones (a page can still look newest first by start time).
+    const make = () => Array.from({ length: 400 }, (_, i) => workout(i, i * 2 + 1, 1, { lastModified: i % 7 === 3 ? NOW - i * 1000 : NOW - i * 2 * HOUR_MS }));
+    const expected = newestKeys(make());
+    for (const order of ["desc", "asc", "modified", "shuffled"] as const) {
       const b = new FakeBackend();
       b.order = order;
-      b.workouts = Array.from({ length: 21 }, (_, i) => workout(i, i * 4));
-      const r = await service(b).listWorkouts({ offset: 20 });
-      expect(r.workouts.map((w) => w.workout_key), order).toEqual(["w0020"]);
-      expect(r.total_in_range).toBe(21);
-      expect(b.ops("listWorkouts").length).toBeLessThanOrEqual(2);
-      const past = await service(b).listWorkouts({ offset: 40 });
-      expect(past).toMatchObject({ count: 0, workouts: [] });
+      b.workouts = make();
+      for (const [offset, limit] of [[0, 1], [0, 4], [0, 20], [40, 10], [95, 100], [390, 20]] as const) {
+        const r = await service(b).listWorkouts({ from: "2026-09-01", offset, limit });
+        const what = `${order}, offset ${offset}, limit ${limit}`;
+        expect(keys(r), what).toEqual(expected.slice(offset, offset + limit));
+        expect(r.next_offset, what).toBe(offset + limit < 400 ? offset + limit : undefined);
+        expect(r.note, what).toBeUndefined();
+      }
+      // A short page costs a few requests at most, never a read of the whole range.
+      b.calls = [];
+      await service(b).listWorkouts({ from: "2026-09-01", limit: 5 });
+      expect(b.ops("listWorkouts").length, order).toBeLessThanOrEqual(3);
     }
   });
 
-  it("filters by sport over the whole range, newest first, and pages", async () => {
+  it("shows the real newest workouts of a long range when Suunto lists oldest first", async () => {
+    const b = new FakeBackend();
+    b.order = "asc";
+    // 1500 workouts, 29 hours apart: almost 5 years.
+    b.workouts = Array.from({ length: 1500 }, (_, i) => workout(i, i * 29, i % 2 ? 2 : 1));
+    const r = await service(b).listWorkouts({ from: "2020-01-01", limit: 3 });
+    expect(keys(r)).toEqual(["w0000", "w0001", "w0002"]);
+    expect(r).toMatchObject({ next_offset: 3 });
+    expect(r.note).toBeUndefined();
+    expect(b.ops("listWorkouts")).toHaveLength(1);
+    const runs = await service(b).listWorkouts({ from: "2020-01-01", sport: "run", limit: 3 });
+    expect(keys(runs)).toEqual(["w0000", "w0002", "w0004"]);
+  });
+
+  it("filters by sport, newest first, and pages, reading only as far back as the page needs", async () => {
     const b = new FakeBackend();
     b.workouts = Array.from({ length: 250 }, (_, i) => workout(i, i, [1, 22, 2, 11][i % 4]!));
     const r = await service(b).listWorkouts({ from: "2026-10-01", sport: "run", limit: 5, offset: 5 });
     expect(r.sport).toBe("run");
     expect(r.sports_matched).toEqual(expect.arrayContaining(["Running", "Trail running"]));
-    expect(r.total_in_range).toBe(126);
-    expect(r.workouts.map((w) => w.workout_key)).toEqual(["w0009", "w0012", "w0013", "w0016", "w0017"]);
+    expect(keys(r)).toEqual(["w0009", "w0012", "w0013", "w0016", "w0017"]);
     expect(r.workouts.every((w) => w.sport === "Running" || w.sport === "Trail running")).toBe(true);
     expect(r.next_offset).toBe(10);
-    expect(b.ops("listWorkouts")).toHaveLength(3);
-    const exact = await service(b).listWorkouts({ from: "2026-10-01", sport: "TRAIL RUNNING" });
-    expect(exact.total_in_range).toBe(63);
+    // Not the whole range was read, so the total is not known.
+    expect(r.total_in_range).toBeUndefined();
+    expect(b.ops("listWorkouts").length).toBeLessThanOrEqual(3);
+    const all = await service(b).listWorkouts({ from: "2026-10-01", sport: "TRAIL RUNNING", limit: 100 });
+    expect(all.total_in_range).toBe(63);
+    expect(keys(all)).toEqual(newestKeys(b.workouts, (w) => w.activityId === 22));
   });
 
-  it("says when the 1000 workout cap of the sport filter is hit", async () => {
+  it("stops reading as soon as the page is complete, also with a sport filter", async () => {
     const b = new FakeBackend();
+    // 1100 workouts, 4 an hour.
     b.workouts = Array.from({ length: 1100 }, (_, i) => workout(i, i / 4, i % 2 ? 1 : 2));
     const r = await service(b).listWorkouts({ sport: "bike" });
-    expect(b.ops("listWorkouts")).toHaveLength(10);
+    expect(keys(r)).toEqual(newestKeys(b.workouts, (w) => w.activityId === 2).slice(0, 20));
+    expect(r).toMatchObject({ count: 20, next_offset: 20 });
+    expect(r.note).toBeUndefined();
+    expect(b.ops("listWorkouts").length).toBeLessThanOrEqual(4);
+  });
+
+  it("says which part of the range was read when the 1000 workout cap is hit, and how to read on", async () => {
+    const b = new FakeBackend();
+    b.order = "asc";
+    // 1500 workouts, 2 hours apart; only the oldest is a dive.
+    b.workouts = Array.from({ length: 1500 }, (_, i) => workout(i, i * 2, i === 1499 ? 78 : 1));
+    const r = await service(b).listWorkouts({ from: "2026-01-01", sport: "dive" });
+    expect(r).toMatchObject({ count: 0, workouts: [] });
     expect(r.total_in_range).toBeUndefined();
-    expect(r.note).toMatch(/more than 1000 workouts/);
-    expect(r.count).toBe(20);
+    expect(r.next_offset).toBeUndefined();
+    expect(r.note).toMatch(/^Only the newest 1\d{3} workouts of this range were read \(back to 2026-\S+\), so older workouts are missing\. For older workouts, ask again with to set to 2026-\S+\.$/);
+    expect(b.ops("listWorkouts").length).toBeLessThanOrEqual(15);
+    const to = r.note!.match(/to set to (\S+)\.$/)![1]!;
+    const older = await service(b).listWorkouts({ from: "2026-01-01", to, sport: "dive" });
+    expect(keys(older)).toEqual(["w1499"]);
+  });
+
+  it("gives no next page when a page of 100 holds the last workouts of the range", async () => {
+    const b = new FakeBackend();
+    b.workouts = Array.from({ length: 100 }, (_, i) => workout(i, i * 6));
+    const r = await service(b).listWorkouts({ limit: 100 });
+    expect(r).toMatchObject({ count: 100, total_in_range: 100 });
+    expect(r.next_offset).toBeUndefined();
+  });
+
+  it("keeps what was read when Suunto's call limit is reached in the middle, and says so", async () => {
+    const b = new FakeBackend();
+    b.workouts = Array.from({ length: 1500 }, (_, i) => workout(i, i * 2, i === 1499 ? 78 : 1));
+    b.rateLimitAfter = 4;
+    const r = await service(b).listWorkouts({ from: "2026-01-01", sport: "dive" });
+    expect(r.count).toBe(0);
+    expect(r.note).toMatch(/Suunto's call limit was reached, so only the workouts back to 2026-\S+ were read and older ones are missing\. Try again in a minute\./);
+    // Nothing read yet: the error itself.
+    const c = new FakeBackend();
+    c.rateLimitAfter = 0;
+    await expect(service(c).listWorkouts({})).rejects.toThrow(/call limit/);
   });
 
   it("refuses unknown sports with examples, and bad ranges", async () => {
@@ -268,10 +346,10 @@ describe("workout list", () => {
 });
 
 describe("one workout", () => {
-  it("asks for the summary and lap extensions and only the streams needed", async () => {
+  it("asks for the summary and lap extensions and only the streams needed, in one fixed order", async () => {
     const b = new FakeBackend();
-    b.workouts = [workout(1, 5, 1, { extensions: [{ type: "SpeedStreamExtension", points: [{ timestamp: NOW - 5 * HOUR_MS, value: 3 }] }] })];
-    const w = await service(b).getWorkout({ workout_key: "w0001", samples: ["speed", "pace", "speed"] });
+    b.workouts = [workout(1, 5, 1, { workoutKey: KEY, extensions: [{ type: "SpeedStreamExtension", points: [{ timestamp: NOW - 5 * HOUR_MS, value: 3 }] }] })];
+    const w = await service(b).getWorkout({ workout_key: KEY, samples: ["pace", "speed", "heart_rate", "speed"] });
     const ext = b.ops("getWorkout")[0]!.args[1] as string[];
     expect(ext).toEqual([
       "SummaryExtension",
@@ -285,20 +363,38 @@ describe("one workout", () => {
       "DistanceLapExtension",
       "DurationLapExtension",
       "VerticalLapExtension",
+      "HeartrateStreamExtension",
       "SpeedStreamExtension",
     ]);
-    expect(Object.keys(w.samples ?? {})).toEqual(["speed", "pace"]);
+    expect(Object.keys(w.samples ?? {})).toEqual(["heart_rate", "speed", "pace"]);
     expect(w.samples?.speed?.points).toEqual([{ t: 0, v: 10.8 }]);
-    await expect(service(b).getWorkout({ workout_key: "../etc" })).rejects.toThrow(/workout key/);
-    await expect(service(b).getWorkout({ workout_key: "w0001", max_points: 5 })).rejects.toThrow(/max_points/);
+    // The same streams in another order are the same request (one cache entry).
+    await service(b).getWorkout({ workout_key: KEY, samples: ["speed", "heart_rate", "pace"] });
+    expect(b.ops("getWorkout")[1]!.args[1]).toEqual(ext);
+    const cached = new CachedBackend(b);
+    await service(cached).getWorkout({ workout_key: KEY, samples: ["heart_rate", "altitude"] });
+    await service(cached).getWorkout({ workout_key: KEY, samples: ["altitude", "heart_rate"] });
+    expect(b.ops("getWorkout")).toHaveLength(3);
+    await expect(service(b).getWorkout({ workout_key: KEY, max_points: 5 })).rejects.toThrow(/max_points/);
+  });
+
+  it("checks that a workout key is 24 hex characters before anything reaches Suunto", async () => {
+    const b = new FakeBackend();
+    const s = service(b);
+    for (const bad of ["Morning_Run", "12345", KEY.slice(1), `${KEY}0`, `${KEY.slice(0, 23)}g`, "../etc", ""]) {
+      await expect(s.getWorkout({ workout_key: bad }), bad).rejects.toThrow(/workout_key: A workout key is 24 hex characters .*Use workout_key from suunto_list_workouts/);
+      await expect(s.exportFit({ workout_key: bad }), bad).rejects.toThrow(/24 hex characters/);
+    }
+    expect(b.calls).toHaveLength(0);
+    await expect(s.exportFit({ workout_key: KEY.toUpperCase() })).resolves.toMatchObject({ bytes: 8 });
   });
 
   it("refuses FIT files over 8 MB and names the file", async () => {
     const b = new FakeBackend();
-    const ok = await service(b).exportFit({ workout_key: "w0001" });
-    expect(ok).toMatchObject({ workout_key: "w0001", bytes: 8, file_name: "suunto-workout-w0001.fit" });
+    const ok = await service(b).exportFit({ workout_key: KEY });
+    expect(ok).toMatchObject({ workout_key: KEY, bytes: 8, file_name: `suunto-workout-${KEY}.fit` });
     b.fit = Buffer.alloc(8 * 1024 * 1024 + 1);
-    await expect(service(b).exportFit({ workout_key: "w0001" })).rejects.toThrow(/8\.0 MB, more than the 8 MB/);
+    await expect(service(b).exportFit({ workout_key: KEY })).rejects.toThrow(/8\.0 MB, more than the 8 MB/);
   });
 });
 
@@ -371,13 +467,52 @@ describe("statistics", () => {
     expect(running).toMatchObject({ sport: "running", count: 2, avg_hr: 140 });
   });
 
-  it("reads at most 2000 workouts and says so", async () => {
+  it("counts the newest 2000 workouts at most, in any list order, and says so", async () => {
+    for (const order of ["desc", "asc", "modified", "shuffled"] as const) {
+      const b = new FakeBackend();
+      b.order = order;
+      b.workouts = Array.from({ length: 2050 }, (_, i) => workout(i, i, 1, { lastModified: NOW - ((i * 7919) % 2050) * 1000 }));
+      const r = await service(b).workoutStats({});
+      expect(r.count, order).toBe(2000);
+      // The newest is counted, the 50 oldest are not.
+      expect(r.last_date, order).toBe("2026-11-10");
+      expect(r.note, order).toMatch(/^More than 2000 workouts are in this range; only the newest 2000 were counted \(back to 2026-08-\S+\)\. Use a shorter range \(from, to\)\.$/);
+      expect(b.ops("listWorkouts").length, order).toBeLessThanOrEqual(25);
+    }
+  });
+
+  it("counts the newest years of a long range when Suunto lists oldest first", async () => {
     const b = new FakeBackend();
-    b.workouts = Array.from({ length: 2050 }, (_, i) => workout(i, i));
-    const r = await service(b).workoutStats({});
+    b.order = "asc";
+    // 2500 workouts, 35 hours apart: since the end of 2016.
+    b.workouts = Array.from({ length: 2500 }, (_, i) => workout(i, i * 35));
+    const r = await service(b).workoutStats({ from: "2016-01-01", group_by: "year" });
     expect(r.count).toBe(2000);
-    expect(r.note).toMatch(/More than 2000/);
-    expect(b.ops("listWorkouts")).toHaveLength(20);
+    expect(r.groups?.map((g) => g.key)).toEqual(["2018", "2019", "2020", "2021", "2022", "2023", "2024", "2025", "2026"]);
+    expect(r.note).toMatch(/only the newest 2000 were counted/);
+  });
+
+  it("reads a year of workouts in about as many requests as pages of 100 would take", async () => {
+    for (const [n, most] of [[50, 2], [300, 4], [1500, 17]] as const) {
+      const b = new FakeBackend();
+      b.order = "asc";
+      b.workouts = Array.from({ length: n }, (_, i) => workout(i, (i * 364 * 24) / n));
+      const r = await service(b).workoutStats({});
+      expect(r.count, `${n}`).toBe(n);
+      expect(r.note, `${n}`).toBeUndefined();
+      expect(b.ops("listWorkouts").length, `${n}`).toBeLessThanOrEqual(most);
+    }
+  });
+
+  it("counts what was read when Suunto's call limit is reached in the middle, and says so", async () => {
+    const b = new FakeBackend();
+    b.workouts = Array.from({ length: 1500 }, (_, i) => workout(i, i * 6));
+    b.rateLimitAfter = 6;
+    const r = await service(b).workoutStats({});
+    expect(r.count).toBeGreaterThan(0);
+    expect(r.count).toBeLessThan(1460);
+    expect(r.last_date).toBe("2026-11-10");
+    expect(r.note).toMatch(/^Suunto's call limit was reached, so only the workouts back to 2026-\S+ were read and older ones are missing\. Try again in a minute\. Use a shorter range \(from, to\)\.$/);
   });
 });
 
@@ -603,6 +738,83 @@ describe("GPX checks", () => {
     expect(() => checkGpx('<gpx><rte><rtept lat="91" lon="2"/><rtept lat="1" lon="2"/></rte></gpx>')).toThrow(/Point 1 .*lat between -90 and 90/);
     expect(() => checkGpx('<gpx><rte><rtept lat="1" lon="2"/><rtept lat="1"/></rte></gpx>')).toThrow(/Point 2/);
     expect(() => checkGpx(`<gpx>${" ".repeat(5 * 1024 * 1024)}</gpx>`)).toThrow(/limit is 5 MB/);
+    // An empty coordinate is not 0.
+    expect(() => checkGpx('<gpx><rte><rtept lat="" lon=" "/><rtept lat="1" lon="2"/></rte></gpx>')).toThrow(/Point 1/);
+  });
+
+  it("checks a 5 MB GPX full of unclosed tags in linear time (well under a second)", () => {
+    const points = '<rtept lat="1" lon="1"/><rtept lat="1" lon="2"/>';
+    const head = `<gpx><rte>${points}</rte>`;
+    const limit = 5 * 1024 * 1024;
+    /** `prefix`, then `piece` repeated up to 5 MB, then `suffix`. */
+    const fill = (piece: string, prefix = head, suffix = "") => prefix + piece.repeat(Math.floor((limit - prefix.length - suffix.length) / piece.length)) + suffix;
+    const cases: Array<[string, string, (gpx: string) => void]> = [
+      ["unclosed points", fill("<rtept"), (g) => expect(checkGpx(g)).toEqual({ routes: 1, points: 2 })],
+      ["only unclosed points", fill("<rtept", "<gpx><rte>"), (g) => expect(() => checkGpx(g)).toThrow(/has 0 route or track points/)],
+      ["unclosed metadata", fill("<metadata"), (g) => expect(checkGpx(g)).toEqual({ routes: 1, points: 2 })],
+      ["metadata without an end", fill("<metadata>"), (g) => expect(checkGpx(g)).toEqual({ routes: 1, points: 2 })],
+      ["names without an end", fill("<name>", "<gpx><rte>", `${points}</rte></gpx>`), (g) => expect(checkGpx(g)).toEqual({ routes: 1, points: 2 })],
+      ["unclosed routes before the track", fill("<rte <", "<gpx>", `<trk><name>T</name>${points.replace(/rtept/g, "trkpt")}</trk></gpx>`), (g) => expect(checkGpx(g)).toMatchObject({ name: "T", points: 2 })],
+      ["CDATA without an end in a name", fill("<![CDATA[", "<gpx><rte><name>", `</name>${points}</rte></gpx>`), (g) => expect(checkGpx(g)).toMatchObject({ routes: 1, points: 2 })],
+      ["a long attribute without its quote", `<gpx><rte><rtept lon="1" lat="${" ".repeat(5_000_000)}/>${points}</rte></gpx>`, (g) => expect(() => checkGpx(g)).toThrow(/Point 1 /)],
+      ["a long attribute", `<gpx><rte><rtept lon="1" lat="${" ".repeat(5_000_000)}1"/>${points}</rte></gpx>`, (g) => expect(checkGpx(g)).toEqual({ routes: 1, points: 3 })],
+      ["unclosed comments at the start", fill("<!--", ""), (g) => expect(() => checkGpx(g)).toThrow(/root element must be <gpx>/)],
+      ["unclosed declarations at the start", fill("<?", ""), (g) => expect(() => checkGpx(g)).toThrow(/root element must be <gpx>/)],
+    ];
+    for (const [what, gpx, check] of cases) {
+      expect(Buffer.byteLength(gpx), what).toBeLessThanOrEqual(limit);
+      const started = performance.now();
+      check(gpx);
+      expect(performance.now() - started, what).toBeLessThan(1000);
+    }
+  });
+
+  it("accepts UTF-8 only, or plain ASCII under a single-byte encoding", () => {
+    const route = '<gpx version="1.1"><rte><name>Zürich, Üetliberg</name><rtept lat="47.37" lon="8.54"/><rtept lat="47.35" lon="8.49"/></rte></gpx>';
+    expect(checkGpx(`<?xml version="1.0" encoding="UTF-8"?>${route}`)).toMatchObject({ name: "Zürich, Üetliberg" });
+    expect(checkGpx(`<?xml version="1.0" encoding='utf8' standalone="yes"?>\n${route}`)).toMatchObject({ points: 2 });
+    expect(checkGpx(`<?xml version="1.0"?>${route}`)).toMatchObject({ points: 2 });
+    // Suunto would read the UTF-8 bytes as Latin-1 and garble the name.
+    expect(() => checkGpx(`<?xml version="1.0" encoding="ISO-8859-1"?>${route}`)).toThrow(/encoding="ISO-8859-1".*Change the declaration to encoding="UTF-8"/);
+    expect(() => checkGpx(`<?xml version="1.0" encoding="UTF-16"?>${route}`)).toThrow(/encoding="UTF-16"/);
+    // Plain ASCII is the same in UTF-8 and Latin-1.
+    const ascii = route.replace("Zürich, Üetliberg", "Zurich, Uetliberg");
+    expect(checkGpx(`<?xml version="1.0" encoding="ISO-8859-1"?>${ascii}`)).toMatchObject({ name: "Zurich, Uetliberg" });
+    // UTF-7 could hide a DOCTYPE from the check ("+ADw-" is "<"): never accepted.
+    expect(() => checkGpx(`<?xml version="1.0" encoding="UTF-7"?>+ADw-!DOCTYPE x+AD4-${ascii}`)).toThrow(/encoding="UTF-7"/);
+  });
+});
+
+describe("long answers and the response cache", () => {
+  it("sums up 200,000 recovery samples (no spread of wire arrays into a call)", async () => {
+    const b = new FakeBackend();
+    const from = ms("2026-11-08T00:00:00Z");
+    b.recoveries = Array.from({ length: 200_000 }, (_, i) => ({ timestamp: new Date(from + i * 800).toISOString(), entryData: { Balance: (i % 100) / 100 } }));
+    const r = await service(b).recovery({ from: "2026-11-08", to: "2026-11-09" });
+    expect(r.summary).toMatchObject({ balance_pct_min: 0, balance_pct_max: 99, samples: 200_000 });
+  });
+
+  it("shares one request between two identical sleep calls at the same time", async () => {
+    const b = new FakeBackend();
+    // A clock that moves on every reading: each call asks up to its own "now" (09:30 and later).
+    let tick = NOW + 30 * 60_000;
+    const clock = () => tick++;
+    const s = service(new CachedBackend(b, { now: clock }), { now: clock });
+    await Promise.all([s.sleep({ from: "2026-11-04", to: "2026-11-10" }), s.sleep({ from: "2026-11-04", to: "2026-11-10" })]);
+    expect(b.ops("sleep")).toHaveLength(1);
+  });
+
+  it("asks again for samples up to now after a call that ended earlier in the hour", async () => {
+    let now = ms("2026-11-10T10:50:00Z");
+    const b = new FakeBackend();
+    for (let t = ms("2026-11-10T10:00:00Z"); t <= now; t += 10 * 60_000) b.activity.push({ timestamp: new Date(t).toISOString(), entryData: { HR: 60 } });
+    const s = service(new CachedBackend(b, { now: () => now }), { now: () => now, timeZone: "UTC" });
+    const early = await s.activitySamples({ from: "2026-11-10T10:00:00Z", to: "2026-11-10T10:05:00Z", resolution: "raw" });
+    expect(early.count).toBe(1);
+    now += 60_000;
+    const late = await s.activitySamples({ from: "2026-11-10T10:00:00Z", to: "2026-11-10T11:00:00Z", resolution: "raw" });
+    expect(late.count).toBe(6);
+    expect(b.ops("activitySamples")).toHaveLength(2);
   });
 });
 
@@ -679,8 +891,21 @@ describe("account and check", () => {
     const s = service(b);
     expect(await s.account()).toEqual({ username: "testuser", tokenExpiresAt: "2026-11-11T09:00:00.000Z" });
     expect(await s.check()).toEqual({ ok: true, workouts_last_30_days: 1 });
-    expect(b.ops("listWorkouts")[0]!.args[0]).toMatchObject({ since: NOW - 30 * DAY_MS, until: NOW, limit: 100, offset: 0 });
+    const q = b.ops("listWorkouts")[0]!.args[0];
+    expect(q).toEqual({ since: ms("2026-10-11T22:00:00Z"), until: ms("2026-11-10T23:00:00Z"), limit: 100, offset: 0, byModificationTime: false });
+    // The same request as the first one of suunto_list_workouts without arguments.
+    await s.listWorkouts({});
+    expect(b.ops("listWorkouts")[1]!.args[0]).toEqual(q);
     expect(s.backend).toBe(b);
+  });
+
+  it("is served from the cache when asked again, and says when the count is capped at 100", async () => {
+    const b = new FakeBackend();
+    b.workouts = Array.from({ length: 120 }, (_, i) => workout(i, i));
+    const s = service(new CachedBackend(b, { now: () => NOW }));
+    expect(await s.check()).toEqual({ ok: true, workouts_last_30_days: 100, workouts_last_30_days_capped: true });
+    await s.check();
+    expect(b.ops("listWorkouts")).toHaveLength(1);
   });
 
   it("answers ok false with the error instead of throwing", async () => {

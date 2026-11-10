@@ -16,6 +16,7 @@ import {
   startOfDay,
   todayInZone,
   tzOffsetMinutes,
+  writtenOffsetMinutes,
 } from "../../src/util/dates.js";
 
 describe("parseDateTimeInput", () => {
@@ -111,6 +112,26 @@ describe("helpers for activity data", () => {
     expect(hasLocalOffset("2026-09-27T12:00:00Z")).toBe(false);
     expect(hasLocalOffset("2019-02-11T02:00:00.000")).toBe(false);
     expect(hasLocalOffset("2026-09-27")).toBe(false);
+  });
+
+  it("reads the offset written in a time, \"+00:00\" and \"Z\" included", () => {
+    expect(writtenOffsetMinutes("2026-09-27T12:00:00+02:00")).toBe(120);
+    expect(writtenOffsetMinutes("2026-09-27T12:00:00.000-0530")).toBe(-330);
+    expect(writtenOffsetMinutes("2026-10-23T22:00:00.000+00:00")).toBe(0);
+    expect(writtenOffsetMinutes("2026-10-23T22:00:00Z")).toBe(0);
+    expect(writtenOffsetMinutes("2026-10-23T22:00:00")).toBeUndefined();
+    expect(writtenOffsetMinutes("2026-10-23")).toBeUndefined();
+    // Only a whole date-time counts: text around it does not.
+    expect(writtenOffsetMinutes("on 2026-10-23T22:00:00+02:00")).toBeUndefined();
+    expect(hasLocalOffset("x T12:00 and more +02:00")).toBe(false);
+  });
+
+  it("checks offsets in linear time, also on long text", () => {
+    const long = "T12:00".repeat(200_000) + "x";
+    const started = performance.now();
+    expect(hasLocalOffset(long)).toBe(false);
+    expect(writtenOffsetMinutes(long)).toBeUndefined();
+    expect(performance.now() - started).toBeLessThan(500);
   });
 
   it("finds the start of the local hour, also in the repeated hour of a DST change", () => {

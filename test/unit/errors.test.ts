@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { SuuntoHttpError } from "../../src/suunto/http.js";
 import { describeError, maskEmails, redact, redactForLog, UnconfirmedWriteError, UserFacingError } from "../../src/util/errors.js";
 import { fakeJwt, MOCK_CLIENT_SECRET, MOCK_SUBSCRIPTION_KEY } from "../helpers/mock-suunto.js";
 
@@ -53,6 +54,13 @@ describe("e-mail masking and describeError", () => {
     const clear = Object.assign(new UserFacingError("Suunto refused the sign-in. Connect Suunto again."), { status: 401 });
     expect(describeError(clear)).toBe("Suunto refused the sign-in. Connect Suunto again.");
     expect(describeError("text")).toBe("text");
+  });
+
+  it("adds no reconnect hint to a rate limit that came as HTTP 401", () => {
+    const limited = new SuuntoHttpError("rate_limit", "Suunto's call limit for this service is reached (HTTP 401). Try again later.", { status: 401 });
+    expect(describeError(limited)).toBe("Suunto's call limit for this service is reached (HTTP 401). Try again later.");
+    const plain = Object.assign(new Error("Too many requests"), { status: 401, kind: "rate_limit" });
+    expect(describeError(plain)).toBe("Too many requests");
   });
 
   it("UnconfirmedWriteError tells the user to check first", () => {

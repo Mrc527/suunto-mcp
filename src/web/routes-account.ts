@@ -13,6 +13,7 @@ import express, { type Request, type Response, type Router } from "express";
 import type { UnitChoice } from "../activity/types.js";
 import { DEMO_NAME, DEMO_TIME_ZONE, DEMO_USERNAME } from "../demo/index.js";
 import { SuuntoApi } from "../suunto/api.js";
+import { formatWait, retryAfterMs } from "../suunto/http.js";
 import { authorizeUrl, callbackError, exchangeCode, type StoredSuuntoTokens, type TokenResult } from "../suunto/oauth.js";
 import { SuuntoSession } from "../suunto/session.js";
 import { isValidTimeZone } from "../util/dates.js";
@@ -48,41 +49,101 @@ function allTimeZones(): string[] {
 
 /** The test request at connect time lists at most this many workouts (one request). */
 export const CHECK_LIMIT = 100;
-/** The callback waits this long for the test request. */
-const CHECK_TIMEOUT_MS = 15_000;
+/** The callback waits this long for the test request; nothing is sent to Suunto after it. */
+export const CHECK_TIMEOUT_MS = 15_000;
 const DAY_MS = 86_400_000;
 
-/** `promise`, or `onTimeout` when it takes longer than `ms`. */
-async function within<T>(promise: Promise<T>, ms: number, onTimeout: T): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([promise, new Promise<T>((resolve) => (timer = setTimeout(() => resolve(onTimeout), ms)))]);
-  } finally {
-    clearTimeout(timer);
+/** Thrown instead of waiting for a second try: the test request is sent once. */
+class NoRetry extends Error {}
+
+/**
+ * The session of the test request. Its access token was just issued, so it never refreshes: a
+ * refresh could rotate the refresh token after the connection was saved, and the new one would
+ * be lost.
+ */
+class CheckSession extends SuuntoSession {
+  override refreshNow(): Promise<string> {
+    return Promise.reject(new UserFacingError("Suunto refused the new sign-in."));
   }
+}
+
+/** Why the test request failed, as the account page shows it (English, no secrets). */
+function checkError(error: unknown, state: { timedOut: boolean; sent: boolean; answer?: { status: number; wait?: number } }, secrets: string[]): string {
+  if (state.timedOut) {
+    // Still waiting for a free slot of this service's call limit: nothing was sent.
+    return state.sent ? "Suunto did not answer in time." : "This service is at its Suunto call limit right now, so the test request was not sent.";
+  }
+  if (error instanceof NoRetry) {
+    const answer = state.answer;
+    if (answer?.status === 429) {
+      return `Suunto's call limit for this service is reached (HTTP 429). ${answer.wait !== undefined ? `Try again in ${formatWait(answer.wait)}.` : "Try again later."}`;
+    }
+    if (answer && answer.status >= 500) return `Suunto is busy right now (HTTP ${answer.status}). Try again later.`;
+    return "Could not reach Suunto. Try again later.";
+  }
+  return redact(error instanceof UserFacingError ? error.message : describeError(error), secrets);
 }
 
 /**
  * The test request right after the code exchange: the workouts of the last 30 days, with the
- * fresh access token (no refresh). A refused request (for example HTTP 403: the subscription does
- * not cover the workout API) does not stop the connection: it is saved with the error. Returns
- * the check and the newest tokens.
+ * fresh access token. It is sent once: no retry, no token refresh, and it counts against the
+ * user's share of the call limit. After `timeoutMs` the callback goes on, and nothing more
+ * is sent. A refused request (for example HTTP 403: the subscription does not cover the workout
+ * API) does not stop the connection: it is saved with the error. Returns the check and the
+ * tokens.
  */
-async function testConnection(ctx: WebContext, result: TokenResult): Promise<{ check: SuuntoConnectionCheck; tokens: StoredSuuntoTokens }> {
+export async function testConnection(
+  ctx: Pick<WebContext, "suuntoKeys" | "suuntoEndpoints" | "suuntoFetch" | "log"> & { pool: Pick<WebContext["pool"], "limiter"> },
+  result: TokenResult,
+  userId: string,
+  timeoutMs = CHECK_TIMEOUT_MS,
+): Promise<{ check: SuuntoConnectionCheck; tokens: StoredSuuntoTokens }> {
   const keys = ctx.suuntoKeys!;
-  const fetchOpt = ctx.suuntoFetch ? { fetch: ctx.suuntoFetch } : {};
-  const session = new SuuntoSession({ tokens: result.tokens, keys, endpoints: ctx.suuntoEndpoints, ...fetchOpt });
-  const api = new SuuntoApi({ session, keys, endpoints: ctx.suuntoEndpoints, log: ctx.log, ...fetchOpt });
+  const base = ctx.suuntoFetch ?? fetch;
+  const stop = new AbortController();
+  const state: { timedOut: boolean; sent: boolean; answer?: { status: number; wait?: number } } = { timedOut: false, sent: false };
+  // Every request of the check goes through here: after the cutoff, nothing more is sent.
+  const checkFetch: typeof fetch = async (input, init) => {
+    if (stop.signal.aborted) throw stop.signal.reason;
+    state.sent = true;
+    const res = await base(input, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, stop.signal]) : stop.signal });
+    const wait = retryAfterMs(res);
+    state.answer = { status: res.status, ...(wait !== undefined ? { wait } : {}) };
+    return res;
+  };
+  const session = new CheckSession({ tokens: result.tokens, keys, endpoints: ctx.suuntoEndpoints, fetch: checkFetch });
+  const api = new SuuntoApi({
+    session,
+    keys,
+    endpoints: ctx.suuntoEndpoints,
+    log: ctx.log,
+    fetch: checkFetch,
+    // A retry would wait (Retry-After, backoff) and spend more calls: the first answer counts.
+    sleep: () => Promise.reject(new NoRetry()),
+    ...(ctx.pool.limiter ? { limiter: ctx.pool.limiter, limiterKey: userId } : {}),
+  });
   const at = Date.now();
   const secrets = [keys.clientSecret, keys.subscriptionKey, result.tokens.refreshToken, result.tokens.accessToken];
-  const check = await within<SuuntoConnectionCheck>(
-    api
-      .listWorkouts({ since: at - 30 * DAY_MS, until: at, limit: CHECK_LIMIT, offset: 0, byModificationTime: false })
-      .then((list) => ({ at, workouts: list.payload.length }))
-      .catch((error: unknown) => ({ at, error: redact(error instanceof UserFacingError ? error.message : describeError(error), secrets) })),
-    CHECK_TIMEOUT_MS,
-    { at, error: "Suunto did not answer in time." },
-  );
+  let timer: NodeJS.Timeout | undefined;
+  const cutoff = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      state.timedOut = true;
+      stop.abort(new DOMException("The test request took too long.", "TimeoutError"));
+      reject(stop.signal.reason);
+    }, timeoutMs);
+  });
+  const request = api.listWorkouts({ since: at - 30 * DAY_MS, until: at, limit: CHECK_LIMIT, offset: 0, byModificationTime: false });
+  // Once the cutoff won, the request may still end (it sends nothing more): ignore its outcome.
+  request.catch(() => undefined);
+  let check: SuuntoConnectionCheck;
+  try {
+    const list = await Promise.race([request, cutoff]);
+    check = { at, workouts: list.payload.length };
+  } catch (error) {
+    check = { at, error: checkError(error, state, secrets) };
+  } finally {
+    clearTimeout(timer);
+  }
   await api.close().catch(() => undefined);
   return { check, tokens: session.storedTokens };
 }
@@ -104,11 +165,15 @@ export function accountRoutes(ctx: WebContext): Router {
     html`<label for="${id}">${t("account.suunto.units")}<span class="hint">${t("account.suunto.unitsHint")}</span></label>
       <select id="${id}" name="units">${UNIT_CHOICES.map((u) => html`<option value="${u}" ${u === units ? "selected" : ""}>${t(UNIT_LABELS[u])}</option>`)}</select>`;
 
-  const timeZoneField = (id: string, timeZone: string) => {
+  /**
+   * The time zone select. The first option (an empty value) is the server's default: a user who
+   * never chose a zone keeps following it, also after saving units or read-only.
+   */
+  const timeZoneField = (id: string, timeZone: string | undefined, serverDefault: string) => {
     const list = allTimeZones();
-    const options = list.includes(timeZone) ? list : [timeZone, ...list];
+    const options = !timeZone || list.includes(timeZone) ? list : [timeZone, ...list];
     return html`<label for="${id}">${t("account.suunto.timeZone")}<span class="hint">${t("account.suunto.timeZoneHint")}</span></label>
-      <select id="${id}" name="timeZone">${options.map((tz) => html`<option value="${tz}" ${tz === timeZone ? "selected" : ""}>${tz}</option>`)}</select>`;
+      <select id="${id}" name="timeZone"><option value="" ${timeZone ? "" : "selected"}>${t("account.suunto.timeZoneDefault", { timeZone: serverDefault })}</option>${options.map((tz) => html`<option value="${tz}" ${tz === timeZone ? "selected" : ""}>${tz}</option>`)}</select>`;
   };
 
   const tile = (service: Service, name: MessageKey, text: MessageKey, state: SafeHtml) =>
@@ -185,7 +250,9 @@ export function accountRoutes(ctx: WebContext): Router {
     const server = ctx.store.getSettings();
     const read = ctx.store.readSuuntoSettings(s.user.id);
     const stored: SuuntoAccountSettings | undefined = read.settings;
-    const expired = !!stored && s.user.suuntoNeedsReconnect;
+    // A saved connection without the operator's app keys cannot be used (and Suunto cannot be told about a removal).
+    const unavailable = !!stored && !configured;
+    const expired = !!stored && configured && s.user.suuntoNeedsReconnect;
     const readOnly = server.forceReadOnly || stored?.readOnly === true;
     const next = returnTo(req);
     const csrf = html`<input type="hidden" name="_csrf" value="${s.csrf}">${next ? html`<input type="hidden" name="next" value="${next}">` : ""}`;
@@ -197,22 +264,25 @@ export function accountRoutes(ctx: WebContext): Router {
 
     const state = !stored
       ? html`<span class="badge warn">${t("account.state.notConnected")}</span>`
-      : expired
-        ? html`<span class="badge bad">${t("account.state.connectAgain")}</span>`
-        : html`<span class="badge ok">${readOnly ? t("account.state.onReadOnly") : t("account.state.on")}</span>`;
+      : unavailable
+        ? html`<span class="badge warn">${t("account.state.unavailable")}</span>`
+        : expired
+          ? html`<span class="badge bad">${t("account.state.connectAgain")}</span>`
+          : html`<span class="badge ok">${readOnly ? t("account.state.onReadOnly") : t("account.state.on")}</span>`;
     const badge = !stored
       ? html`<span class="badge warn">${t("account.suunto.badgeNotConnected")}</span>`
-      : expired
-        ? html`<span class="badge bad">${t("account.suunto.badgeReconnect")}</span>`
-        : html`<span class="badge ok">${t("account.suunto.badgeConnected")}</span>`;
+      : unavailable
+        ? html`<span class="badge warn">${t("account.suunto.badgeUnavailable")}</span>`
+        : expired
+          ? html`<span class="badge bad">${t("account.suunto.badgeReconnect")}</span>`
+          : html`<span class="badge ok">${t("account.suunto.badgeConnected")}</span>`;
     const notConfigured = html`<div class="flash warn">${t("account.suunto.notConfigured")}</div>`;
 
     const suuntoCard = stored
       ? html`<div class="card" id="suunto">
           <h2>${t("account.suunto.heading")} ${badge}</h2>
-          ${configured ? "" : notConfigured}
-          ${expired ? html`<div class="flash error">${t("account.suunto.expired")}</div>` : ""}
-          ${expired && configured ? connectForm("account.suunto.connectAgain") : ""}
+          ${unavailable ? html`<div class="flash warn">${t("account.suunto.unavailable")}</div>` : ""}
+          ${expired ? html`<div class="flash error">${t("account.suunto.expired")}</div>${connectForm("account.suunto.connectAgain")}` : ""}
           <dl class="kv">
             <div><dt>${t("account.suunto.username")}</dt><dd>${stored.username}</dd></div>
             <div><dt>${t("account.suunto.connectedAt")}</dt><dd>${formatDate(stored.connectedAt)}</dd></div>
@@ -222,7 +292,7 @@ export function accountRoutes(ctx: WebContext): Router {
           <h3>${t("account.suunto.settingsHeading")}</h3>
           <form method="post" action="/account/suunto/settings">
             ${csrf}
-            <div class="row"><div>${unitsField("units-saved", stored.units)}</div><div>${timeZoneField("timeZone-saved", stored.timeZone || server.defaultTimeZone)}</div></div>
+            <div class="row"><div>${unitsField("units-saved", stored.units)}</div><div>${timeZoneField("timeZone-saved", stored.timeZone, server.defaultTimeZone)}</div></div>
             <div class="group">${readOnlyBox(stored.readOnly, server.forceReadOnly)}</div>
             <div class="actions"><button type="submit">${t("account.suunto.save")}</button></div>
           </form>
@@ -235,7 +305,7 @@ export function accountRoutes(ctx: WebContext): Router {
               </details>`}
           <form method="post" action="/account/suunto/remove" class="actions">
             <input type="hidden" name="_csrf" value="${s.csrf}">
-            <button type="submit" class="secondary" data-confirm="${t("account.suunto.removeConfirm")}">${t("account.suunto.remove")}</button>
+            <button type="submit" class="secondary" data-confirm="${t(configured ? "account.suunto.removeConfirm" : "account.suunto.removeConfirmUnavailable")}">${t("account.suunto.remove")}</button>
           </form>
         </div>`
       : html`<div class="card" id="suunto">
@@ -250,18 +320,20 @@ export function accountRoutes(ctx: WebContext): Router {
       ? configured
         ? t("account.profile.getStarted")
         : t("account.profile.notConfigured")
-      : expired
-        ? t("account.profile.reconnect")
-        : readOnly
-          ? t("account.profile.connectedReadOnly")
-          : t("account.profile.connected");
+      : unavailable
+        ? t("account.profile.unavailable")
+        : expired
+          ? t("account.profile.reconnect")
+          : readOnly
+            ? t("account.profile.connectedReadOnly")
+            : t("account.profile.connected");
     page(
       req,
       res,
       { title: t("account.title"), active: "account", ...(opts.error ? { flash: { kind: "error", text: opts.error } } : opts.flash ? { flash: opts.flash } : {}) },
       html`${profile(s.user.email, line)}
       ${tiles(readOnly, state)}
-      ${stored && !expired ? html`${connectCard({ mcpUrl: ctx.mcpUrl.href, email: s.user.email })}${suuntoCard}` : html`${suuntoCard}${connectCard({ mcpUrl: ctx.mcpUrl.href, email: s.user.email })}`}`,
+      ${stored && !expired && !unavailable ? html`${connectCard({ mcpUrl: ctx.mcpUrl.href, email: s.user.email })}${suuntoCard}` : html`${suuntoCard}${connectCard({ mcpUrl: ctx.mcpUrl.href, email: s.user.email })}`}`,
       opts.status ?? 200,
     );
   };
@@ -320,9 +392,13 @@ export function accountRoutes(ctx: WebContext): Router {
       return void res.redirect(303, "/account?m=connectfailed");
     }
 
-    const { check, tokens } = await testConnection(ctx, result);
+    const { check, tokens } = await testConnection(ctx, result, s.user.id);
     // A reconnect keeps the user's settings; a first connection takes the browser's time zone.
     const existing = ctx.store.getSuuntoSettings(s.user.id);
+    // Another Suunto account replaces this one: its access ends at Suunto too (below). Not for the
+    // same Suunto account: Suunto's deauthorize disconnects the user from this app, which would
+    // end the new connection as well.
+    const replaced = existing && existing.username !== result.username ? existing : undefined;
     const timeZone = existing?.timeZone ?? started.timeZone;
     const settings: SuuntoAccountSettings = {
       username: result.username,
@@ -339,6 +415,11 @@ export function accountRoutes(ctx: WebContext): Router {
     ctx.store.saveSuuntoSettings(s.user.id, settings);
     await ctx.pool.invalidate(s.user.id);
     ctx.log(`Suunto connection saved for a user${check.error ? " (the test request failed)" : ""}`);
+    if (replaced) {
+      // Best effort, after the new connection is saved: it never throws.
+      await deauthorizeAtSuunto(replaced, { keys, endpoints: ctx.suuntoEndpoints, ...fetchOpt });
+      ctx.log("A user connected another Suunto account; Suunto was asked to end the previous connection");
+    }
     res.redirect(303, consentReturn(started.next) ?? (check.error ? "/account?m=checkfailed" : "/account?m=connected"));
   });
 
@@ -349,16 +430,19 @@ export function accountRoutes(ctx: WebContext): Router {
     const existing = ctx.store.getSuuntoSettings(s.user.id);
     if (s.user.demo || !existing) return void res.redirect(303, "/account");
     const server = ctx.store.getSettings();
-    // A form without the field keeps the saved zone.
-    const timeZone = str(req.body.timeZone, 100).trim() || undefined;
+    // A form without the field keeps the saved zone; the empty choice is the server's default
+    // (no zone of the user's own).
+    const sent = typeof req.body.timeZone === "string";
+    const timeZone = str(req.body.timeZone, 100).trim();
     if (timeZone && !isValidTimeZone(timeZone)) return renderAccount(req, res, { error: t("account.error.timeZone"), status: 400 });
     ctx.store.saveSuuntoPreferences(s.user.id, {
       units: unitChoice(req.body.units) ?? existing.units,
       // While the administrator enforces read-only, the (disabled) box is not sent: keep the user's choice.
       readOnly: server.forceReadOnly ? existing.readOnly : bool(req.body.readOnly),
-      ...(timeZone ? { timeZone } : {}),
+      ...(timeZone ? { timeZone } : sent ? { timeZone: null } : {}),
     });
-    await ctx.pool.invalidate(s.user.id);
+    // New services on the same connection: its session and its cache stay.
+    ctx.pool.rebuild(s.user.id);
     res.redirect(303, returnTo(req) ?? "/account?m=saved");
   });
 
@@ -467,7 +551,7 @@ export function accountRoutes(ctx: WebContext): Router {
       </div>
       <div class="card">
         <h2>${t("account.security.deleteHeading")}</h2>
-        <p class="muted">${t("account.security.deleteText")}</p>
+        <p class="muted">${t(!ctx.suuntoKeys && ctx.store.getSuuntoSettings(s.user.id) ? "account.security.deleteTextUnavailable" : "account.security.deleteText")}</p>
         <form method="post" action="/account/delete">
           <input type="hidden" name="_csrf" value="${s.csrf}">
           <label for="confirm">${t("account.security.deleteConfirmLabel", { email: s.user.email })}</label>

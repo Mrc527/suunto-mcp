@@ -33,6 +33,17 @@ import { sha256 } from "./crypto.js";
 import type { Store } from "./store.js";
 
 export const SCOPE = "suunto";
+
+/** Control and format characters, new lines included. */
+const CONTROL_CHARS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+/gu;
+
+/**
+ * Text from a client (a name, an address) or for the log as one plain line: control and format
+ * characters become spaces. Logged text then cannot start a forged log line.
+ */
+export function plainText(value: string): string {
+  return value.replace(CONTROL_CHARS, " ").trim();
+}
 /** A rotated refresh token is still accepted for this long (client retries after a timeout). */
 const REFRESH_REUSE_GRACE_MS = 60_000;
 
@@ -306,7 +317,7 @@ export class OAuthProvider implements OAuthServerProvider {
     // Every client is public (PKCE protects the code exchange): no secret. Only the fields the
     // server needs are stored, with bounded sizes, so anonymous registrations stay small.
     const given = client as OAuthClientInformationFull;
-    const short = (v: unknown, n: number) => (typeof v === "string" && v ? v.slice(0, n) : undefined);
+    const short = (v: unknown, n: number) => (typeof v === "string" && plainText(v) ? plainText(v).slice(0, n) : undefined);
     const full = {
       client_id: given.client_id,
       client_id_issued_at: given.client_id_issued_at,
@@ -320,7 +331,8 @@ export class OAuthProvider implements OAuthServerProvider {
     } as OAuthClientInformationFull;
     if (!full.client_id) throw new InvalidClientMetadataError("client_id was not generated");
     this.store.saveClient(full, "dcr");
-    this.opts.log(`Registered OAuth client "${full.client_name ?? full.client_id}"`);
+    // The name is the client's own text: one line, quoted, never an e-mail address (the web log masks those).
+    this.opts.log(`Registered OAuth client ${JSON.stringify(full.client_name ?? full.client_id)}`);
     return full;
   }
 
@@ -369,7 +381,7 @@ export class OAuthProvider implements OAuthServerProvider {
       if (cached) return cached.client; // keep working with the last good copy
       const pinned = PINNED_METADATA[clientId];
       if (!pinned) throw new InvalidClientError(`Could not fetch the client metadata document: ${(error as Error).message}`);
-      this.opts.log(`Using the built-in copy of ${clientId} (fetch failed: ${(error as Error).message})`);
+      this.opts.log(`Using the built-in copy of ${clientId} (fetch failed: ${plainText((error as Error).message).slice(0, 200)})`);
       doc = pinned;
     }
     if (doc.client_id !== clientId) throw new InvalidClientError("client metadata document client_id does not match its URL");
@@ -394,9 +406,9 @@ export class OAuthProvider implements OAuthServerProvider {
       token_endpoint_auth_method: "none",
       grant_types: ["authorization_code", "refresh_token"],
       response_types: ["code"],
-      ...(typeof doc.client_name === "string" ? { client_name: doc.client_name.slice(0, 200) } : {}),
-      ...(typeof doc.client_uri === "string" ? { client_uri: doc.client_uri } : {}),
-      ...(typeof doc.logo_uri === "string" ? { logo_uri: doc.logo_uri } : {}),
+      ...(typeof doc.client_name === "string" && plainText(doc.client_name) ? { client_name: plainText(doc.client_name).slice(0, 200) } : {}),
+      ...(typeof doc.client_uri === "string" && plainText(doc.client_uri) ? { client_uri: plainText(doc.client_uri).slice(0, 500) } : {}),
+      ...(typeof doc.logo_uri === "string" && plainText(doc.logo_uri) ? { logo_uri: plainText(doc.logo_uri).slice(0, 500) } : {}),
     } as OAuthClientInformationFull;
     this.metadata.set(clientId, client);
     if (stored) this.store.saveClient(client, "cimd"); // refresh the persisted copy
@@ -481,7 +493,7 @@ export class OAuthProvider implements OAuthServerProvider {
       const recent = record.rotatedAt !== undefined && Date.now() - record.rotatedAt < REFRESH_REUSE_GRACE_MS;
       if (!recent || !this.store.familyActive(record.family)) {
         this.store.revokeFamily(record.family);
-        this.opts.log(`Refresh token reuse detected for client ${client.client_id}; grant revoked`);
+        this.opts.log(`Refresh token reuse detected for client ${JSON.stringify(plainText(client.client_id).slice(0, 200))}; grant revoked`);
         throw new InvalidGrantError("Refresh token was already used");
       }
       // One retry only: further reuse is treated as theft. Revoke the pair the timed-out rotation

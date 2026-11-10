@@ -4,7 +4,7 @@
  * one of the "matches the code" tests fails, change the policy (i18n/en/legal.ts) with the code.
  */
 import { readFileSync } from "node:fs";
-import { createServer, type Server } from "node:http";
+import { createServer, request, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { CACHE_MAX_BYTES, LONG_TTL_MS, SHORT_TTL_MS } from "../../src/activity/cache.js";
@@ -13,7 +13,7 @@ import authEn from "../../src/web/i18n/en/auth.js";
 import commonEn from "../../src/web/i18n/en/common.js";
 import homeEn from "../../src/web/i18n/en/home.js";
 import legalEn from "../../src/web/i18n/en/legal.js";
-import { HTML_LANG, LOCALES } from "../../src/web/i18n/index.js";
+import { CATALOGS, HTML_LANG, LOCALES } from "../../src/web/i18n/index.js";
 import { CONTACT_EMAIL, LEGAL_UPDATED, OPERATOR_NAME } from "../../src/web/operator.js";
 import { createWebApp, type WebApp } from "../../src/web/server.js";
 import { Browser, setBase } from "../helpers/web-client.js";
@@ -26,6 +26,19 @@ const admin = new Browser();
 const DAY = 86_400_000;
 /** Never reach real Suunto from tests: closed local ports. */
 const CLOSED = { SUUNTO_OAUTH_URL: "http://127.0.0.1:1", SUUNTO_API_URL: "http://127.0.0.1:1" };
+/** GET a page with the given Host header. */
+function pageAs(host: string, url: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const req = request(url, { headers: { host, accept: "text/html" } }, (res) => {
+      let body = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk: string) => (body += chunk));
+      res.on("end", () => resolve(body));
+    });
+    req.on("error", reject);
+    req.end();
+  });
+}
 /** An invented Suunto connection (the fields of SuuntoAccountSettings in store.ts). */
 const suuntoSettings = (username: string, refreshToken: string) => ({
   username,
@@ -226,7 +239,8 @@ describe("what the privacy policy states matches the code", () => {
     try {
       const s = createServer(secure.app);
       await new Promise<void>((r) => s.listen(0, "127.0.0.1", r));
-      const html = await (await fetch(`http://127.0.0.1:${(s.address() as AddressInfo).port}/privacy`, { headers: { accept: "text/html" } })).text();
+      // The server answers only for its public host name (fetch cannot send another Host header).
+      const html = await pageAs("suunto.example.com", `http://127.0.0.1:${(s.address() as AddressInfo).port}/privacy`);
       await new Promise<void>((r) => s.close(() => r()));
       for (const name of ["__Host-sum_session", "__Host-sum_pre", "__Host-sum_lang"]) expect(html).toContain(`<code>${name}</code>`);
       expect(html).toContain("MCP for Suunto at suunto.example.com is run by");
@@ -358,6 +372,17 @@ describe("what the privacy policy states matches the code", () => {
     const { html } = await get("/privacy");
     expect(html).toContain(`recent answers are kept in the server's memory for ${SHORT_TTL_MS / 60_000} to ${LONG_TTL_MS / 60_000} minutes (at most ${CACHE_MAX_BYTES / (1024 * 1024)} MB per user)`);
     expect(html).toContain("the result of the test request made then (how many workouts you had in the last 30 days, or why the request failed)");
+  });
+
+  it("says the same about the response cache and the connect-time check in every language", () => {
+    const numbers = (s: string) => new Set(s.match(/\d+/g));
+    for (const lang of LOCALES) {
+      // Answers stay 2 to 30 minutes in memory, at most 20 MB per user.
+      const content = numbers(CATALOGS[lang]["legal.privacy.content.text"]!);
+      for (const n of [SHORT_TTL_MS / 60_000, LONG_TTL_MS / 60_000, CACHE_MAX_BYTES / (1024 * 1024)]) expect(content.has(String(n)), `${lang}: ${n}`).toBe(true);
+      // The stored connection includes the result of the test request (workouts of the last 30 days).
+      expect(numbers(CATALOGS[lang]["legal.privacy.data.suunto"]!).has("30"), lang).toBe(true);
+    }
   });
 
   it("has no place in the database for IP addresses, workouts or health data", () => {

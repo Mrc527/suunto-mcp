@@ -344,6 +344,27 @@ describe("streams", () => {
     expect(downsample(flat, 10)).toHaveLength(10);
   });
 
+  it("handles streams with 200,000 points (no spread of wire arrays into Math.max)", () => {
+    // About 55 hours at 1 Hz: an ultra race. Math.max(...values) overflows the stack above about 125,000.
+    const n = 200_000;
+    const long: WireWorkout = { ...base, totalTime: n, totalDistance: 150_000 };
+    const hr = Array.from({ length: n }, (_, i) => ({ timestamp: start + i * 1000, value: 2 + (i % 50) / 100 }));
+    const absolute = toWorkout({ ...long, extensions: [{ type: "HeartrateStreamExtension", points: hr }] }, "metric", "UTC", { samples: ["heart_rate"] });
+    expect(absolute.samples?.heart_rate).toMatchObject({ original_points: n, min: 120, max: 149 });
+    expect(absolute.samples?.heart_rate?.points.at(-1)).toEqual({ t: n - 1, v: 149 });
+    // Times relative to the start, in seconds: relativeTimes takes their largest value too.
+    const alt = Array.from({ length: n }, (_, i) => ({ time: i, value: 1000 + (i % 100) }));
+    const relative = toWorkout({ ...long, extensions: [{ type: "AltitudeStreamExtension", points: alt }] }, "metric", "UTC", { samples: ["altitude"] });
+    expect(relative.samples?.altitude).toMatchObject({ original_points: n, min: 1000, max: 1099 });
+    expect(relative.samples?.altitude?.points.at(-1)?.t).toBe(n - 1);
+    const times = relativeTimes(Array.from({ length: n }, (_, i) => i * 1000), start, 600);
+    expect(times.at(-1)).toBe(n - 1);
+    // Recovery buckets take the smallest and the largest balance with a loop as well.
+    const day = Date.parse("2026-11-09T00:00:00Z");
+    const many = Array.from({ length: n }, (_, i) => ({ timestamp: new Date(day + i * 400).toISOString(), entryData: { Balance: (i % 100) / 100 } }));
+    expect(toRecoveryPoints(many, { tz: "UTC", resolution: "day" })[0]).toMatchObject({ balance_pct_min: 0, balance_pct_max: 99, samples: n });
+  });
+
   it("reads point times in every known form", () => {
     expect(relativeTimes([1777613400000, 1777613460000], 1777613400000, 60)).toEqual([0, 60]);
     expect(relativeTimes([1777613400, 1777613430], 1777613400000, 60)).toEqual([0, 30]);
@@ -535,6 +556,12 @@ describe("24/7 data", () => {
     expect(dateOfDailySample("2026-10-25T22:00:00.000", days, tz)).toBe("2026-10-26");
     // Local noon with an offset: the date part.
     expect(dateOfDailySample("2026-09-27T12:00:00+02:00", days, tz)).toBe("2026-09-27");
+    // A UTC time written with "+00:00" (or "Z") is not the local date for a user east of UTC:
+    // it is the local midnight after it.
+    expect(dateOfDailySample("2026-10-23T22:00:00.000+00:00", days, tz)).toBe("2026-10-24");
+    expect(dateOfDailySample("2026-10-24T22:00:00Z", days, tz)).toBe("2026-10-25");
+    // For a user in UTC, "+00:00" is the local offset: the date part.
+    expect(dateOfDailySample("2026-10-24T12:00:00+00:00", [], "UTC")).toBe("2026-10-24");
     // Far from any midnight and without an offset: the local date of the instant.
     expect(dateOfDailySample("2026-10-25T10:00:00", days, tz)).toBe("2026-10-25");
     // Two watches on one day are added up; a null and a value of one watch give the value.
@@ -548,6 +575,16 @@ describe("24/7 data", () => {
       },
     ];
     expect(toDaySummaries(stats, days, tz)[1]).toEqual({ date: "2026-10-25", steps: 1500, energy_kcal: null });
+  });
+
+  it("puts samples stamped \"+00:00\" on the right days for a user east of UTC", () => {
+    const tz = "Europe/Zurich";
+    const dates = ["2026-10-24", "2026-10-25", "2026-10-26", "2026-10-27"];
+    const days = dates.map((date) => ({ date, ms: startOfDay(date, tz).getTime() }));
+    // Suunto steps 24 hours from the startdate we sent (local midnight in UTC), written as UTC.
+    const times = ["2026-10-23T22:00:00.000+00:00", "2026-10-24T22:00:00.000+00:00", "2026-10-25T22:00:00.000+00:00", "2026-10-26T22:00:00.000+00:00"];
+    const stats: WireDailyStatistic[] = [{ Name: "stepcount", Sources: [{ Name: "watch", Samples: times.map((t, i) => ({ TimeISO8601: t, Value: 1000 + i })) }] }];
+    expect(toDaySummaries(stats, days, tz).map((d) => d.steps)).toEqual([1000, 1001, 1002, 1003]);
   });
 });
 

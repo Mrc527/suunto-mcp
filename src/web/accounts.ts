@@ -8,13 +8,16 @@
  */
 
 import { randomBytes } from "node:crypto";
-import type { UnitChoice } from "../activity/types.js";
+import { LONG_TTL_MS } from "../activity/cache.js";
+import type { ActivityBackend, UnitChoice } from "../activity/types.js";
 import { loadConfig, type AppConfig } from "../config.js";
 import { DEMO_TIME_ZONE, demoRegistry, type DemoRegistry } from "../demo/index.js";
 import { closeServices, createServices, type Services } from "../server.js";
 import { endpointEnv, endpointsFromEnv, type SuuntoEndpoints } from "../suunto/endpoints.js";
+import type { CallLimiter, CallLimits } from "../suunto/limiter.js";
 import type { StoredSuuntoTokens, SuuntoAppKeys } from "../suunto/oauth.js";
 import { SuuntoSession, type TokenSink } from "../suunto/session.js";
+import { isValidTimeZone } from "../util/dates.js";
 import { ConfigError } from "../util/errors.js";
 import type { ServerSettings, Store, SuuntoAccountSettings, User } from "./store.js";
 
@@ -86,6 +89,25 @@ export function buildDemoConfig(server: ServerSettings, readOnly: boolean): AppC
   });
 }
 
+/**
+ * The configuration of the setup server: a real user whose tool calls cannot reach Suunto yet.
+ * Like a demo account it never talks to Suunto. Its time zone and units are the user's saved
+ * ones when a readable connection is stored, else the server's default time zone and metric
+ * units (what a new connection starts with; the AI app is told they are not known yet).
+ */
+export function buildSetupConfig(server: ServerSettings, stored?: Pick<SuuntoAccountSettings, "units" | "readOnly" | "timeZone">): AppConfig {
+  const timeZone = stored?.timeZone && isValidTimeZone(stored.timeZone) ? stored.timeZone : server.defaultTimeZone;
+  return loadConfig({
+    SUUNTO_CLIENT_ID: DEMO_KEYS.clientId,
+    SUUNTO_CLIENT_SECRET: DEMO_KEYS.clientSecret,
+    SUUNTO_SUBSCRIPTION_KEY: DEMO_KEYS.subscriptionKey,
+    SUUNTO_REFRESH_TOKEN: DEMO_TOKEN,
+    SUUNTO_TIMEZONE: timeZone,
+    SUUNTO_UNITS: unitsOf(stored?.units),
+    SUUNTO_READ_ONLY: String(stored?.readOnly === true || server.forceReadOnly),
+  });
+}
+
 /** The tokens of a stored connection, as a SuuntoSession takes them. */
 export function storedTokens(s: SuuntoAccountSettings): StoredSuuntoTokens {
   return {
@@ -123,11 +145,21 @@ export async function deauthorizeAtSuunto(
   }
 }
 
+/** A real user's Suunto connection: one session and one cached backend, kept across rebuilds. */
+interface Connection {
+  /** The stored connection they belong to (a new "Connect Suunto" starts a new one). */
+  connectedAt: number;
+  session: SuuntoSession;
+  backend: ActivityBackend;
+}
+
 interface PoolEntry {
   config: AppConfig;
   services: Services;
   version: string;
   lastUsed: number;
+  /** A real user's connection (none for a demo account). */
+  connection?: Connection;
 }
 
 export interface UserContext {
@@ -135,12 +167,21 @@ export interface UserContext {
   services: Services;
 }
 
+/**
+ * Services unused for this long are closed (the default). It is longer than the 30 minutes the
+ * response cache keeps a workout or a FIT file (src/activity/cache.ts), so those entries can
+ * live their full time.
+ */
+export const POOL_IDLE_MS = LONG_TTL_MS + 5 * 60_000;
+/** How long closeAll() waits for running tool calls, so a token refresh they started can be saved. */
+export const SHUTDOWN_WAIT_MS = 5_000;
+
 export interface ServicePoolOptions {
   /** The operator's Suunto host overrides (SUUNTO_OAUTH_URL, SUUNTO_API_URL). */
   operator: Record<string, string>;
   /** The operator's Suunto app keys. Without them real users get no services (demo accounts do). */
   keys?: SuuntoAppKeys;
-  /** Services unused for this long are closed (default 10 minutes). */
+  /** Services unused for this long are closed (default POOL_IDLE_MS, 35 minutes). */
   idleMs?: number;
   /** The demo accounts' in-memory stores (default: the process-wide registry). */
   demo?: DemoRegistry;
@@ -149,12 +190,28 @@ export interface ServicePoolOptions {
   fetch?: typeof fetch;
   /** The sentence that tells a user how to connect again, e.g. "Connect Suunto again at <url>/account." */
   connectAgain?: string;
+  /**
+   * The one limiter of this process for Suunto data requests (the user id is its key). Demo
+   * accounts never use it.
+   */
+  limiter?: CallLimiter;
+  /** The limits `limiter` was built with (the admin page shows them). */
+  limits?: CallLimits;
+  /** The clock (epoch ms), for tests. */
+  now?: () => number;
+}
+
+/** The part of the server settings that changes a user's services. */
+function serverVersion(server: ServerSettings): string {
+  return `${server.forceReadOnly}:${server.defaultTimeZone}`;
 }
 
 /**
  * Keeps services per user, rebuilt when the user's or the server's settings change and closed
- * after a period without use. Demo accounts get services on the in-memory demo stores of `demo`,
- * which outlive the services (they are rebuilt after every reset).
+ * after a period without use. A rebuild for the same Suunto connection keeps its session (so
+ * there is only one token refresh at a time) and its response cache. Demo accounts get services
+ * on the in-memory demo stores of `demo`, which outlive the services (they are rebuilt after
+ * every reset).
  */
 export class ServicePool {
   private readonly entries = new Map<string, PoolEntry>();
@@ -164,6 +221,10 @@ export class ServicePool {
   private readonly idleMs: number;
   private readonly demo: DemoRegistry;
   private readonly log: (m: string) => void;
+  private readonly now: () => number;
+  /** Tool calls running now, and who waits until there are none. */
+  private running = 0;
+  private idleWaiters: (() => void)[] = [];
 
   constructor(
     private readonly store: Store,
@@ -171,9 +232,10 @@ export class ServicePool {
   ) {
     this.operator = opts.operator;
     this.keys = opts.keys;
-    this.idleMs = opts.idleMs ?? 10 * 60_000;
+    this.idleMs = opts.idleMs ?? POOL_IDLE_MS;
     this.demo = opts.demo ?? demoRegistry;
     this.log = opts.log ?? (() => {});
+    this.now = opts.now ?? Date.now;
     this.timer = setInterval(() => void this.sweep(), 60_000);
     this.timer.unref();
   }
@@ -181,6 +243,16 @@ export class ServicePool {
   /** Whether the operator set the Suunto app keys (real users can connect and use Suunto). */
   get configured(): boolean {
     return this.keys !== undefined;
+  }
+
+  /** The limiter of Suunto data requests (also used by the test request of "Connect Suunto"). */
+  get limiter(): CallLimiter | undefined {
+    return this.opts.limiter;
+  }
+
+  /** The limits of `limiter`, when it has any. */
+  get limits(): CallLimits | undefined {
+    return this.opts.limits;
   }
 
   /**
@@ -193,31 +265,48 @@ export class ServicePool {
     if (!user.hasSuunto || !this.keys) return undefined;
     const keys = this.keys;
     const server = this.store.getSettings();
-    const version = `${user.serviceUpdatedAt ?? 0}:${JSON.stringify(server)}`;
-    const existing = this.current(user.id, version);
+    const version = `${user.serviceUpdatedAt ?? 0}:${serverVersion(server)}`;
+    const existing = this.touch(user.id, version);
     if (existing) return existing;
     const { settings, unreadable } = this.store.readSuuntoSettings(user.id);
     if (unreadable) {
+      void this.drop(user.id);
       throw new ConfigError("it cannot be decrypted (the server's encryption key changed).");
     }
-    if (!settings) return undefined;
+    if (!settings) {
+      void this.drop(user.id);
+      return undefined;
+    }
     const config = buildUserConfig(settings, server, this.operator, keys);
-    const services = createServices(config, {
-      // The stored tokens win over the configuration: they hold the newest refresh token.
-      tokens: storedTokens(settings),
-      tokenSink: this.tokenSink(user.id, settings.connectedAt),
-      log: this.log,
-      ...(this.opts.fetch ? { fetch: this.opts.fetch } : {}),
-      ...(this.opts.connectAgain ? { connectAgain: this.opts.connectAgain } : {}),
-    });
-    return this.add(user.id, { config, services, version, lastUsed: Date.now() });
+    // The same connection with other settings: keep its session and its cache.
+    const old = this.entries.get(user.id);
+    const kept = old?.connection?.connectedAt === settings.connectedAt ? old.connection : undefined;
+    if (kept) this.entries.delete(user.id);
+    else void this.drop(user.id);
+    const services = kept
+      ? createServices(config, { reuse: { session: kept.session, backend: kept.backend }, log: this.log })
+      : createServices(config, {
+          // The stored tokens win over the configuration: they hold the newest refresh token.
+          tokens: storedTokens(settings),
+          tokenSink: this.tokenSink(user.id, settings.connectedAt),
+          log: this.log,
+          ...(this.opts.fetch ? { fetch: this.opts.fetch } : {}),
+          ...(this.opts.connectAgain ? { connectAgain: this.opts.connectAgain } : {}),
+          ...(this.opts.limiter ? { limiter: this.opts.limiter, limiterKey: user.id } : {}),
+        });
+    const connection = kept ?? (services.session && services.backend ? { connectedAt: settings.connectedAt, session: services.session, backend: services.backend } : undefined);
+    const entry: PoolEntry = { config, services, version, lastUsed: this.now(), ...(connection ? { connection } : {}) };
+    this.entries.set(user.id, entry);
+    return entry;
   }
 
   /**
    * Where a user's session saves new tokens: into the store, without rebuilding the services (a
    * saved refresh also clears "needs reconnect"). A refresh token that Suunto refuses marks the
    * connection "needs reconnect". Both only for the connection the session belongs to, never for
-   * one saved meanwhile (the user connected again while a call was running).
+   * one saved meanwhile (the user connected again while a call was running). load() gives the
+   * session the stored tokens of its connection: they can be newer than its own (an older
+   * session of the same connection refreshed meanwhile).
    */
   private tokenSink(userId: string, connectedAt: number): TokenSink {
     return {
@@ -236,6 +325,14 @@ export class ServicePool {
           this.log(`Could not mark a Suunto connection for reconnect: ${(error as Error).message}`);
         }
       },
+      load: () => {
+        try {
+          const current = this.store.getSuuntoSettings(userId);
+          return current && current.connectedAt === connectedAt ? storedTokens(current) : undefined;
+        } catch {
+          return undefined;
+        }
+      },
     };
   }
 
@@ -244,47 +341,51 @@ export class ServicePool {
     const account = this.demo.account(user.id);
     const server = this.store.getSettings();
     const readOnly = user.demoReadOnly === true;
-    const version = `demo:${account.generation}:${readOnly}:${JSON.stringify(server)}`;
-    const existing = this.current(user.id, version);
+    const version = `demo:${account.generation}:${readOnly}:${server.forceReadOnly}`;
+    const existing = this.touch(user.id, version);
     if (existing) return existing;
+    void this.drop(user.id);
     const config = buildDemoConfig(server, readOnly);
     const services = createServices(config, { demo: account.activity, log: this.log });
-    return this.add(user.id, { config, services, version, lastUsed: Date.now() });
-  }
-
-  /** The cached entry when it is still current; an outdated one is closed. */
-  private current(userId: string, version: string): PoolEntry | undefined {
-    const existing = this.entries.get(userId);
-    if (existing && existing.version === version) {
-      existing.lastUsed = Date.now();
-      return existing;
-    }
-    if (existing) {
-      this.entries.delete(userId);
-      void closeServices(existing.services).catch(() => undefined);
-    }
-    return undefined;
-  }
-
-  private add(userId: string, entry: PoolEntry): PoolEntry {
-    this.entries.set(userId, entry);
+    const entry: PoolEntry = { config, services, version, lastUsed: this.now() };
+    this.entries.set(user.id, entry);
     return entry;
   }
 
-  async invalidate(userId: string): Promise<void> {
+  /** The entry when it is still current (it counts as used now). */
+  private touch(userId: string, version: string): PoolEntry | undefined {
+    const existing = this.entries.get(userId);
+    if (!existing || existing.version !== version) return undefined;
+    existing.lastUsed = this.now();
+    return existing;
+  }
+
+  /** Remove a user's entry and close it, with its connection. */
+  private drop(userId: string): Promise<void> {
     const entry = this.entries.get(userId);
-    if (!entry) return;
+    if (!entry) return Promise.resolve();
     this.entries.delete(userId);
-    await closeServices(entry.services).catch(() => undefined);
+    return closeEntry(entry);
+  }
+
+  /**
+   * The user's settings changed (units, read-only, time zone): the next get() builds new services.
+   * The Suunto connection, its session and its cache stay.
+   */
+  rebuild(userId: string): void {
+    const entry = this.entries.get(userId);
+    if (entry) entry.version = "";
+  }
+
+  /** Close the user's services and connection (the connection was removed or replaced, or the user is gone). */
+  async invalidate(userId: string): Promise<void> {
+    await this.drop(userId);
   }
 
   async sweep(): Promise<void> {
-    const cutoff = Date.now() - this.idleMs;
+    const cutoff = this.now() - this.idleMs;
     for (const [userId, entry] of this.entries) {
-      if (entry.lastUsed < cutoff) {
-        this.entries.delete(userId);
-        await closeServices(entry.services).catch(() => undefined);
-      }
+      if (entry.lastUsed < cutoff) await this.drop(userId);
     }
   }
 
@@ -292,10 +393,37 @@ export class ServicePool {
     return this.entries.size;
   }
 
-  async closeAll(): Promise<void> {
+  /**
+   * A tool call starts. Returns the function that ends it (calling it again does nothing).
+   * closeAll() waits a moment for running calls.
+   */
+  begin(): () => void {
+    this.running++;
+    let ended = false;
+    return () => {
+      if (ended) return;
+      ended = true;
+      this.running--;
+      if (this.running === 0) for (const resolve of this.idleWaiters.splice(0)) resolve();
+    };
+  }
+
+  /** Close everything. Running tool calls get up to `waitMs` to end first (a token refresh saves its tokens). */
+  async closeAll(waitMs = SHUTDOWN_WAIT_MS): Promise<void> {
     clearInterval(this.timer);
+    if (this.running > 0 && waitMs > 0) {
+      let timer: NodeJS.Timeout | undefined;
+      await Promise.race([new Promise<void>((resolve) => this.idleWaiters.push(resolve)), new Promise<void>((resolve) => (timer = setTimeout(resolve, waitMs)))]);
+      clearTimeout(timer);
+    }
     const all = [...this.entries.values()];
     this.entries.clear();
-    await Promise.allSettled(all.map((e) => closeServices(e.services)));
+    await Promise.allSettled(all.map(closeEntry));
   }
+}
+
+/** Close an entry's services, and the backend of its connection (rebuilt services leave it open). */
+async function closeEntry(entry: PoolEntry): Promise<void> {
+  await closeServices(entry.services).catch(() => undefined);
+  if (entry.services.reused) await entry.connection?.backend.close().catch(() => undefined);
 }

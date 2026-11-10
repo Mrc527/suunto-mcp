@@ -1,10 +1,21 @@
 import { execFile } from "node:child_process";
-import { chmodSync, lstatSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
-import { DEFAULT_REDIRECT_URI, checkRedirectUri, describeConfig, loadConfig, loadLoginConfig, readSecret, suuntoKeysFromEnv } from "../../src/config.js";
+import {
+  DEFAULT_REDIRECT_URI,
+  callLimitsFromEnv,
+  checkRedirectUri,
+  describeConfig,
+  expandPath,
+  inspectTokenCache,
+  loadConfig,
+  loadLoginConfig,
+  readSecret,
+  suuntoKeysFromEnv,
+} from "../../src/config.js";
 import { fileTokenSink, readTokenCache, writeTokenCache } from "../../src/server.js";
 import { DEFAULT_ENDPOINTS } from "../../src/suunto/endpoints.js";
 import { fakeJwt } from "../helpers/mock-suunto.js";
@@ -28,6 +39,23 @@ describe("loadConfig", () => {
     expect(c.transport).toBe("stdio");
     expect(c.http).toMatchObject({ host: "127.0.0.1", port: 3000, allowedHosts: [], allowedOrigins: [] });
     expect(c.secrets.sort()).toEqual(["rt-invented-value", "secret-invented-value", "subkey-invented-value"]);
+    expect(c.callLimits).toEqual({ perMinute: 10, perUserPerDay: 0 });
+  });
+
+  it("reads the Suunto call limits (0 = no limit, empty = unset, other values refused)", () => {
+    expect(callLimitsFromEnv({})).toEqual({ perMinute: 10, perUserPerDay: 0 });
+    expect(callLimitsFromEnv({ SUUNTO_CALLS_PER_MINUTE: "0", SUUNTO_CALLS_PER_USER_PER_DAY: " 250 " })).toEqual({ perMinute: 0, perUserPerDay: 250 });
+    expect(callLimitsFromEnv({ SUUNTO_CALLS_PER_MINUTE: "", SUUNTO_CALLS_PER_USER_PER_DAY: " " })).toEqual({ perMinute: 10, perUserPerDay: 0 });
+    // The web service's own default (100 a day) applies only while the variable is unset.
+    expect(callLimitsFromEnv({}, { perUserPerDay: 100 })).toEqual({ perMinute: 10, perUserPerDay: 100 });
+    expect(callLimitsFromEnv({ SUUNTO_CALLS_PER_USER_PER_DAY: "" }, { perUserPerDay: 100 })).toEqual({ perMinute: 10, perUserPerDay: 100 });
+    expect(callLimitsFromEnv({ SUUNTO_CALLS_PER_USER_PER_DAY: "0" }, { perUserPerDay: 100 })).toEqual({ perMinute: 10, perUserPerDay: 0 });
+    for (const bad of ["ten", "-1", "1.5", "1e3", "0x10"]) {
+      expect(() => callLimitsFromEnv({ SUUNTO_CALLS_PER_MINUTE: bad }), bad).toThrow(`SUUNTO_CALLS_PER_MINUTE must be a whole number of 0 or more (0 means no limit), got "${bad}"`);
+    }
+    expect(() => callLimitsFromEnv({ SUUNTO_CALLS_PER_USER_PER_DAY: "lots" })).toThrow(/SUUNTO_CALLS_PER_USER_PER_DAY must be a whole number/);
+    expect(loadConfig({ ...base, SUUNTO_CALLS_PER_MINUTE: "30", SUUNTO_CALLS_PER_USER_PER_DAY: "500" }).callLimits).toEqual({ perMinute: 30, perUserPerDay: 500 });
+    expect(() => loadConfig({ ...base, SUUNTO_CALLS_PER_MINUTE: "fast" })).toThrow(/SUUNTO_CALLS_PER_MINUTE/);
   });
 
   it("warns when a refresh token has no token cache to keep its newer versions", () => {
@@ -76,8 +104,46 @@ describe("loadConfig", () => {
     const dir = mkdtempSync(join(tmpdir(), "suunto-mcp-cache-"));
     const cache = join(dir, "tokens.json");
     expect(() => loadConfig({ ...KEYS, SUUNTO_TOKEN_CACHE: cache })).toThrow(/does not exist yet. Run suunto-mcp --login/);
-    writeFileSync(cache, "{}");
+    writeTokenCache(cache, { refreshToken: "rt-invented-cache-value", clientId: "client-invented" });
     expect(loadConfig({ ...KEYS, SUUNTO_TOKEN_CACHE: cache }).suunto.tokenCache).toBe(cache);
+  });
+
+  it("refuses a token cache that is there but cannot be used, naming the file and the reason", () => {
+    const dir = mkdtempSync(join(tmpdir(), "suunto-mcp-cache-"));
+    const cache = join(dir, "tokens.json");
+    const cases: Array<[string, () => void]> = [
+      ["was written for another Suunto app (another SUUNTO_CLIENT_ID)", () => writeTokenCache(cache, { refreshToken: "rt-other-app", clientId: "another-client" })],
+      ["is not a valid token cache (not JSON; it may be damaged)", () => writeFileSync(cache, '{"refreshToken": "rt-cut')],
+      ["holds no Suunto sign-in", () => writeFileSync(cache, "{}")],
+    ];
+    for (const [reason, write] of cases) {
+      write();
+      const text = `The token cache ${cache} (SUUNTO_TOKEN_CACHE) ${reason}.`;
+      expect(() => loadConfig({ ...KEYS, SUUNTO_TOKEN_CACHE: cache }), reason).toThrow(`${text} Run suunto-mcp --login again to sign in to Suunto and replace it.`);
+      // With SUUNTO_REFRESH_TOKEN the server starts from it, and says so.
+      const warnings: string[] = [];
+      expect(loadConfig({ ...base, SUUNTO_TOKEN_CACHE: cache }, {}, (w) => warnings.push(w)).suunto.tokenCache).toBe(cache);
+      expect(warnings).toEqual([`${text} Using SUUNTO_REFRESH_TOKEN instead; the next refresh replaces the file.`]);
+    }
+    // A file that cannot be read: the system error code.
+    const folder = join(dir, "a-folder");
+    mkdirSync(folder);
+    expect(() => loadConfig({ ...KEYS, SUUNTO_TOKEN_CACHE: folder })).toThrow(`The token cache ${folder} (SUUNTO_TOKEN_CACHE) cannot be read (EISDIR).`);
+    // The client id of the other app is never shown.
+    expect(() => loadConfig({ ...KEYS, SUUNTO_TOKEN_CACHE: cache })).not.toThrow(/another-client/);
+  });
+
+  it("expands a leading ~ in SUUNTO_TOKEN_CACHE and makes the path absolute", () => {
+    expect(expandPath("~")).toBe(homedir());
+    expect(expandPath("~/.config/suunto-mcp/tokens.json")).toBe(join(homedir(), ".config/suunto-mcp/tokens.json"));
+    expect(expandPath("tokens.json")).toBe(resolve("tokens.json"));
+    expect(expandPath("/srv/tokens.json")).toBe("/srv/tokens.json");
+    expect(loadLoginConfig({ ...KEYS, SUUNTO_TOKEN_CACHE: "~/.config/suunto-mcp/tokens.json" }).suunto.tokenCache).toBe(join(homedir(), ".config/suunto-mcp/tokens.json"));
+    expect(loadLoginConfig({ ...KEYS, SUUNTO_TOKEN_CACHE: "cache/tokens.json" }).suunto.tokenCache).toBe(resolve("cache/tokens.json"));
+    // The server looks for the same file as --login wrote, from any working folder.
+    expect(() => loadConfig({ ...KEYS, SUUNTO_TOKEN_CACHE: "~/suunto-mcp-test-missing-cache.json" })).toThrow(
+      `The token cache ${join(homedir(), "suunto-mcp-test-missing-cache.json")} (SUUNTO_TOKEN_CACHE) does not exist yet.`,
+    );
   });
 
   it("treats empty and blank values as unset (Docker Compose passes unset variables as empty strings)", () => {
@@ -268,6 +334,35 @@ describe("token cache (SUUNTO_TOKEN_CACHE)", () => {
     expect(readTokenCache(join(dir, "missing.json"))).toBeUndefined();
   });
 
+  it("says why a cache cannot be used", () => {
+    const dir = mkdtempSync(join(tmpdir(), "suunto-mcp-tokens-"));
+    const file = join(dir, "tokens.json");
+    expect(inspectTokenCache(file)).toEqual({ problem: "does not exist", missing: true });
+    writeTokenCache(file, tokens);
+    expect(inspectTokenCache(file, "client-invented")).toEqual({ tokens });
+    expect(inspectTokenCache(file, "another-client")).toEqual({ problem: "was written for another Suunto app (another SUUNTO_CLIENT_ID)", missing: false });
+    writeFileSync(file, "[]");
+    expect(inspectTokenCache(file)).toEqual({ problem: "is not a valid token cache (not JSON; it may be damaged)", missing: false });
+    expect(inspectTokenCache(dir)).toEqual({ problem: "cannot be read (EISDIR)", missing: false });
+  });
+
+  it("reads the file again on load(): tokens saved by another process or by --login", () => {
+    const dir = mkdtempSync(join(tmpdir(), "suunto-mcp-tokens-"));
+    const file = join(dir, "tokens.json");
+    const sink = fileTokenSink(file, () => {}, "client-invented");
+    expect(sink.load?.()).toBeUndefined();
+    sink.save(tokens);
+    expect(sink.load?.()).toEqual(tokens);
+    // Another process rotated the refresh token.
+    writeTokenCache(file, { refreshToken: "rt-newer", clientId: "client-invented" });
+    expect(sink.load?.()).toEqual({ refreshToken: "rt-newer", clientId: "client-invented" });
+    // A sign-in of another app is not offered to the session.
+    writeTokenCache(file, { refreshToken: "rt-other-app", clientId: "another-client" });
+    expect(sink.load?.()).toBeUndefined();
+    writeFileSync(file, "not json");
+    expect(sink.load?.()).toBeUndefined();
+  });
+
   it("logs a failed write without the token, and an invalid sign-in", () => {
     const dir = mkdtempSync(join(tmpdir(), "suunto-mcp-tokens-"));
     writeFileSync(join(dir, "file"), "x");
@@ -277,7 +372,9 @@ describe("token cache (SUUNTO_TOKEN_CACHE)", () => {
     sink.save(tokens);
     sink.invalid("Suunto refused the refresh token");
     expect(logs.join("\n")).toMatch(/Could not write the Suunto token cache .*\((ENOTDIR|EEXIST)\)/);
-    expect(logs.join("\n")).toMatch(/Run suunto-mcp --login again/);
+    expect(logs.at(-1)).toBe(
+      `The saved Suunto sign-in no longer works (Suunto refused the refresh token). Run suunto-mcp --login again to connect Suunto (or delete ${join(dir, "file", "tokens.json")} and restart with a new SUUNTO_REFRESH_TOKEN).`,
+    );
     expect(logs.join("\n")).not.toContain(tokens.refreshToken);
     expect(logs.join("\n")).not.toContain(access);
   });
@@ -304,6 +401,9 @@ describe("command line", () => {
       "SUUNTO_UNITS",
       "SUUNTO_READ_ONLY",
       "SUUNTO_TIMEZONE",
+      "SUUNTO_CALLS_PER_MINUTE",
+      "SUUNTO_CALLS_PER_USER_PER_DAY",
+      "~/.config/suunto-mcp/tokens.json",
       "--login",
       "--check",
       "--web",
@@ -324,6 +424,12 @@ describe("command line", () => {
     expect(bad.stderr).toMatch(/\[suunto-mcp\] Unknown argument: --bogus/);
     const both = await cli(["--login", "--check"]);
     expect(both.code).toBe(2);
+    // --web would start the web service and never exit: --check with it is refused.
+    for (const args of [["--web", "--check"], ["--check", "--web"], ["--web", "--http"], ["--web", "--stdio"]]) {
+      const web = await cli(args);
+      expect(web.code, args.join(" ")).toBe(2);
+      expect(web.stderr).toMatch(/\[suunto-mcp\] --web cannot be combined with --check, --http or --stdio\./);
+    }
     const noConfig = await cli(["--check"]);
     expect(noConfig.code).toBe(1);
     expect(noConfig.stderr).toMatch(/configuration error: SUUNTO_CLIENT_ID, SUUNTO_CLIENT_SECRET and SUUNTO_SUBSCRIPTION_KEY are not set/);

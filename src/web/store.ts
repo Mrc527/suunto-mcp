@@ -454,13 +454,16 @@ export class Store {
    * Change the units, read-only switch and time zone of the saved Suunto connection. The tokens
    * stay as they are (also the "needs reconnect" mark), but the user's services are rebuilt,
    * because read-only changes the tools an AI app gets. A time zone that is not given stays as it
-   * is. Returns false when no readable connection is saved.
+   * is; null removes it (the server's default time zone applies again). Returns false when no
+   * readable connection is saved.
    */
-  saveSuuntoPreferences(userId: string, prefs: Pick<SuuntoAccountSettings, "units" | "readOnly" | "timeZone">): boolean {
+  saveSuuntoPreferences(userId: string, prefs: Pick<SuuntoAccountSettings, "units" | "readOnly"> & { timeZone?: string | null }): boolean {
     return transaction(this.db, () => {
       const { settings } = this.readSuuntoSettings(userId);
       if (!settings) return false;
-      const next: SuuntoAccountSettings = { ...settings, units: prefs.units, readOnly: prefs.readOnly, ...(prefs.timeZone ? { timeZone: prefs.timeZone } : {}) };
+      const next: SuuntoAccountSettings = { ...settings, units: prefs.units, readOnly: prefs.readOnly };
+      if (prefs.timeZone === null) delete next.timeZone;
+      else if (prefs.timeZone) next.timeZone = prefs.timeZone;
       this.db.prepare("UPDATE users SET service_enc = ?, service_updated_at = ? WHERE id = ?").run(this.box.seal(JSON.stringify(next), userId), now(), userId);
       return true;
     });

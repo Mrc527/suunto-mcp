@@ -12,7 +12,7 @@ import type { Icon } from "@modelcontextprotocol/sdk/types.js";
 import { DEMO_NOTICE, DemoActivityStore } from "../demo/index.js";
 import { createMcpServer, createServices } from "../server.js";
 import { redactForLog, UserFacingError } from "../util/errors.js";
-import { buildDemoConfig } from "./accounts.js";
+import { buildSetupConfig } from "./accounts.js";
 import { mcpIcons } from "./brand.js";
 import type { WebContext } from "./context.js";
 import { rateLimit } from "express-rate-limit";
@@ -42,16 +42,23 @@ export function setupMessage(ctx: WebContext, user: User, problem: SetupProblem)
   }
 }
 
+/** Told to the AI app of a user whose time zone and units are not known yet. */
+export function notKnownYet(timeZone: string): string {
+  return `The user's time zone and units are not known until Suunto is connected: ${timeZone} and metric units above are only this server's defaults, so do not rely on them.`;
+}
+
 /**
  * Server for users who cannot use Suunto yet: not connected, the operator's app keys are missing,
  * or the stored connection cannot be read. It offers the same tools as a connected account,
- * because AI apps cache the tool list, but every call answers with what to do.
+ * because AI apps cache the tool list, but every call answers with what to do. It uses the
+ * user's saved time zone and units when they can be read; otherwise the AI app is told that they
+ * are not known yet (never a made-up value).
  */
 function setupServer(ctx: WebContext, user: User, problem: SetupProblem): McpServer {
   const message = setupMessage(ctx, user, problem);
-  // The tool list of a writable account. Nothing is ever read from the placeholder store: the
-  // guard below stops every call before it runs.
-  const config = buildDemoConfig(ctx.store.getSettings(), false);
+  const stored = problem.kind === "unusable" ? undefined : ctx.store.getSuuntoSettings(user.id);
+  // Nothing is ever read from the placeholder store: the guard below stops every call before it runs.
+  const config = buildSetupConfig(ctx.store.getSettings(), stored);
   setupStore ??= new DemoActivityStore();
   const services = createServices(config, { demo: setupStore });
   return createMcpServer(config, services, ctx.log, {
@@ -59,7 +66,7 @@ function setupServer(ctx: WebContext, user: User, problem: SetupProblem): McpSer
     beforeToolCall: () => {
       throw new UserFacingError(message);
     },
-    extraInstructions: message,
+    extraInstructions: stored ? message : `${message}\n${notKnownYet(config.timeZone)}`,
   });
 }
 
@@ -129,10 +136,14 @@ export function mcpRoutes(ctx: WebContext): Router {
       // answers "Your Suunto connection expired. Connect Suunto again at <url>/account."
       const userCtx = ctx.pool.get(user);
       const accountUrl = `${issuerOf(ctx.publicUrl)}/account`;
+      // Running tool calls, so a shutdown waits a moment for them (a token refresh saves its tokens).
+      const running: (() => void)[] = [];
       server = userCtx
         ? createMcpServer(userCtx.config, userCtx.services, ctx.log, {
             ...branding(ctx),
+            beforeToolCall: () => void running.push(ctx.pool.begin()),
             onToolCall: (tool, ok, ms) => {
+              running.pop()?.();
               try {
                 ctx.live.publish(user.id, ctx.store.logActivity(user.id, tool, ok, ms, auth.clientId));
               } catch {

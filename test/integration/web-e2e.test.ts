@@ -81,7 +81,8 @@ describe.skipIf(!enabled)("web mode against a mock Suunto API", () => {
     setBase(base);
     // The mock accepts only the redirect URI registered for this server, as Suunto does.
     mock = await startMockSuunto({ redirectUris: [`${base}/suunto/callback`] });
-    web = await createWebApp({ publicUrl: new URL(base), host: "127.0.0.1", port: 0, dataDir: ":memory:", operator: mock.env(), demo, log: (m) => void logs.push(m) });
+    // Many Suunto calls in a minute: no call limits (web-hardening.test.ts checks them).
+    web = await createWebApp({ publicUrl: new URL(base), host: "127.0.0.1", port: 0, dataDir: ":memory:", operator: mock.env(), demo, callLimits: { perMinute: 0, perUserPerDay: 0 }, log: (m) => void logs.push(m) });
     server.on("request", web.app);
     // The first account is the administrator; the others sign up freely.
     expect((await admin.signup("admin@example.com", PASSWORD)).status).toBe(303);

@@ -11,6 +11,8 @@ import type { ToolContext } from "../../src/tooling.js";
 // Invented test data only.
 const NOW = Date.parse("2026-11-10T09:00:00Z");
 const SECRET = "not-a-real-subscription-key";
+/** A workout key as Suunto writes it: 24 hex characters. */
+const KEY = "5b190f5c52ce7b316acbd520";
 
 const READ_TOOLS = [
   "suunto_activity_samples",
@@ -30,9 +32,9 @@ const WRITE_TOOLS = ["suunto_create_poi", "suunto_import_route"];
 /** Valid arguments for each tool (an unknown key is added to them in the strict test). */
 const VALID_ARGS: Record<string, Record<string, unknown>> = {
   suunto_list_workouts: {},
-  suunto_get_workout: { workout_key: "w1" },
+  suunto_get_workout: { workout_key: KEY },
   suunto_workout_stats: {},
-  suunto_export_workout_fit: { workout_key: "w1" },
+  suunto_export_workout_fit: { workout_key: KEY },
   suunto_daily_activity: { from: "2026-11-01", to: "2026-11-02" },
   suunto_activity_samples: { from: "2026-11-01", to: "2026-11-02" },
   suunto_sleep: { from: "2026-11-01", to: "2026-11-02" },
@@ -45,7 +47,7 @@ const VALID_ARGS: Record<string, Record<string, unknown>> = {
 };
 
 const WORKOUT: WireWorkout = {
-  workoutKey: "w1",
+  workoutKey: KEY,
   activityId: 1,
   startTime: NOW - 86_400_000,
   timeOffsetInMinutes: 60,
@@ -174,6 +176,13 @@ describe("activity tools", () => {
     expect(byName.suunto_workout_stats!.description).toMatch(/2000 workouts/);
     expect(props("suunto_workout_stats").group_by!.enum).toEqual(["none", "week", "month", "year", "sport"]);
     expect(byName.suunto_daily_activity!.description).toMatch(/at most 92 days/);
+    // `to` is included: 28 days in all means a date at most 27 days after from.
+    expect(props("suunto_activity_samples").to!.description).toMatch(/At most 28 days in all: a date at most 27 days after from, a date-time at most 28 days after from/);
+    expect(props("suunto_recovery").to!.description).toMatch(/a date at most 27 days after from/);
+    expect(props("suunto_daily_activity").to!.description).toMatch(/at most 92 days in all, so at most 91 days after from/);
+    expect(props("suunto_sleep").to!.description).toMatch(/at most 91 days after from/);
+    expect(props("suunto_get_workout").workout_key!.description).toMatch(/24 hex characters/);
+    expect(props("suunto_export_workout_fit").workout_key!.description).toMatch(/24 hex characters/);
     expect(byName.suunto_activity_samples!.description).toMatch(/At most 28 days per call, at most 2 days with resolution raw/);
     expect(byName.suunto_export_workout_fit!.description).toMatch(/8 MB/);
     expect(byName.suunto_get_route!.description).toMatch(/1 MB/);
@@ -194,9 +203,9 @@ describe("activity tools", () => {
   it("answers compact JSON with units", async () => {
     const { client } = await connect();
     const list = JSON.parse(text(await client.callTool({ name: "suunto_list_workouts", arguments: {} })));
-    expect(list).toMatchObject({ count: 1, total_in_range: 1, workouts: [{ workout_key: "w1", sport: "Running", distance: 5, avg_pace: "6:00", avg_hr: 150 }], units: { distance: "km" } });
-    const workout = JSON.parse(text(await client.callTool({ name: "suunto_get_workout", arguments: { workout_key: "w1", units: "imperial" } })));
-    expect(workout).toMatchObject({ workout_key: "w1", distance: 3.11, utc_offset: "+01:00", units: { distance: "mi" } });
+    expect(list).toMatchObject({ count: 1, total_in_range: 1, workouts: [{ workout_key: KEY, sport: "Running", distance: 5, avg_pace: "6:00", avg_hr: 150 }], units: { distance: "km" } });
+    const workout = JSON.parse(text(await client.callTool({ name: "suunto_get_workout", arguments: { workout_key: KEY, units: "imperial" } })));
+    expect(workout).toMatchObject({ workout_key: KEY, distance: 3.11, utc_offset: "+01:00", units: { distance: "mi" } });
     const route = JSON.parse(text(await client.callTool({ name: "suunto_get_route", arguments: { route_id: "r1" } })));
     expect(route).toMatchObject({ route_id: "r1", name: "Loop", distance: 8, units: { distance: "km" } });
     const poi = JSON.parse(text(await client.callTool({ name: "suunto_create_poi", arguments: VALID_ARGS.suunto_create_poi! })));
@@ -206,14 +215,14 @@ describe("activity tools", () => {
   it("sends the FIT file as an embedded resource after a short JSON text", async () => {
     const fit = Buffer.from([0x0e, 0x10, 0x2e, 0x46, 0x49, 0x54, 0x01, 0x02]);
     const { client } = await connect({ backend: fakeBackend(fit) });
-    const result = await client.callTool({ name: "suunto_export_workout_fit", arguments: { workout_key: "w1" } });
+    const result = await client.callTool({ name: "suunto_export_workout_fit", arguments: { workout_key: KEY } });
     expect(result.isError).toBeFalsy();
     const content = result.content as Array<Record<string, unknown>>;
     expect(content).toHaveLength(2);
-    expect(content[0]).toEqual({ type: "text", text: JSON.stringify({ workout_key: "w1", bytes: 8, file_name: "suunto-workout-w1.fit" }) });
+    expect(content[0]).toEqual({ type: "text", text: JSON.stringify({ workout_key: KEY, bytes: 8, file_name: `suunto-workout-${KEY}.fit` }) });
     expect(content[1]).toEqual({
       type: "resource",
-      resource: { uri: "suunto://workouts/w1.fit", mimeType: "application/vnd.ant.fit", blob: fit.toString("base64") },
+      resource: { uri: `suunto://workouts/${KEY}.fit`, mimeType: "application/vnd.ant.fit", blob: fit.toString("base64") },
     });
     expect(JSON.stringify(result)).not.toContain("__raw");
   });
@@ -224,13 +233,26 @@ describe("activity tools", () => {
     expect(names.sort()).toEqual([...READ_TOOLS].sort());
   });
 
+  it("refuses a workout key that is not 24 hex characters before calling Suunto", async () => {
+    const backend = fakeBackend();
+    const { client } = await connect({ backend });
+    for (const name of ["suunto_get_workout", "suunto_export_workout_fit"]) {
+      for (const key of ["Morning_Run", "12345"]) {
+        const result = await client.callTool({ name, arguments: { workout_key: key } });
+        expect(result.isError, `${name} ${key}`).toBe(true);
+        expect(text(result), `${name} ${key}`).toMatch(/24 hex characters/);
+      }
+    }
+    expect(backend.ops).toEqual([]);
+  });
+
   it("turns errors into tool errors with clear text and no secrets", async () => {
     const backend = fakeBackend();
     backend.getWorkout = async () => {
       throw new Error(`upstream said Ocp-Apim-Subscription-Key: ${SECRET}`);
     };
     const { client, logs } = await connect({ backend });
-    const result = await client.callTool({ name: "suunto_get_workout", arguments: { workout_key: "w1" } });
+    const result = await client.callTool({ name: "suunto_get_workout", arguments: { workout_key: KEY } });
     expect(result.isError).toBe(true);
     expect(text(result)).not.toContain(SECRET);
     expect(logs.join("\n")).not.toContain(SECRET);

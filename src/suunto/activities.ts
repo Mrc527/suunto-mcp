@@ -162,7 +162,8 @@ export function isKnownActivity(id: number): boolean {
 
 // Families used by the sport filter. A family word wins over an activity of the same name, so
 // "running" also finds trail, treadmill, track and vertical runs; the exact activity alone can
-// still be asked for by its id (for example "1").
+// still be asked for by its id (for example "1"). The name of the activity a family is named after
+// (Running, Cycling, Cross-country skiing, ...) must be in the family's alias row.
 const RUNNING = [1, 22, 53, 103, 115];
 const CYCLING = [2, 10, 52, 99, 105, 106, 114];
 const MOUNTAIN_BIKING = [10, 106];
@@ -203,7 +204,8 @@ const ALIAS_LIST: ReadonlyArray<[string[], number[]]> = [
   [["walk", "walks", "walking"], WALKING],
   [["nordic walk", "nordic walking"], [24]],
   [["ski", "skis", "skiing"], SKIING],
-  [["xc ski", "xc skiing", "xc", "cross country", "cross country ski", "nordic ski", "nordic skiing", "langlauf"], XC_SKIING],
+  // "Cross-country skiing" is also the name of activity 3: as a filter it means the whole family.
+  [["xc ski", "xc skiing", "xc", "cross country", "cross country ski", "cross country skiing", "nordic ski", "nordic skiing", "langlauf"], XC_SKIING],
   [["skate ski", "skating ski", "skating skiing"], [117]],
   [["classic ski", "classic cross country skiing"], [118]],
   [["downhill", "downhill ski", "alpine", "alpine ski", "alpine skiing", "piste"], [13]],

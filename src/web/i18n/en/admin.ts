@@ -23,7 +23,7 @@ export default {
   "admin.overview.requestsWaiting.one": "{n} waiting",
   "admin.overview.requestsWaiting.other": "{n} waiting",
   "admin.overview.noRequests": "none",
-  "admin.overview.activeConnections": "Accounts in use (last 10 minutes)",
+  "admin.overview.activeConnections": "Accounts in use (last 35 minutes)",
   "admin.overview.platform": "Host platform",
 
   // Public setup check
@@ -50,8 +50,14 @@ export default {
   "admin.suunto.keysHint": "SUUNTO_CLIENT_ID, SUUNTO_CLIENT_SECRET and SUUNTO_SUBSCRIPTION_KEY from the environment. Their values are never shown.",
   "admin.suunto.missingWarning": "The Suunto app keys are not set, so nobody can connect Suunto (demo accounts work). Set SUUNTO_CLIENT_ID, SUUNTO_CLIENT_SECRET and SUUNTO_SUBSCRIPTION_KEY from your app in the Suunto API Zone, then restart the server.",
   "admin.suunto.redirectUri": "Redirect URI",
-  "admin.suunto.redirectUriHint": "Register exactly this address as the redirect URI of your app in the Suunto API Zone. Change it with SUUNTO_REDIRECT_URI.",
+  "admin.suunto.redirectUriHint": "Register exactly this address as the redirect URI of your app in the Suunto API Zone. It is always on the host of PUBLIC_URL, with the path /suunto/callback.",
   "admin.suunto.servers": "Suunto servers",
+  "admin.suunto.limits": "Call limits",
+  "admin.suunto.perMinute": "{n} Suunto requests per minute for the whole server",
+  "admin.suunto.perMinuteOff": "No limit per minute",
+  "admin.suunto.perUser": "{n} requests per user per day",
+  "admin.suunto.perUserOff": "No daily limit per user",
+  "admin.suunto.limitsHint": "Set them with SUUNTO_CALLS_PER_MINUTE and SUUNTO_CALLS_PER_USER_PER_DAY (0 means no limit). Demo accounts do not count.",
   "admin.suunto.plan": "A Developer subscription of the Suunto API allows 10 calls per minute and 200 calls per week for the whole server: enough to try it, not for many users. Ask Suunto for Production access before you invite people. When the limit is reached, AI apps get an error that says when to try again.",
 
   // Settings

@@ -25,7 +25,7 @@ export default {
   "admin.overview.requestsWaiting.one": "{n} in attesa",
   "admin.overview.requestsWaiting.other": "{n} in attesa",
   "admin.overview.noRequests": "nessuna",
-  "admin.overview.activeConnections": "Account in uso (ultimi 10 minuti)",
+  "admin.overview.activeConnections": "Account in uso (ultimi 35 minuti)",
   "admin.overview.platform": "Piattaforma host",
 
   // Public setup check
@@ -52,8 +52,14 @@ export default {
   "admin.suunto.keysHint": "SUUNTO_CLIENT_ID, SUUNTO_CLIENT_SECRET e SUUNTO_SUBSCRIPTION_KEY, prese dall'ambiente. I loro valori non vengono mai mostrati.",
   "admin.suunto.missingWarning": "Le chiavi dell'app Suunto non sono impostate, quindi nessuno può collegare Suunto (gli account demo funzionano). Imposta SUUNTO_CLIENT_ID, SUUNTO_CLIENT_SECRET e SUUNTO_SUBSCRIPTION_KEY con i valori della tua app nella Suunto API Zone, poi riavvia il server.",
   "admin.suunto.redirectUri": "URI di reindirizzamento",
-  "admin.suunto.redirectUriHint": "Registra esattamente questo indirizzo come URI di reindirizzamento della tua app nella Suunto API Zone. Puoi cambiarlo con SUUNTO_REDIRECT_URI.",
+  "admin.suunto.redirectUriHint": "Registra esattamente questo indirizzo come URI di reindirizzamento della tua app nella Suunto API Zone. È sempre sull'host di PUBLIC_URL, con il percorso /suunto/callback.",
   "admin.suunto.servers": "Server Suunto",
+  "admin.suunto.limits": "Limiti di chiamate",
+  "admin.suunto.perMinute": "{n} richieste a Suunto al minuto per tutto il server",
+  "admin.suunto.perMinuteOff": "Nessun limite al minuto",
+  "admin.suunto.perUser": "{n} richieste per utente al giorno",
+  "admin.suunto.perUserOff": "Nessun limite giornaliero per utente",
+  "admin.suunto.limitsHint": "Si impostano con SUUNTO_CALLS_PER_MINUTE e SUUNTO_CALLS_PER_USER_PER_DAY (0 significa nessun limite). Gli account demo non contano.",
   "admin.suunto.plan": "Un abbonamento Developer della Suunto API consente 10 chiamate al minuto e 200 chiamate a settimana per l'intero server: abbastanza per provarlo, non per molti utenti. Chiedi a Suunto l'accesso Production prima di invitare altre persone. Quando si raggiunge il limite, le app di IA ricevono un errore che indica quando riprovare.",
 
   // Settings

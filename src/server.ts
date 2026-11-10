@@ -711,7 +711,7 @@ export function createMcpServer(config: AppConfig, services: Services, log: (m: 
       description:
         "Show the connected Suunto account: username (the Suunto App username), connected, units (metric or imperial), read_only, demo (true for a demo account with invented sample data), " +
         "the server's date (today, in time_zone; the user's own date can differ by a day), server_version and token_expires_at (when the current Suunto access token expires; it renews by itself). " +
-        "With check=true it also tests the connection by reading the workouts of the last 30 days (check.ok, check.workouts_last_30_days: at most one page of 100 is counted, and check says so when the count is capped); it then answers even when the Suunto sign-in fails (connected false, the error in check.error).",
+        "With check=true it also tests the connection by reading the workouts of the last 30 days (check.ok, check.workouts_last_30_days: at most 100 are counted, and check.workouts_last_30_days_capped is true when there may be more); it then answers even when the Suunto sign-in fails (connected false, the error in check.error).",
       inputSchema: { check: z.boolean().optional().describe("Also test the connection to Suunto by reading the workouts of the last 30 days (default false)") },
       kind: "read",
     },

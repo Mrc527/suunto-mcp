@@ -1265,7 +1265,8 @@ export class MockSuunto {
       watchEnabled: true,
     };
     this.state.pois.push(poi);
-    send(res, 200, { pointOfInterest: poi });
+    // A PointOfInterestResult: errorCode 0 next to the saved point.
+    send(res, 200, { pointOfInterest: poi, errorCode: 0 });
   }
 }
 

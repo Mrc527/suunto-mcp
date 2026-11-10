@@ -81,9 +81,12 @@ async function callError(client: Client, name: string, args: Record<string, unkn
   return text;
 }
 
-/** The environment of the built server: the mock's hosts and app keys, and the token cache. */
+/**
+ * The environment of the built server: the mock's hosts and app keys, and the token cache. The
+ * tests send more than Suunto's 10 calls a minute, so the call limiter is off.
+ */
 function cliEnv(extra: Record<string, string> = {}): Record<string, string> {
-  return { ...mock.env(), SUUNTO_TOKEN_CACHE: cache, SUUNTO_TIMEZONE: ZONE, PATH: process.env.PATH ?? "", ...extra };
+  return { ...mock.env(), SUUNTO_TOKEN_CACHE: cache, SUUNTO_TIMEZONE: ZONE, SUUNTO_CALLS_PER_MINUTE: "0", PATH: process.env.PATH ?? "", ...extra };
 }
 
 /** Every secret the mock knows of: app keys, tokens and codes. */
@@ -109,6 +112,15 @@ function expectNoSecrets(text: string, label: string, extra: string[] = []): voi
 function recentWorkouts(): number {
   const now = Date.now();
   return mock.state.workouts.filter((w) => Number(w.startTime) >= now - 30 * DAY_MS && Number(w.startTime) < now).length;
+}
+
+/**
+ * List arguments with a range of their own: the service reads whole pages of a range and keeps
+ * them in the response cache, so a list that must reach the mock needs a range no test read yet.
+ */
+function uncachedRange(daysBack: number): { from: string; to: string } {
+  const today = todayInZone(ZONE);
+  return { from: addDays(today, -daysBack), to: today };
 }
 
 /** The mock's workouts, newest first. */
@@ -373,7 +385,7 @@ describe.skipIf(!enabled)("against a mock Suunto API", () => {
       const client = stdio!;
       const access = mock.state.accessTokens.at(-1)!.token;
       mock.failNext("/v3/workouts", 400, { message: `Rejected Bearer ${access} with key ${MOCK_SUBSCRIPTION_KEY} and secret ${MOCK_CLIENT_SECRET}` });
-      const text = await callError(client, "suunto_list_workouts", { limit: 3 });
+      const text = await callError(client, "suunto_list_workouts", { limit: 3, ...uncachedRange(11) });
       expect(text).toContain("Suunto says the request is not valid");
       expect(text).toContain("Rejected Bearer ***");
       expectNoSecrets(text, "the tool error");
@@ -392,7 +404,7 @@ describe.skipIf(!enabled)("against a mock Suunto API", () => {
       const tokenCalls = mock.count("/oauth/token");
       // Suunto ends the access token early: the next request gets 401 and the session refreshes once.
       mock.expireAccessTokens();
-      const page = await call<{ count: number }>(client, "suunto_list_workouts", { limit: 2 });
+      const page = await call<{ count: number }>(client, "suunto_list_workouts", { limit: 2, ...uncachedRange(12) });
       expect(page.count).toBe(2);
       expect(mock.count("/oauth/token") - tokenCalls).toBe(1);
       const after = readCache();
@@ -448,7 +460,7 @@ describe.skipIf(!enabled)("against a mock Suunto API", () => {
   describe("in process", () => {
     /** A client of the real MCP server (in process), signed in with a fresh refresh token. */
     async function inProcess(m: MockSuunto, logs: string[] = []): Promise<Client> {
-      const config = loadConfig({ ...m.env(), SUUNTO_REFRESH_TOKEN: m.issueTokens().refreshToken, SUUNTO_TIMEZONE: ZONE });
+      const config = loadConfig({ ...m.env(), SUUNTO_REFRESH_TOKEN: m.issueTokens().refreshToken, SUUNTO_TIMEZONE: ZONE, SUUNTO_CALLS_PER_MINUTE: "0" });
       const services = createServices(config, { log: (line) => void logs.push(line) });
       opened.push(services);
       const server = createMcpServer(config, services, (line) => void logs.push(line));
@@ -469,13 +481,13 @@ describe.skipIf(!enabled)("against a mock Suunto API", () => {
       const tokenCalls = mock.count("/oauth/token");
       // The minute limit: 429 with a Retry-After longer than this server waits.
       mock.failNext("/v3/workouts", 429, { statusCode: 429, message: "Rate limit is exceeded. Try again in 60 seconds." }, { "retry-after": "60" });
-      expect(await callError(client, "suunto_list_workouts", { limit: 5 })).toContain("Suunto's call limit for this service is reached (HTTP 429). Try again in 60 seconds.");
+      expect(await callError(client, "suunto_list_workouts", { limit: 5, ...uncachedRange(27) })).toContain("Suunto's call limit for this service is reached (HTTP 429). Try again in 60 seconds.");
       // The weekly quota: 403 with Azure's quota text.
       mock.failNext("/v3/workouts", 403, { statusCode: 403, message: "Out of call volume quota. Quota will be replenished in 2.03:04:05." });
-      expect(await callError(client, "suunto_list_workouts", { limit: 6 })).toMatch(/^Suunto's call limit for this service is reached \(HTTP 403\)\. Try again in \d+ (days|hours)\./);
+      expect(await callError(client, "suunto_list_workouts", { limit: 6, ...uncachedRange(28) })).toMatch(/^Suunto's call limit for this service is reached \(HTTP 403\)\. Try again in \d+ (days|hours)\./);
       // A call limit is never a sign-in problem.
       expect(mock.count("/oauth/token")).toBe(tokenCalls);
-      expect((await call<{ count: number }>(client, "suunto_list_workouts", { limit: 6 })).count).toBe(6);
+      expect((await call<{ count: number }>(client, "suunto_list_workouts", { limit: 6, ...uncachedRange(28) })).count).toBe(6);
     });
 
     it("says to sign in again when Suunto refuses the refresh token, and waits before trying again", async () => {
@@ -488,7 +500,8 @@ describe.skipIf(!enabled)("against a mock Suunto API", () => {
         other.revokeAll();
         other.expireAccessTokens();
         const text = await callError(client, "suunto_list_workouts");
-        expect(text).toContain("Your Suunto connection expired. Run suunto-mcp --login again");
+        // No token cache here: only a new SUUNTO_REFRESH_TOKEN and a restart help.
+        expect(text).toContain("Your Suunto connection expired. Set a new SUUNTO_REFRESH_TOKEN and restart the server");
         // During the cool-down, calls fail at once without asking Suunto again.
         const tokenCalls = other.count("/oauth/token");
         expect(await callError(client, "suunto_daily_activity", { from: addDays(todayInZone(ZONE), -1), to: todayInZone(ZONE) })).toContain("Your Suunto connection expired.");
@@ -503,7 +516,7 @@ describe.skipIf(!enabled)("against a mock Suunto API", () => {
           expect(text.includes(t)).toBe(false);
           expect(logs.join("\n").includes(t)).toBe(false);
         }
-        expect(logs.join("\n")).toContain("Run suunto-mcp --login again");
+        expect(logs.join("\n")).toContain("Set a new SUUNTO_REFRESH_TOKEN and restart the server");
         expect(logs.join("\n")).not.toMatch(/eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}/);
       } finally {
         await other.close();

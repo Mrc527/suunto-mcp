@@ -35,6 +35,7 @@ import {
   SAMPLE_NAMES,
   SUMMARY_EXTENSIONS,
   epochMs,
+  minMax,
   sleepTimes,
   timedSamples,
   toDaySummaries,
@@ -63,6 +64,7 @@ import type {
   SuuntoAccount,
   UnitChoice,
   UnitLabels,
+  WireDailyStatistic,
   WirePoiInput,
   WireRoute,
   WireSample,
@@ -95,11 +97,18 @@ export const SLEEP_MAX_DAYS = 92;
 export const SAMPLES_MAX_DAYS = 28;
 export const RECOVERY_MAX_DAYS = 28;
 export const RAW_MAX_DAYS = 2;
-/** Workouts read for a sport filter (or when the list order of Suunto is not newest first). */
+/** The most workouts a list reads (the newest of the range), for example for a sport filter. */
 export const LIST_SCAN_CAP = 1000;
+/** The most workouts suunto_workout_stats counts (the newest of the range). */
 export const STATS_CAP = 2000;
-/** Workouts per request when a whole range is read. */
+/** Workouts per request when a range is read. */
 export const WORKOUT_PAGE = 100;
+/** The first time window of a workout scan; later windows adapt to how many workouts the last one held. */
+export const SCAN_FIRST_WINDOW_MS = 60 * DAY_MS;
+/** The most Suunto requests of one workout scan. */
+export const SCAN_MAX_CALLS = 40;
+/** A full window this short is read with offsets instead of being split again (100 workouts in an hour cannot happen). */
+const SCAN_MIN_SPLIT_MS = HOUR_MS;
 /** The longest window the 247 endpoints accept (docs/suunto-api.md section 3.2). */
 export const WINDOW_MS = 28 * DAY_MS;
 export const MAX_FIT_BYTES = 8 * 1024 * 1024;
@@ -128,12 +137,15 @@ const dateOrTime = z
   .min(10, "Use a date YYYY-MM-DD or an ISO 8601 date-time")
   .max(40, "Use a date YYYY-MM-DD or an ISO 8601 date-time");
 const sportArg = z.string().trim().min(1).max(60);
+/**
+ * A workout key is 24 hex characters (docs/suunto-api.md, gotcha 13). Suunto answers HTTP 500 for
+ * any other key, so it is checked here, before a request is sent.
+ */
+export const WORKOUT_KEY = /^[0-9a-f]{24}$/i;
 const workoutKey = z
   .string()
   .trim()
-  .min(1)
-  .max(64)
-  .regex(/^[A-Za-z0-9_-]+$/, "A workout key has only letters, digits, - and _ (use workout_key from suunto_list_workouts)");
+  .regex(WORKOUT_KEY, "A workout key is 24 hex characters (0-9 and a-f), for example 5b190f5c52ce7b316acbd520. Use workout_key from suunto_list_workouts, not a name or a number");
 const routeId = z
   .string()
   .trim()
@@ -401,6 +413,8 @@ export interface CheckResult {
   ok: boolean;
   error?: string;
   workouts_last_30_days?: number;
+  /** True when the count is the most one request reads (100): there may be more. */
+  workouts_last_30_days_capped?: boolean;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -416,10 +430,30 @@ export interface GpxInfo {
   points: number;
 }
 
+// Every scan of a GPX text below is linear in its length: the text can be 5 MB and is checked on
+// the request thread. Patterns never let a repeat run over "<" (so an unclosed tag cannot make
+// the next match attempt read the rest of the text again), and an element's end is found with one
+// forward search from its start, never with a lazy [\s\S]*? that is tried again at every opening.
+
+/**
+ * The text of an XML element: CDATA sections as they are, other tags removed, the five XML
+ * entities and decimal character references decoded.
+ */
 function decodeXmlText(text: string): string {
-  return text
-    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
-    .replace(/<[^>]*>/g, "")
+  let plain = "";
+  let i = 0;
+  while (i < text.length) {
+    const open = text.indexOf("<![CDATA[", i);
+    const close = open < 0 ? -1 : text.indexOf("]]>", open + 9);
+    if (close < 0) {
+      plain += text.slice(i);
+      break;
+    }
+    plain += text.slice(i, open) + text.slice(open + 9, close);
+    i = close + 3;
+  }
+  return plain
+    .replace(/<[^<>]*>/g, "")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"')
@@ -429,27 +463,75 @@ function decodeXmlText(text: string): string {
     .trim();
 }
 
-const NAME_TAG = /<(?:[\w.-]+:)?name\b[^>]*>([\s\S]*?)<\/(?:[\w.-]+:)?name>/;
+/** The content of the first `tag` element (any namespace prefix) in `xml`, or undefined. */
+function firstElementText(xml: string, tag: string): string | undefined {
+  const open = new RegExp(`<(?:[\\w.-]+:)?${tag}(?:\\s[^<>]*)?>`).exec(xml);
+  if (!open) return undefined;
+  const from = open.index + open[0].length;
+  const close = new RegExp(`</(?:[\\w.-]+:)?${tag}\\s*>`, "g");
+  close.lastIndex = from;
+  const end = close.exec(xml);
+  return end ? xml.slice(from, end.index) : undefined;
+}
+
+/** The decoded text of the first <name> in `xml`, at most 200 characters, or undefined. */
+function nameIn(xml: string): string | undefined {
+  const raw = firstElementText(xml, "name");
+  const name = raw === undefined ? "" : decodeXmlText(raw);
+  return name ? name.slice(0, 200) : undefined;
+}
 
 /** The name of the first <rte>/<trk> (before its points), else of <metadata>. */
 function gpxName(gpx: string): string | undefined {
-  const container = gpx.match(/<(?:[\w.-]+:)?(?:rte|trk)\b[^>]*>/);
-  if (container?.index !== undefined) {
-    const after = gpx.slice(container.index + container[0].length);
-    const head = after.split(/<(?:[\w.-]+:)?(?:rtept|trkseg|trkpt)\b/)[0] ?? "";
-    const name = head.match(NAME_TAG)?.[1];
-    if (name && decodeXmlText(name)) return decodeXmlText(name).slice(0, 200);
+  const container = /<(?:[\w.-]+:)?(?:rte|trk)\b[^<>]*>/.exec(gpx);
+  if (container) {
+    const from = container.index + container[0].length;
+    const firstPoint = /<(?:[\w.-]+:)?(?:rtept|trkseg|trkpt)\b/g;
+    firstPoint.lastIndex = from;
+    const name = nameIn(gpx.slice(from, firstPoint.exec(gpx)?.index ?? gpx.length));
+    if (name) return name;
   }
-  const metadata = gpx.match(/<(?:[\w.-]+:)?metadata\b[\s\S]*?<\/(?:[\w.-]+:)?metadata>/)?.[0];
-  const name = metadata?.match(NAME_TAG)?.[1];
-  return name && decodeXmlText(name) ? decodeXmlText(name).slice(0, 200) : undefined;
+  const metadata = firstElementText(gpx, "metadata");
+  return metadata === undefined ? undefined : nameIn(metadata);
+}
+
+/** The value of an attribute (lat="46.5" or lat='46.5') in the attribute text of one tag. */
+function attributeValue(attrs: string, name: string): string | undefined {
+  const m = new RegExp(`(?<![\\w.:-])${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`).exec(attrs);
+  return m ? (m[1] ?? m[2]) : undefined;
+}
+
+/** A coordinate attribute as a number; NaN when it is missing or empty. */
+function coordinate(attrs: string, name: string): number {
+  const value = attributeValue(attrs, name)?.trim();
+  return value ? Number(value) : Number.NaN;
+}
+
+/** Declared encodings whose bytes are the same as UTF-8 for a text that is plain ASCII. */
+const ASCII_COMPATIBLE = /^(?:us-?ascii|ascii|iso-8859-\d+|latin-?1|windows-125\d|cp125\d)$/i;
+
+/**
+ * The GPX goes to Suunto as UTF-8 bytes, but Suunto's parser reads them in the encoding the XML
+ * declaration names. Any other encoding would garble names (and UTF-7 could hide a DOCTYPE), so
+ * only UTF-8 is accepted, or a single-byte encoding when the whole text is ASCII.
+ */
+function checkEncoding(gpx: string): void {
+  const head = gpx.replace(/^﻿/, "").slice(0, 1024);
+  const declaration = /^\s*<\?xml\s([^<>]*?)\?>/i.exec(head);
+  const encoding = declaration ? /\bencoding\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(declaration[1]!) : null;
+  const name = (encoding?.[1] ?? encoding?.[2])?.trim();
+  if (!name || /^utf-?8$/i.test(name)) return;
+  if (ASCII_COMPATIBLE.test(name) && /^[\x00-\x7f]*$/.test(gpx)) return;
+  throw new UserFacingError(
+    `The GPX declares encoding="${name.slice(0, 40)}", but it is sent to Suunto as UTF-8 text. Change the declaration to encoding="UTF-8" (keep the text as it is) and try again.`,
+  );
 }
 
 /**
  * Check a GPX file before it is sent to Suunto: at most 5 MB, no DOCTYPE or ENTITY (no entity
- * expansion, ever), root element <gpx>, at least one <rte> or <trk>, at least 2 route or track
- * points, every point with a latitude and longitude in range. Throws a UserFacingError that says
- * what to fix.
+ * expansion, ever), UTF-8 (see checkEncoding), root element <gpx>, at least one <rte> or <trk>, at
+ * least 2 route or track points, every point with a latitude and longitude in range. Throws a
+ * UserFacingError that says what to fix. Linear in the length of the text.
  */
 export function checkGpx(gpx: string): GpxInfo {
   const bytes = Buffer.byteLength(gpx, "utf8");
@@ -459,19 +541,22 @@ export function checkGpx(gpx: string): GpxInfo {
   if (/<!DOCTYPE/i.test(gpx) || /<!ENTITY/i.test(gpx)) {
     throw new UserFacingError("The GPX has a <!DOCTYPE> or <!ENTITY> declaration. These are not allowed: remove them and send plain GPX 1.1.");
   }
+  checkEncoding(gpx);
+  // Anchored at the start, and the repeat ends at the first part that is not a complete
+  // declaration or comment, so each lazy scan runs at most once.
   const body = gpx.replace(/^﻿/, "").replace(/^\s*(?:(?:<\?[\s\S]*?\?>|<!--[\s\S]*?-->)\s*)*/, "");
   const root = body.match(/^<(?:[A-Za-z_][\w.-]*:)?([A-Za-z_][\w.-]*)[\s>/]/);
   if (!root || root[1]!.toLowerCase() !== "gpx") {
     throw new UserFacingError("This is not a GPX file: the root element must be <gpx> (GPX 1.1 text, not a file name or a link).");
   }
-  const routes = (gpx.match(/<(?:[\w.-]+:)?(?:rte|trk)\b[\s>/]/g) ?? []).length;
+  const routes = (gpx.match(/<(?:[\w.-]+:)?(?:rte|trk)[\s>/]/g) ?? []).length;
   if (!routes) throw new UserFacingError("The GPX has no <rte> or <trk>. Suunto imports routes from <rte> or <trk> elements; waypoints (<wpt>) alone are not a route.");
   let points = 0;
-  for (const m of gpx.matchAll(/<(?:[\w.-]+:)?(rtept|trkpt)\b([^>]*)>/g)) {
+  for (const m of gpx.matchAll(/<(?:[\w.-]+:)?(rtept|trkpt)\b([^<>]*)>/g)) {
     points++;
     const attrs = m[2] ?? "";
-    const lat = Number(attrs.match(/\blat\s*=\s*["']\s*([^"']*?)\s*["']/)?.[1] ?? Number.NaN);
-    const lon = Number(attrs.match(/\blon\s*=\s*["']\s*([^"']*?)\s*["']/)?.[1] ?? Number.NaN);
+    const lat = coordinate(attrs, "lat");
+    const lon = coordinate(attrs, "lon");
     if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) {
       throw new UserFacingError(
         `Point ${points} (<${m[1]}>) of the GPX has no valid position: it needs lat between -90 and 90 and lon between -180 and 180, for example <${m[1]} lat="46.5" lon="7.9">.`,
@@ -526,37 +611,6 @@ function workoutTime(w: WireWorkout): number {
 /** Newest first; ties by key so pages stay stable. */
 function newestFirst(list: readonly WireWorkout[]): WireWorkout[] {
   return [...list].sort((a, b) => workoutTime(b) - workoutTime(a) || (workoutKeyOf(a) ?? "").localeCompare(workoutKeyOf(b) ?? ""));
-}
-
-/** The order of a page: "desc" (newest first), "asc" or "unknown" (too few or mixed). */
-function orderOf(list: readonly WireWorkout[]): "desc" | "asc" | "unknown" {
-  let up = false;
-  let down = false;
-  let prev: number | undefined;
-  for (const w of list) {
-    const t = workoutStartMs(w);
-    if (t === undefined) continue;
-    if (prev !== undefined) {
-      if (t > prev) up = true;
-      else if (t < prev) down = true;
-    }
-    prev = t;
-  }
-  if (down && !up) return "desc";
-  if (up && !down) return "asc";
-  return "unknown";
-}
-
-function dedupeWorkouts(list: readonly WireWorkout[]): WireWorkout[] {
-  const seen = new Set<string>();
-  const out: WireWorkout[] = [];
-  for (const w of list) {
-    const key = workoutKeyOf(w);
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    out.push(w);
-  }
-  return out;
 }
 
 class StatsAccumulator {
@@ -628,6 +682,50 @@ class StatsAccumulator {
 
 function mb(bytes: number): string {
   return (bytes / 1024 / 1024).toFixed(1);
+}
+
+/** Add items one by one: push(...items) passes every item as an argument and overflows the stack for long wire arrays. */
+function append<T>(target: T[], items: readonly T[]): void {
+  for (const item of items) target.push(item);
+}
+
+/** True for Suunto's call limit (the HTTP layer and the call limiter give it the kind "rate_limit"). */
+function isRateLimit(error: unknown): boolean {
+  return typeof error === "object" && error !== null && (error as { kind?: unknown }).kind === "rate_limit";
+}
+
+/** Why a workout scan stopped before it reached the start of the range. */
+type ScanStop = "cap" | "calls" | "rate_limit";
+
+interface ScanOptions {
+  /** Stop after the window in which at least this many workouts were read. */
+  cap: number;
+  /** Stop as soon as this many matching workouts are known (a list page and one more); default: read all. */
+  want?: number;
+  /** The workouts that count for `want` (default: all). */
+  match?: (w: WireWorkout) => boolean;
+}
+
+interface ScanResult {
+  /** Every workout that started in [readFrom, until), newest first. */
+  workouts: WireWorkout[];
+  /** The start of the part of the range that was read completely; `since` when all of it was. */
+  readFrom: number;
+  stopped?: ScanStop;
+}
+
+/**
+ * Windows are sized to hold about as many workouts as are still needed: at least 70, so that a
+ * window usually fits in one request when a few are needed, and at most 290 (three requests;
+ * just under a multiple of 100, since a window of n workouts takes floor(n / 100) + 1 requests)
+ * when many are needed.
+ */
+const SCAN_TARGET_MIN = 70;
+const SCAN_TARGET_MAX = 290;
+
+/** The length of the next window from the length and the workout count of the last one (at most 8 times longer). */
+function nextSpan(windowMs: number, count: number, target: number): number {
+  return Math.max(SCAN_MIN_SPLIT_MS, Math.floor((windowMs * target) / Math.max(count, target / 8)));
 }
 
 function average(values: readonly number[]): number | undefined {
@@ -728,7 +826,7 @@ export class ActivityService {
     const end = Math.min(toMs, this.now());
     const out: WireSample<T>[] = [];
     for (let start = fromMs; start < end; start += WINDOW_MS) {
-      out.push(...(await call(start, Math.min(start + WINDOW_MS, end) - 1)));
+      append(out, await call(start, Math.min(start + WINDOW_MS, end) - 1));
     }
     return out;
   }
@@ -756,20 +854,79 @@ export class ActivityService {
   // Workouts
   // -------------------------------------------------------------------------------------------
 
-  /** Every workout that started in [since, until), at most `cap`, in pages of 100. */
-  private async scanWorkouts(since: number, until: number, cap: number): Promise<{ workouts: WireWorkout[]; capped: boolean }> {
-    const all: WireWorkout[] = [];
-    let capped = true;
-    for (let offset = 0; offset < cap; offset += WORKOUT_PAGE) {
-      const limit = Math.min(WORKOUT_PAGE, cap - offset);
-      const page = (await this.backend.listWorkouts({ since, until, limit, offset, byModificationTime: false })).payload ?? [];
-      all.push(...page);
-      if (page.length < limit) {
-        capped = false;
-        break;
+  /**
+   * Reads the workouts that started in [since, until), newest first, without trusting the order
+   * of Suunto's list (it is not documented, and it may be the modification time).
+   *
+   * The range is walked backward from `until` in time windows. Each window is asked with
+   * filter-by-modification-time=false and limit 100. A page shorter than 100 holds the whole
+   * window. A full page means the window may hold more. When at most about 100 more workouts are
+   * needed (a list), the window is split and its newest quarter is asked first; when more are
+   * needed (statistics, or a rare sport), the window is read to its end with offsets. Both are
+   * right in any sort order, because only whole windows are kept and the order is made here. When
+   * a window is complete, every workout not read yet is older than every workout read, so the walk
+   * stops as soon as `want` matching workouts are known (a list page and one more), or after the
+   * window that reaches `cap` workouts. The first window is 60 days (or the whole range when
+   * shorter), and each next one is sized from the count of the last, so a window usually needs
+   * one request, or a few when many workouts are needed. Pacing is done by the HTTP layer; when
+   * Suunto's call limit is reached after some windows were read, the scan returns those windows
+   * (`stopped` "rate_limit"). A window left unfinished is never used: its workouts may not be its
+   * newest.
+   */
+  private async scanWorkouts(since: number, until: number, opts: ScanOptions): Promise<ScanResult> {
+    const found: WireWorkout[] = [];
+    const seen = new Set<string>();
+    let matched = 0;
+    let calls = 0;
+    let end = until;
+    let span = Math.min(until - since, SCAN_FIRST_WINDOW_MS);
+    /** About how many workouts the scan still has to read (never much more than the cap allows). */
+    const target = (): number => {
+      const rate = found.length ? Math.max(matched / found.length, 0.05) : 1;
+      const needed = opts.want === undefined ? SCAN_TARGET_MAX : Math.ceil((opts.want - matched) / rate);
+      return Math.max(SCAN_TARGET_MIN, Math.min(SCAN_TARGET_MAX, needed, opts.cap - found.length));
+    };
+    const page = async (start: number, stop: number, offset: number): Promise<WireWorkout[]> => {
+      calls++;
+      return (await this.backend.listWorkouts({ since: start, until: stop, limit: WORKOUT_PAGE, offset, byModificationTime: false })).payload ?? [];
+    };
+    const result = (stopped?: ScanStop): ScanResult => ({ workouts: newestFirst(found), readFrom: end, ...(stopped ? { stopped } : {}) });
+    try {
+      while (end > since) {
+        if (calls >= SCAN_MAX_CALLS) return result("calls");
+        const start = Math.max(since, end - span);
+        const first = await page(start, end, 0);
+        if (first.length >= WORKOUT_PAGE && target() <= WORKOUT_PAGE && end - start > SCAN_MIN_SPLIT_MS) {
+          // The next window still ends at `end`, but holds only the newest quarter of the past part
+          // (the range often ends at midnight, and no workout starts in the future).
+          const past = Math.min(end, this.now());
+          span = end - past + Math.max(SCAN_MIN_SPLIT_MS, Math.floor((past - start) / 4));
+          continue;
+        }
+        const window: WireWorkout[] = [];
+        append(window, first);
+        for (let last = first, offset = WORKOUT_PAGE; last.length >= WORKOUT_PAGE; offset += WORKOUT_PAGE) {
+          if (calls >= SCAN_MAX_CALLS) return result("calls");
+          last = await page(start, end, offset);
+          append(window, last);
+        }
+        for (const w of this.inRange(window, start, end)) {
+          const key = workoutKeyOf(w);
+          if (!key || seen.has(key)) continue;
+          seen.add(key);
+          found.push(w);
+          if (!opts.match || opts.match(w)) matched++;
+        }
+        span = nextSpan(end - start, window.length, target());
+        end = start;
+        if (opts.want !== undefined && matched >= opts.want) break;
+        if (found.length >= opts.cap && end > since) return result("cap");
       }
+    } catch (error) {
+      if (end < until && isRateLimit(error)) return result("rate_limit");
+      throw error;
     }
-    return { workouts: this.inRange(dedupeWorkouts(all), since, until), capped };
+    return result();
   }
 
   /** Suunto filters on the start time already; this keeps a strange answer from leaking in. */
@@ -780,13 +937,26 @@ export class ActivityService {
     });
   }
 
+  /** What a scan that stopped early left out, for the answer's note; "" when it was not cut short. */
+  private scanGap(scan: ScanResult): string {
+    const from = formatInZone(new Date(scan.readFrom), this.opts.timeZone);
+    switch (scan.stopped) {
+      case "cap":
+        return `Only the newest ${scan.workouts.length} workouts of this range were read (back to ${from}), so older workouts are missing.`;
+      case "calls":
+        return `This range needs too many Suunto requests, so only the workouts back to ${from} were read and older ones are missing.`;
+      case "rate_limit":
+        return `Suunto's call limit was reached, so only the workouts back to ${from} were read and older ones are missing. Try again in a minute.`;
+      default:
+        return "";
+    }
+  }
+
   /**
-   * suunto_list_workouts. The order of Suunto's list is not documented. Without a sport filter
-   * one page is read (one more workout than asked, to know whether there is a next page): when
-   * that page is newest first it is used as it is. A short last page tells the total, so one more
-   * request finds the oldest workouts when the list is oldest first. A full page that is oldest
-   * first (or of unknown order) means the whole range is read (at most 1000 workouts) and sorted
-   * here, newest first. With a sport filter the whole range is always read, filtered and sorted.
+   * suunto_list_workouts: the newest first, by start time. scanWorkouts reads the range backward
+   * in time windows until offset + limit + 1 matching workouts are known (one more than the page,
+   * to know whether there is a next page), so a short list usually costs one request, also with a
+   * sport filter. At most the newest 1000 workouts are read.
    */
   async listWorkouts(args: ListWorkoutsArgs = {}): Promise<ListWorkoutsResult> {
     const a = parse(schemas.listWorkouts, args);
@@ -796,64 +966,33 @@ export class ActivityService {
     const limit = a.limit ?? 20;
     const offset = a.offset ?? 0;
     const sportIds = a.sport ? sportFilterIds(a.sport) : undefined;
-    const head: Pick<ListWorkoutsResult, "from" | "to" | "sport" | "sports_matched"> = { from: r.from, to: r.to };
-    if (a.sport && sportIds) {
-      head.sport = a.sport;
-      head.sports_matched = [...new Set(sportIds.map((id) => activityName(id)))];
-    }
-    const finish = (workouts: WireWorkout[], extra: Pick<ListWorkoutsResult, "total_in_range" | "next_offset" | "note">): ListWorkoutsResult => {
-      const summaries = workouts.map((w) => toWorkoutSummary(w, units, tz));
-      return {
-        ...head,
-        ...(extra.total_in_range !== undefined ? { total_in_range: extra.total_in_range } : {}),
-        count: summaries.length,
-        workouts: summaries,
-        ...(extra.next_offset !== undefined ? { next_offset: extra.next_offset } : {}),
-        ...(extra.note ? { note: extra.note } : {}),
-        units: U.unitLabels(units),
-      };
-    };
-
-    if (!sportIds) {
-      const want = Math.min(limit + 1, WORKOUT_PAGE);
-      const raw = (await this.backend.listWorkouts({ since: r.fromMs, until: r.toMs, limit: want, offset, byModificationTime: false })).payload ?? [];
-      const page = this.inRange(dedupeWorkouts(raw), r.fromMs, r.toMs);
-      const order = orderOf(raw);
-      if (raw.length < want) {
-        // The last page: the range holds offset + raw.length workouts, whatever the order.
-        const total = offset + raw.length;
-        if (offset === 0 || order === "desc" || !raw.length) {
-          return finish(newestFirst(page).slice(0, limit), raw.length ? { total_in_range: total } : {});
-        }
-        // Oldest first (or unknown): the wanted workouts are the oldest raw.length of the range.
-        // In either order they are in this page or in the first raw.length of the list.
-        const start = (await this.backend.listWorkouts({ since: r.fromMs, until: r.toMs, limit: raw.length, offset: 0, byModificationTime: false })).payload ?? [];
-        const oldest = newestFirst(this.inRange(dedupeWorkouts([...raw, ...start]), r.fromMs, r.toMs)).slice(-raw.length);
-        return finish(oldest.slice(0, limit), { total_in_range: total });
-      }
-      if (order === "desc") {
-        return finish(newestFirst(page).slice(0, limit), { next_offset: offset + limit });
-      }
-    }
-
-    const { workouts, capped } = await this.scanWorkouts(r.fromMs, r.toMs, LIST_SCAN_CAP);
     const ids = sportIds ? new Set(sportIds) : undefined;
-    const matching = newestFirst(ids ? workouts.filter((w) => ids.has(U.num(w.activityId) ?? -1)) : workouts);
+    const match = ids ? (w: WireWorkout) => ids.has(U.num(w.activityId) ?? -1) : undefined;
+    const scan = await this.scanWorkouts(r.fromMs, r.toMs, { cap: LIST_SCAN_CAP, want: offset + limit + 1, ...(match ? { match } : {}) });
+    const matching = match ? scan.workouts.filter(match) : scan.workouts;
     const shown = matching.slice(offset, offset + limit);
-    const extra: Pick<ListWorkoutsResult, "total_in_range" | "next_offset" | "note"> = {};
-    if (!capped) extra.total_in_range = matching.length;
-    if (offset + shown.length < matching.length) extra.next_offset = offset + shown.length;
-    if (capped) {
-      extra.note = `This range has more than ${LIST_SCAN_CAP} workouts and only ${LIST_SCAN_CAP} were read${ids ? " for the sport filter" : ""}, so some may be missing. Use a shorter range (from, to).`;
-    }
-    return finish(shown, extra);
+    const summaries = shown.map((w) => toWorkoutSummary(w, units, tz));
+    const gap = this.scanGap(scan);
+    return {
+      from: r.from,
+      to: r.to,
+      ...(a.sport && sportIds ? { sport: a.sport, sports_matched: [...new Set(sportIds.map((id) => activityName(id)))] } : {}),
+      ...(scan.readFrom <= r.fromMs ? { total_in_range: matching.length } : {}),
+      count: summaries.length,
+      workouts: summaries,
+      ...(matching.length > offset + limit ? { next_offset: offset + limit } : {}),
+      ...(gap ? { note: `${gap} For older workouts, ask again with to set to ${formatInZone(new Date(scan.readFrom), tz)}.` } : {}),
+      units: U.unitLabels(units),
+    };
   }
 
   /** suunto_get_workout: the summary extensions and laps always; streams when asked for. */
   async getWorkout(args: GetWorkoutArgs): Promise<Workout> {
     const a = parse(schemas.getWorkout, args);
     const units = this.unitsOf(a.units);
-    const samples = [...new Set(a.samples ?? [])] as SampleName[];
+    // In one fixed order, so the same streams asked in another order are the same request.
+    const wanted = new Set<SampleName>(a.samples ?? []);
+    const samples = SAMPLE_NAMES.filter((name) => wanted.has(name));
     const extensions = [...new Set([...SUMMARY_EXTENSIONS, ...LAP_EXTENSIONS, ...samples.map((s) => SAMPLE_EXTENSIONS[s])])];
     const wire = await this.backend.getWorkout(a.workout_key, extensions);
     const workout = toWorkout(wire, units, this.opts.timeZone, { samples, maxPoints: a.max_points ?? 200 });
@@ -861,7 +1000,10 @@ export class ActivityService {
     return workout;
   }
 
-  /** suunto_workout_stats: totals over at most 2000 workouts, optionally per week, month, year or sport. */
+  /**
+   * suunto_workout_stats: totals over the newest 2000 workouts of the range at most, optionally
+   * per week, month, year or sport (scanWorkouts reads whole time windows, newest first).
+   */
   async workoutStats(args: WorkoutStatsArgs = {}): Promise<StatsResult> {
     const a = parse(schemas.workoutStats, args);
     const units = this.unitsOf(a.units);
@@ -869,11 +1011,13 @@ export class ActivityService {
     const r = this.range(a.from, a.to, STATS_DEFAULT_DAYS);
     const groupBy: StatsGroupBy = a.group_by ?? "none";
     const ids = a.sport ? new Set(sportFilterIds(a.sport)) : undefined;
-    const { workouts, capped } = await this.scanWorkouts(r.fromMs, r.toMs, STATS_CAP);
-    const chosen = ids ? workouts.filter((w) => ids.has(U.num(w.activityId) ?? -1)) : workouts;
+    const scan = await this.scanWorkouts(r.fromMs, r.toMs, { cap: STATS_CAP });
+    // Newest first, so the cap keeps the newest workouts.
+    const counted = scan.stopped === "cap" ? scan.workouts.slice(0, STATS_CAP) : scan.workouts;
+    const chosen = ids ? counted.filter((w) => ids.has(U.num(w.activityId) ?? -1)) : counted;
     const all = new StatsAccumulator();
     const groups = new Map<string, StatsAccumulator>();
-    for (const w of newestFirst(chosen).reverse()) {
+    for (const w of [...chosen].reverse()) {
       const s = toWorkoutSummary(w, units, tz);
       all.add(w, s);
       if (groupBy === "none") continue;
@@ -894,7 +1038,13 @@ export class ActivityService {
       list.sort((x, y) => (groupBy === "sport" ? y.seconds - x.seconds || x.key.localeCompare(y.key) : x.key.localeCompare(y.key)));
       result.groups = list.map(({ seconds: _s, ...g }) => g);
     }
-    if (capped) result.note = `More than ${STATS_CAP} workouts are in this range; only ${STATS_CAP} were counted. Use a shorter range (from, to).`;
+    if (scan.stopped === "cap") {
+      const oldest = counted[counted.length - 1];
+      const from = oldest ? formatInZone(new Date(workoutTime(oldest)), tz) : formatInZone(new Date(scan.readFrom), tz);
+      result.note = `More than ${STATS_CAP} workouts are in this range; only the newest ${counted.length} were counted (back to ${from}). Use a shorter range (from, to).`;
+    } else if (scan.stopped) {
+      result.note = `${this.scanGap(scan)} Use a shorter range (from, to).`;
+    }
     return { ...result, units: U.unitLabels(units) };
   }
 
@@ -928,13 +1078,13 @@ export class ActivityService {
     const r = this.range(a.from, a.to, DAILY_MAX_DAYS, DAILY_MAX_DAYS, "suunto_daily_activity");
     const days: DayStart[] = datesBetween(r.fromDate!, r.toDate!).map((date) => ({ date, ms: startOfDay(date, tz).getTime() }));
     const now = this.now();
-    const stats = [];
+    const stats: WireDailyStatistic[] = [];
     for (const group of this.dayGroups(days)) {
       const first = group[0]!;
       if (first.ms > now) break;
       const last = group[group.length - 1]!;
       const end = startOfDay(addDays(last.date, 1), tz).getTime();
-      stats.push(...(await this.backend.dailyStatistics(formatUtcNoOffset(first.ms), formatUtcNoOffset(end - 1000))));
+      append(stats, await this.backend.dailyStatistics(formatUtcNoOffset(first.ms), formatUtcNoOffset(end - 1000)));
     }
     const rows = toDaySummaries(stats, days, tz);
     const withData = rows.filter((d) => d.steps !== null || d.energy_kcal !== null);
@@ -1042,11 +1192,12 @@ export class ActivityService {
       .filter((s) => s.ms >= r.fromMs && s.ms < r.toMs)
       .map((s) => U.num(s.entry.Balance))
       .filter((v): v is number => v !== undefined);
-    if (balances.length) {
+    const span = minMax(balances);
+    if (span) {
       result.summary = {
-        balance_pct_min: U.percent(Math.min(...balances)),
+        balance_pct_min: U.percent(span.min),
         balance_pct_avg: U.percent(average(balances)!),
-        balance_pct_max: U.percent(Math.max(...balances)),
+        balance_pct_max: U.percent(span.max),
         samples: balances.length,
       };
     }
@@ -1070,7 +1221,7 @@ export class ActivityService {
     let lastFull = false;
     for (let page = firstPage; page <= lastPage; page++) {
       const got = await this.backend.listRoutes({ page, size, sort: "desc" });
-      items.push(...got);
+      append(items, got);
       lastFull = got.length >= size;
       if (!lastFull) break;
     }
@@ -1190,12 +1341,17 @@ export class ActivityService {
     return this.backend.account();
   }
 
-  /** A test call: the workouts of the last 30 days (at most 100). Never throws. */
+  /**
+   * A test call: the workouts of the last 30 local days, at most 100 (then capped is true). It is
+   * the same request as the first one of suunto_list_workouts without arguments, so the two share
+   * one cache entry. Never throws.
+   */
   async check(): Promise<CheckResult> {
     try {
-      const until = this.now();
-      const page = await this.backend.listWorkouts({ since: until - 30 * DAY_MS, until, limit: 100, offset: 0, byModificationTime: false });
-      return { ok: true, workouts_last_30_days: (page.payload ?? []).length };
+      const r = this.range(undefined, undefined, LIST_DEFAULT_DAYS);
+      const page = await this.backend.listWorkouts({ since: r.fromMs, until: r.toMs, limit: WORKOUT_PAGE, offset: 0, byModificationTime: false });
+      const count = (page.payload ?? []).length;
+      return { ok: true, workouts_last_30_days: count, ...(count >= WORKOUT_PAGE ? { workouts_last_30_days_capped: true } : {}) };
     } catch (error) {
       return { ok: false, error: error instanceof UserFacingError ? error.message : describeError(error) };
     }

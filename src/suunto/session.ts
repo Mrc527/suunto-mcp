@@ -13,7 +13,8 @@
  *   after an invalid_grant, the session asks sink.load() for the stored tokens. When they hold
  *   another refresh token of the same app, the session takes them over (with their access token
  *   while it is still valid) instead of using its old refresh token. After an invalid_grant it
- *   tries the stored refresh token once before it gives up;
+ *   tries the stored refresh token once before it gives up. Stored tokens that are older than
+ *   the session's own (their access token expires earlier) are never taken;
  * - when Suunto refuses the refresh token (invalid_grant), sink.invalid() is called and every call
  *   fails with "Your Suunto connection expired. Connect Suunto again." without a request. Suunto
  *   has sent false invalid_grant answers during outages, so after a cool-down (10 minutes) the
@@ -39,8 +40,9 @@ export interface TokenSink {
   invalid(reason: string): void;
   /**
    * The tokens stored now (they may be newer than the session's: another process or session
-   * refreshed, or the user connected again), or undefined. Called right before a refresh and
-   * after an invalid_grant, so it must be cheap and must not throw.
+   * refreshed, or the user connected again), or undefined. Called right before a refresh, after
+   * an invalid_grant and on each call during the cool-down, so it must be cheap. A throw counts
+   * as undefined.
    */
   load?(): StoredSuuntoTokens | undefined;
 }

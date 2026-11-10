@@ -7,7 +7,8 @@
  * time, per backend instance (one per user), in an LRU with at most 200 entries and 20 MB:
  *
  * - workout lists: 2 minutes;
- * - a workout by key, FIT files: 30 minutes (they rarely change);
+ * - a workout by key, FIT files: 30 minutes (they rarely change); a FIT file over 8 MB is never
+ *   kept, since suunto_export_workout_fit refuses it anyway;
  * - 24/7 samples, sleep, recovery and daily statistics: 30 minutes for windows that end before
  *   the current hour, 2 minutes otherwise (new data arrives after every sync);
  * - routes, route GPX and points of interest: 2 minutes.
@@ -50,6 +51,10 @@ export const CACHE_MAX_BYTES = 20 * 1024 * 1024;
 export const SHORT_TTL_MS = 2 * 60_000;
 /** A workout by key, FIT files, and 24/7 windows that ended before the current hour. */
 export const LONG_TTL_MS = 30 * 60_000;
+/** Binary answers larger than this are never kept: the FIT export tool refuses them (MAX_FIT_BYTES in service.ts). */
+export const CACHE_MAX_BINARY_BYTES = 8 * 1024 * 1024;
+/** A 24/7 window that ends at most this long before "now" ends "now" (an open window). */
+export const OPEN_WINDOW_SLACK_MS = 5_000;
 
 const HOUR_MS = 3_600_000;
 
@@ -61,8 +66,6 @@ interface Entry {
   bytes: number;
   expiresAt: number;
   group: Group;
-  /** For 24/7 windows that reach into the current hour: the end of the window that was fetched. */
-  openTo?: number;
 }
 
 /** A copy that shares nothing with the cached value (a Buffer stays a Buffer). */
@@ -140,7 +143,9 @@ export class CachedBackend implements ActivityBackend {
   }
 
   getWorkout(key: string, extensions: readonly string[]): Promise<WireWorkout> {
-    return this.cached(`getWorkout|${key}|${extensions.join(",")}`, "workouts", LONG_TTL_MS, () => this.inner.getWorkout(key, extensions));
+    // The same extensions in another order are the same request.
+    const names = [...new Set(extensions)].sort().join(",");
+    return this.cached(`getWorkout|${key}|${names}`, "workouts", LONG_TTL_MS, () => this.inner.getWorkout(key, extensions));
   }
 
   exportFit(key: string): Promise<Buffer> {
@@ -223,42 +228,47 @@ export class CachedBackend implements ActivityBackend {
   }
 
   /**
-   * A 24/7 window. Windows that ended before the current hour are kept 30 minutes under their
-   * exact bounds. A window that reaches into the current hour usually ends "now", which differs
-   * on every call: it is kept 2 minutes under its start only, and serves a later call with the
-   * same start and the same or a later end (missing at most the last 2 minutes, like any entry).
+   * A 24/7 window. A window that ended before the current hour is kept 30 minutes under its exact
+   * bounds; one that ended earlier in the current hour 2 minutes, also under its exact bounds.
+   * Only a window that ends "now" (within a few seconds; the service asks up to now - 1 ms, which
+   * differs on every call) is kept under its start alone, for 2 minutes. That entry, and a request
+   * for it still running, serve a later call with the same start that also ends now: they miss
+   * only what arrived since they were fetched, like any entry. A window with an earlier end never
+   * serves a call with a later end, and never replaces the open entry.
    */
   private window<T>(method: string, fromMs: number, toMs: number, load: () => Promise<T[]>): Promise<T[]> {
     if (toMs <= this.hourStart()) return this.cached(`${method}|${fromMs}|${toMs}`, "samples", LONG_TTL_MS, load);
-    return this.cached(`${method}|${fromMs}|open`, "samples", SHORT_TTL_MS, load, toMs);
+    if (toMs < this.now() - OPEN_WINDOW_SLACK_MS) return this.cached(`${method}|${fromMs}|${toMs}`, "samples", SHORT_TTL_MS, load);
+    return this.cached(`${method}|${fromMs}|open`, "samples", SHORT_TTL_MS, load);
   }
 
-  private async cached<T>(key: string, group: Group, ttlMs: number, load: () => Promise<T>, openTo?: number): Promise<T> {
-    const hit = this.lookup(key, openTo);
+  private async cached<T>(key: string, group: Group, ttlMs: number, load: () => Promise<T>): Promise<T> {
+    const hit = this.lookup(key);
     if (hit) return copy(hit.value as T);
 
-    // Identical calls at the same time share one request (open windows only with the same end).
-    const flightKey = openTo === undefined ? key : `${key}|${openTo}`;
-    const running = this.inflight.get(flightKey) as Promise<T> | undefined;
+    // Identical calls at the same time share one request.
+    const running = this.inflight.get(key) as Promise<T> | undefined;
     if (running) return copy(await running);
 
     const generation = this.generation[group];
     const promise = load();
-    this.inflight.set(flightKey, promise);
+    this.inflight.set(key, promise);
     try {
       const value = await promise;
       // A write cleared this group while the call ran: the answer may be from before it.
-      if (this.generation[group] === generation) this.store(key, { value, bytes: sizeOf(value), expiresAt: this.now() + ttlMs, group, ...(openTo !== undefined ? { openTo } : {}) });
+      const current = this.generation[group] === generation;
+      const tooBig = Buffer.isBuffer(value) && value.length > CACHE_MAX_BINARY_BYTES;
+      if (current && !tooBig) this.store(key, { value, bytes: sizeOf(value), expiresAt: this.now() + ttlMs, group });
       return copy(value);
     } finally {
-      if (this.inflight.get(flightKey) === promise) this.inflight.delete(flightKey);
+      if (this.inflight.get(key) === promise) this.inflight.delete(key);
     }
   }
 
-  private lookup(key: string, openTo: number | undefined): Entry | undefined {
+  private lookup(key: string): Entry | undefined {
     const entry = this.entries.get(key);
     if (!entry) return undefined;
-    if (entry.expiresAt <= this.now() || (openTo !== undefined && (entry.openTo === undefined || openTo < entry.openTo))) {
+    if (entry.expiresAt <= this.now()) {
       this.remove(key, entry);
       return undefined;
     }

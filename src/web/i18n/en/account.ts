@@ -7,6 +7,7 @@ export default {
   "account.profile.reconnect": "Suunto refused your saved connection. Connect Suunto again below.",
   "account.profile.getStarted": "Connect your Suunto account below to get started.",
   "account.profile.notConfigured": "Suunto cannot be connected on this server yet.",
+  "account.profile.unavailable": "Your Suunto connection is saved, but it is not available right now.",
   "account.profile.demo": "Demo account with sample Suunto data.",
   "account.profile.demoReadOnly": "Demo account with sample Suunto data, read-only.",
 
@@ -22,16 +23,19 @@ export default {
   "account.state.connectAgain": "Connect again",
   "account.state.on": "On",
   "account.state.onReadOnly": "On, read-only",
+  "account.state.unavailable": "Not available right now",
 
   // The Suunto connection
   "account.suunto.heading": "Your Suunto account",
   "account.suunto.badgeConnected": "connected",
   "account.suunto.badgeNotConnected": "not connected",
   "account.suunto.badgeReconnect": "connect again",
+  "account.suunto.badgeUnavailable": "not available right now",
   "account.suunto.intro": "Connect Suunto takes you to Suunto's own sign-in page. Sign in there and allow access, and Suunto sends you back here. Your Suunto password stays with Suunto: this server keeps only the access tokens Suunto hands out, encrypted.",
   "account.suunto.syncHint": "Your AI apps see what is in your Suunto account: sync your watch with the Suunto App first.",
   "account.suunto.connect": "Connect Suunto",
   "account.suunto.notConfigured": "The administrator of this server has not set up the Suunto connection yet, so Suunto cannot be connected right now. Please try again later.",
+  "account.suunto.unavailable": "The Suunto connection of this server is not set up right now, so your AI apps cannot reach your Suunto data. Your saved connection stays here. Please try again later.",
   "account.suunto.unreadable": "Your saved Suunto connection cannot be read because the server's encryption key changed. Please connect Suunto again.",
   "account.suunto.expired": "Suunto refused your saved connection, for example because the access of this app was removed at Suunto. Your AI apps may not reach your Suunto data until you connect Suunto again.",
   "account.suunto.connectAgain": "Connect Suunto again",
@@ -48,6 +52,7 @@ export default {
   "account.suunto.units.imperial": "Imperial (mi, ft, mph, °F)",
   "account.suunto.timeZone": "Time zone",
   "account.suunto.timeZoneHint": "Your AI app uses it for dates and times, for example to know which days \"last week\" means.",
+  "account.suunto.timeZoneDefault": "Server default ({timeZone})",
   "account.suunto.readOnly": "Read-only",
   "account.suunto.readOnlyHint": "AI apps can read your Suunto data but never add routes or points of interest.",
   "account.suunto.readOnlyEnforced": "Enforced by the administrator.",
@@ -57,6 +62,7 @@ export default {
   "account.suunto.reconnectHint": "Connect Suunto again, for example after the access of this app was removed at Suunto, or to connect another Suunto account. Your settings stay as they are.",
   "account.suunto.remove": "Remove Suunto connection",
   "account.suunto.removeConfirm": "Remove your Suunto connection? This server tells Suunto to end its access, and your AI apps lose access to your Suunto data until you connect again. Your data at Suunto is not changed.",
+  "account.suunto.removeConfirmUnavailable": "Remove your Suunto connection? This server cannot tell Suunto right now, so Suunto may still list this app as connected. You can remove it in the Suunto App. Your data at Suunto is not changed.",
 
   // After "Connect Suunto" (shown when Suunto sends the browser back)
   "account.flash.connected": "Suunto is connected. Your AI apps can use your Suunto data now.",
@@ -114,6 +120,7 @@ export default {
   "account.security.signOutOthers": "Sign out of all other browsers",
   "account.security.deleteHeading": "Delete account",
   "account.security.deleteText": "Deletes your account, your saved Suunto connection and all app connections. This server also tells Suunto to end its access. Your data at Suunto is not touched.",
+  "account.security.deleteTextUnavailable": "Deletes your account, your saved Suunto connection and all app connections. This server cannot tell Suunto right now, so Suunto may still list this app as connected. You can remove it in the Suunto App. Your data at Suunto is not touched.",
   "account.security.deleteConfirmLabel": "Type your email ({email}) to confirm",
   "account.security.deleteButton": "Delete my account",
   "account.security.wrongPassword": "The current password is wrong.",

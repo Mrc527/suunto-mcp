@@ -7,11 +7,12 @@ import type { Server } from "node:http";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { suuntoKeysFromEnv } from "../config.js";
+import { callLimitsFromEnv, envValue, suuntoKeysFromEnv } from "../config.js";
 import { demoRegistry, type DemoRegistry } from "../demo/index.js";
 import { endpointsFromEnv, isLoopbackHost } from "../suunto/endpoints.js";
+import { CallLimiter, type CallLimits } from "../suunto/limiter.js";
 import type { SuuntoAppKeys } from "../suunto/oauth.js";
-import { ConfigError, redactForLog } from "../util/errors.js";
+import { ConfigError, maskEmails, redactForLog } from "../util/errors.js";
 import { VERSION } from "../version.js";
 import { operatorOverrides, ServicePool } from "./accounts.js";
 import { APP_CSS, APP_JS } from "./assets.js";
@@ -25,7 +26,7 @@ import { securityTxtRoutes } from "./security-txt.js";
 import { mediaRoutes } from "./media.js";
 import { ActivityHub } from "./live.js";
 import { mcpRoutes } from "./mcp-endpoint.js";
-import { OAuthProvider } from "./oauth.js";
+import { OAuthProvider, plainText } from "./oauth.js";
 import { accountRoutes } from "./routes-account.js";
 import { adminRoutes } from "./routes-admin.js";
 import { authRoutes, passwordProblem } from "./routes-auth.js";
@@ -58,6 +59,11 @@ export interface WebOptions {
   suuntoKeys?: SuuntoAppKeys;
   /** SUUNTO_REDIRECT_URI (default: <PUBLIC_URL>/suunto/callback). */
   suuntoRedirectUri?: string;
+  /**
+   * The limits of Suunto data requests (SUUNTO_CALLS_PER_MINUTE, SUUNTO_CALLS_PER_USER_PER_DAY).
+   * Default WEB_DEFAULT_LIMITS: 10 per minute for the whole server, 100 per user per day.
+   */
+  callLimits?: CallLimits;
   /** The operator's SMTP server for e-mails to administrators (none: no e-mails). */
   smtpUrl?: string;
   /** Sender address of those e-mails (default: the SMTP user when it is an e-mail address; one of them is needed). */
@@ -88,23 +94,63 @@ const NO_SENDER = "Set NOTIFY_FROM to a sender address your SMTP server accepts 
 const EXAMPLE_ADMIN_PASSWORD = "change-me-to-a-long-password";
 
 /**
+ * The limits of Suunto data requests in web mode: the Developer API's 10 calls per minute for the
+ * whole server, and at most 100 calls per user per day, so one user cannot use up the shared
+ * weekly quota (200 calls on the Developer API) alone.
+ */
+export const WEB_DEFAULT_LIMITS: CallLimits = { perMinute: 10, perUserPerDay: 100 };
+
+/** The path of the "Connect Suunto" callback (routes-account.ts). */
+const CALLBACK_PATH = "/suunto/callback";
+
+/**
  * The address Suunto sends the browser back to after "Connect Suunto". It must be registered in
- * the Suunto API Zone exactly as it is here.
+ * the Suunto API Zone exactly as it is here. A configured SUUNTO_REDIRECT_URI must be on
+ * PUBLIC_URL's host (only there does the browser send the sign-in cookie) and have the path of
+ * the callback route; https, or plain http on a loopback host.
  */
 export function suuntoRedirectUri(publicUrl: URL, configured: string | undefined): string {
+  const base = publicUrl.href.replace(/\/+$/, "");
+  const fallback = `${base}${CALLBACK_PATH}`;
   const value = configured?.trim();
-  if (!value) return `${publicUrl.href.replace(/\/+$/, "")}/suunto/callback`;
+  if (!value) return fallback;
   let url: URL;
   try {
     url = new URL(value);
   } catch {
-    throw new ConfigError(`SUUNTO_REDIRECT_URI is not a valid URL. Leave it empty to use ${publicUrl.href.replace(/\/+$/, "")}/suunto/callback.`);
+    throw new ConfigError(`SUUNTO_REDIRECT_URI is not a valid URL. Leave it empty to use ${fallback}.`);
   }
   if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopbackHost(url.hostname))) {
     throw new ConfigError("SUUNTO_REDIRECT_URI must be an https URL (plain http only on localhost).");
   }
   if (url.hash) throw new ConfigError("SUUNTO_REDIRECT_URI must not contain a fragment.");
+  if (url.origin !== publicUrl.origin) {
+    throw new ConfigError(`SUUNTO_REDIRECT_URI must be on the address of PUBLIC_URL (${publicUrl.origin}): the browser sends the sign-in cookie only there. Leave it empty to use ${fallback}.`);
+  }
+  if (url.pathname !== new URL(fallback).pathname) {
+    throw new ConfigError(`SUUNTO_REDIRECT_URI must have the path ${new URL(fallback).pathname}, where this server takes the answer from Suunto. Leave it empty to use ${fallback}.`);
+  }
   return value;
+}
+
+/**
+ * Whether a Host header names this server: PUBLIC_URL's host, or any loopback name when PUBLIC_URL
+ * is a loopback address (localhost, 127.0.0.1 and [::1] are the same machine). Other names are
+ * refused, so a web page cannot reach a local server through DNS rebinding.
+ */
+export function isPublicHost(hostHeader: string | undefined, publicUrl: URL): boolean {
+  // A host name or an IPv6 address in brackets, maybe with a port; nothing else.
+  const match = /^(\[[0-9a-f:.]+\]|[a-z0-9.-]+?)\.?(?::\d{1,5})?$/i.exec(hostHeader?.trim() ?? "");
+  if (!match) return false;
+  const hostname = match[1]!.toLowerCase();
+  const own = publicUrl.hostname.toLowerCase();
+  if (hostname === own) return true;
+  return isLoopbackHost(own) && isLoopbackHost(hostname);
+}
+
+/** A web log line: one line (no forged lines from client text) and no e-mail addresses (DESIGN.md section 9). */
+function webLog(log: (m: string) => void): (m: string) => void {
+  return (m) => log(maskEmails(plainText(m)));
 }
 
 function readSecret(env: Env, name: string): string | undefined {
@@ -117,7 +163,9 @@ function readSecret(env: Env, name: string): string | undefined {
 
 /** Read the web-mode settings from the environment (and CLI overrides). */
 export function webOptionsFromEnv(env: Env, cli: { host?: string; port?: number }, log: (m: string) => void): WebOptions {
-  const port = cli.port ?? Number(env.PORT ?? env.MCP_HTTP_PORT ?? 3000);
+  // Docker Compose passes unset variables as empty strings: those mean "not set".
+  const rawPort = envValue(env, "PORT") ?? envValue(env, "MCP_HTTP_PORT");
+  const port = cli.port ?? (rawPort !== undefined ? Number(rawPort) : 3000);
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new ConfigError("PORT must be a valid port");
   const host = cli.host ?? (env.HOST || env.MCP_HTTP_HOST || "127.0.0.1");
   const rawUrl = (env.PUBLIC_URL ?? "").trim() || `http://localhost:${port}`;
@@ -154,6 +202,8 @@ export function webOptionsFromEnv(env: Env, cli: { host?: string; port?: number 
     // Undefined unless all three are set; a ConfigError when only some are.
     ...withKeys(suuntoKeysFromEnv(env)),
     ...(env.SUUNTO_REDIRECT_URI?.trim() ? { suuntoRedirectUri: suuntoRedirectUri(publicUrl, env.SUUNTO_REDIRECT_URI) } : {}),
+    // A ConfigError for a value that is not a whole number of 0 or more.
+    callLimits: callLimitsFromEnv(env, { perUserPerDay: WEB_DEFAULT_LIMITS.perUserPerDay }),
     ...(smtpUrl ? { smtpUrl } : {}),
     ...(notifyFrom ? { notifyFrom } : {}),
     log,
@@ -178,7 +228,9 @@ export interface WebApp {
   close(): Promise<void>;
 }
 
-export async function createWebApp(opts: WebOptions): Promise<WebApp> {
+export async function createWebApp(webOpts: WebOptions): Promise<WebApp> {
+  // Every log line of the web mode is one line without e-mail addresses.
+  const opts: WebOptions = { ...webOpts, log: webLog(webOpts.log) };
   const db = openDatabase(opts.dataDir);
   // An in-memory database (tests) gets an ephemeral key unless one is given.
   const masterKey =
@@ -206,6 +258,12 @@ export async function createWebApp(opts: WebOptions): Promise<WebApp> {
       `warning: SUUNTO_CLIENT_ID, SUUNTO_CLIENT_SECRET and SUUNTO_SUBSCRIPTION_KEY are not set. Nobody can connect Suunto until they are (demo accounts work). Register ${redirectUri} as the redirect URI of your app in the Suunto API Zone.`,
     );
   }
+  // One limiter of Suunto data requests for the whole process (the user id is its key).
+  const limits = opts.callLimits ?? WEB_DEFAULT_LIMITS;
+  const limiter =
+    limits.perMinute > 0 || limits.perUserPerDay > 0
+      ? new CallLimiter({ perMinute: limits.perMinute, ...(limits.perUserPerDay > 0 ? { perKeyPerDay: limits.perUserPerDay } : {}) })
+      : undefined;
   const pool = new ServicePool(store, {
     operator,
     ...(suuntoKeys ? { keys: suuntoKeys } : {}),
@@ -213,6 +271,8 @@ export async function createWebApp(opts: WebOptions): Promise<WebApp> {
     log: opts.log,
     ...(opts.suuntoFetch ? { fetch: opts.suuntoFetch } : {}),
     connectAgain: `Connect Suunto again at ${publicUrl.href.replace(/\/+$/, "")}/account.`,
+    ...(limiter ? { limiter } : {}),
+    limits,
   });
   const send = opts.sendNotice ?? (opts.smtpUrl ? smtpSender(opts.smtpUrl) : undefined);
   const from = opts.notifyFrom ?? (opts.smtpUrl ? smtpUserAddress(opts.smtpUrl) : undefined);
@@ -267,6 +327,11 @@ export async function createWebApp(opts: WebOptions): Promise<WebApp> {
   });
 
   app.get("/healthz", (_req, res) => void res.json({ status: "ok", version: VERSION }));
+  // Every other request must name this server (the health check above is asked by address).
+  app.use((req, res, next) => {
+    if (isPublicHost(req.headers.host, publicUrl)) return next();
+    res.status(421).type("text").send("This server does not answer for this host name.");
+  });
   app.use(brandRoutes());
   app.use(securityTxtRoutes(publicUrl));
   app.use(mediaRoutes());

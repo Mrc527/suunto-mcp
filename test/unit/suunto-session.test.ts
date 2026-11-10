@@ -35,6 +35,29 @@ function session(responder: FetchResponder, opts: Partial<SuuntoSessionOptions> 
 /** The refresh token sent in a token request. */
 const sentRefresh = (body: string) => new URLSearchParams(body).get("refresh_token");
 
+/** A sink over one shared store (like SUUNTO_TOKEN_CACHE that several processes use). */
+function storeSink(store: { tokens: StoredSuuntoTokens | undefined }): TokenSink & { saved: StoredSuuntoTokens[]; invalidated: string[]; loads: number } {
+  const sink = {
+    saved: [] as StoredSuuntoTokens[],
+    invalidated: [] as string[],
+    loads: 0,
+    save(t: StoredSuuntoTokens) {
+      sink.saved.push(t);
+      store.tokens = { ...t };
+    },
+    invalid(r: string) {
+      sink.invalidated.push(r);
+    },
+    load() {
+      sink.loads++;
+      return store.tokens ? { ...store.tokens } : undefined;
+    },
+  };
+  return sink;
+}
+
+const invalidGrant = () => jsonResponse({ error: "invalid_grant", error_description: "Invalid refresh token" }, 400);
+
 describe("SuuntoSession", () => {
   it("uses a stored access token that is still valid, without a request", async () => {
     const token = fakeJwt({ nowMs: T0 });
@@ -203,6 +226,158 @@ describe("SuuntoSession", () => {
     });
     expect(await s.accessToken()).toMatch(/^eyJ/);
     expect(s.storedTokens.refreshToken).toBe("r2");
+  });
+
+  it("keeps the known username when a refresh answer has none, and keeps the new refresh token", async () => {
+    const old = fakeJwt({ nowMs: T0 - DAY + 60_000 });
+    const { s, sink, requests } = session(() => tokenResponse("opaque-token", "NEW-RT", { expires_in: 86_400 }), {
+      tokens: { refreshToken: "OLD-RT", accessToken: old, clientId: KEYS.clientId },
+    });
+    expect(await s.accessToken()).toBe("opaque-token");
+    expect(requests).toHaveLength(1);
+    expect(sink.saved).toEqual([{ refreshToken: "NEW-RT", accessToken: "opaque-token", accessTokenExpiresAt: T0 + DAY, clientId: KEYS.clientId }]);
+    expect(await s.username()).toBe(MOCK_USERNAME);
+    expect(requests).toHaveLength(1);
+    // Without any known username, the tokens are still kept; only username() fails.
+    const blank = session(() => tokenResponse("opaque-token", "NEW-RT"));
+    expect(await blank.s.accessToken()).toBe("opaque-token");
+    expect(blank.sink.saved.map((t) => t.refreshToken)).toEqual(["NEW-RT"]);
+    await expect(blank.s.username()).rejects.toThrow(/no Suunto username/);
+  });
+
+  describe("stored tokens of another process (TokenSink.load)", () => {
+    it("takes over a newer stored token before it refreshes, without a request while its access token is fresh", async () => {
+      const ours = fakeJwt({ nowMs: T0 - DAY + 60_000, claims: { n: 0 } });
+      const theirs = fakeJwt({ nowMs: T0, claims: { n: 1 } });
+      const store = { tokens: { refreshToken: "refresh-1", accessToken: theirs, accessTokenExpiresAt: T0 + DAY, clientId: KEYS.clientId } as StoredSuuntoTokens | undefined };
+      const sink = storeSink(store);
+      const { s, requests } = session(() => tokenResponse(fakeJwt({ nowMs: T0 }), "refresh-2"), {
+        tokens: { refreshToken: "refresh-0", accessToken: ours, accessTokenExpiresAt: T0 + 60_000, clientId: KEYS.clientId },
+        sink,
+      });
+      expect(await s.accessToken()).toBe(theirs);
+      expect(requests).toHaveLength(0);
+      expect(s.storedTokens.refreshToken).toBe("refresh-1");
+      expect(sink.saved).toEqual([]);
+      // A 401 on the adopted token: a real refresh, with the stored refresh token.
+      expect(await s.refreshNow(theirs)).not.toBe(theirs);
+      expect(requests.map((r) => sentRefresh(r.body))).toEqual(["refresh-1"]);
+      expect(store.tokens?.refreshToken).toBe("refresh-2");
+    });
+
+    it("refreshes with the stored refresh token when the stored access token is not fresh", async () => {
+      const store = { tokens: { refreshToken: "refresh-1", accessToken: fakeJwt({ nowMs: T0 - DAY + 60_000 }), clientId: KEYS.clientId } as StoredSuuntoTokens | undefined };
+      const sink = storeSink(store);
+      const { s, requests } = session(() => tokenResponse(fakeJwt({ nowMs: T0 }), "refresh-2"), { sink });
+      expect(await s.accessToken()).toMatch(/^eyJ/);
+      expect(requests.map((r) => sentRefresh(r.body))).toEqual(["refresh-1"]);
+      expect(sink.saved.map((t) => t.refreshToken)).toEqual(["refresh-2"]);
+    });
+
+    it("after an invalid_grant, takes over the token another process stored meanwhile and tries it once", async () => {
+      // Process A refreshed with refresh-0 (Suunto ended it) and stored refresh-1 while this session was refreshing.
+      const store: { tokens: StoredSuuntoTokens | undefined } = { tokens: { refreshToken: "refresh-0", clientId: KEYS.clientId } };
+      const sink = storeSink(store);
+      const { s, requests, clock } = session(
+        (req) => {
+          const sent = sentRefresh(req.body);
+          if (sent === "refresh-0") {
+            store.tokens = { refreshToken: "refresh-1", accessToken: fakeJwt({ nowMs: clock.now - DAY }), accessTokenExpiresAt: clock.now, clientId: KEYS.clientId };
+            return invalidGrant();
+          }
+          return sent === "refresh-1" ? tokenResponse(fakeJwt({ nowMs: clock.now }), "refresh-2") : invalidGrant();
+        },
+        { sink },
+      );
+      expect(await s.accessToken()).toMatch(/^eyJ/);
+      expect(requests.map((r) => sentRefresh(r.body))).toEqual(["refresh-0", "refresh-1"]);
+      expect(sink.invalidated).toEqual([]);
+      expect(s.expired).toBe(false);
+      expect(store.tokens?.refreshToken).toBe("refresh-2");
+    });
+
+    it("uses the other process's fresh access token after an invalid_grant, without another refresh", async () => {
+      const store: { tokens: StoredSuuntoTokens | undefined } = { tokens: undefined };
+      const theirs = fakeJwt({ nowMs: T0, claims: { n: 1 } });
+      const sink = storeSink(store);
+      const { s, requests } = session(
+        () => {
+          store.tokens = { refreshToken: "refresh-1", accessToken: theirs, accessTokenExpiresAt: T0 + DAY, clientId: KEYS.clientId };
+          return invalidGrant();
+        },
+        { sink },
+      );
+      expect(await s.accessToken()).toBe(theirs);
+      expect(requests).toHaveLength(1);
+      expect(sink.invalidated).toEqual([]);
+    });
+
+    it("gives up after one try with the stored token", async () => {
+      const store: { tokens: StoredSuuntoTokens | undefined } = { tokens: undefined };
+      const sink = storeSink(store);
+      const { s, requests } = session(
+        () => {
+          store.tokens = { refreshToken: "refresh-1", clientId: KEYS.clientId };
+          return invalidGrant();
+        },
+        { sink },
+      );
+      await expect(s.accessToken()).rejects.toThrow(/connection expired/);
+      expect(requests.map((r) => sentRefresh(r.body))).toEqual(["refresh-0", "refresh-1"]);
+      expect(sink.invalidated).toHaveLength(1);
+      expect(s.expired).toBe(true);
+    });
+
+    it("ends the cool-down at once when new tokens are stored (the user connected again)", async () => {
+      const store: { tokens: StoredSuuntoTokens | undefined } = { tokens: { refreshToken: "refresh-0", clientId: KEYS.clientId } };
+      const sink = storeSink(store);
+      const { s, requests } = session((req) => (sentRefresh(req.body) === "refresh-new" ? tokenResponse(fakeJwt({ nowMs: T0 }), "refresh-new-2") : invalidGrant()), { sink });
+      await expect(s.accessToken()).rejects.toThrow(/connection expired/);
+      await expect(s.accessToken()).rejects.toThrow(/connection expired/);
+      expect(requests).toHaveLength(1);
+      // suunto-mcp --login wrote new tokens: the next call works, inside the cool-down.
+      store.tokens = { refreshToken: "refresh-new", clientId: KEYS.clientId };
+      expect(await s.accessToken()).toMatch(/^eyJ/);
+      expect(s.expired).toBe(false);
+      expect(requests.map((r) => sentRefresh(r.body))).toEqual(["refresh-0", "refresh-new"]);
+    });
+
+    it("ignores stored tokens of another app, older stored tokens and a sink that throws", async () => {
+      // Another app's tokens.
+      const other = storeSink({ tokens: { refreshToken: "refresh-x", clientId: "client-2" } });
+      const a = session(() => tokenResponse(fakeJwt({ nowMs: T0 }), "refresh-1"), { sink: other });
+      await a.s.accessToken();
+      expect(a.requests.map((r) => sentRefresh(r.body))).toEqual(["refresh-0"]);
+      // Older tokens (saving the last refresh failed): the session's own newer refresh token wins.
+      const older = storeSink({ tokens: { refreshToken: "refresh-old", accessToken: fakeJwt({ nowMs: T0 - 2 * DAY }), accessTokenExpiresAt: T0 - DAY, clientId: KEYS.clientId } });
+      const b = session(() => tokenResponse(fakeJwt({ nowMs: T0 }), "refresh-1"), {
+        tokens: { refreshToken: "refresh-0", accessToken: fakeJwt({ nowMs: T0 - DAY + 60_000 }), accessTokenExpiresAt: T0 + 60_000, clientId: KEYS.clientId },
+        sink: older,
+      });
+      await b.s.accessToken();
+      expect(b.requests.map((r) => sentRefresh(r.body))).toEqual(["refresh-0"]);
+      // A sink whose load throws is ignored.
+      const broken = recordingSink();
+      const c = session(() => tokenResponse(fakeJwt({ nowMs: T0 }), "refresh-1"), {
+        sink: {
+          ...broken,
+          load: () => {
+            throw new Error("disk error");
+          },
+        },
+      });
+      expect(await c.s.accessToken()).toMatch(/^eyJ/);
+      expect(c.requests.map((r) => sentRefresh(r.body))).toEqual(["refresh-0"]);
+    });
+
+    it("loads right before each refresh, not on every call", async () => {
+      const sink = storeSink({ tokens: undefined });
+      const { s, clock } = session(() => tokenResponse(fakeJwt({ nowMs: clock.now }), "refresh-1"), { sink });
+      await s.accessToken();
+      await s.accessToken();
+      await s.accessToken();
+      expect(sink.loads).toBe(1);
+    });
   });
 
   it("deauthorizes with the current token, best effort", async () => {

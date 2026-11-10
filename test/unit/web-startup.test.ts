@@ -34,11 +34,28 @@ describe("the operator's Suunto settings", () => {
     const publicUrl = new URL("https://suunto.example.com/");
     expect(suuntoRedirectUri(publicUrl, undefined)).toBe("https://suunto.example.com/suunto/callback");
     expect(suuntoRedirectUri(publicUrl, "  ")).toBe("https://suunto.example.com/suunto/callback");
-    expect(suuntoRedirectUri(publicUrl, "https://other.example.com/cb")).toBe("https://other.example.com/cb");
+    expect(suuntoRedirectUri(publicUrl, "https://suunto.example.com/suunto/callback")).toBe("https://suunto.example.com/suunto/callback");
     expect(() => suuntoRedirectUri(publicUrl, "http://other.example.com/cb")).toThrow(/must be an https URL/);
     expect(() => suuntoRedirectUri(publicUrl, "not a url")).toThrow(/not a valid URL/);
     expect(webOptionsFromEnv(env({ SUUNTO_REDIRECT_URI: "" }), {}, () => {}).suuntoRedirectUri).toBeUndefined();
     expect(webOptionsFromEnv(env({ SUUNTO_REDIRECT_URI: "https://suunto.example.com/suunto/callback" }), {}, () => {}).suuntoRedirectUri).toBe("https://suunto.example.com/suunto/callback");
+  });
+
+  it("refuses a SUUNTO_REDIRECT_URI that never reaches the callback with the sign-in cookie", () => {
+    const publicUrl = new URL("https://suunto.example.com/");
+    // Another host: the browser would not send the session cookie, so every callback would fail.
+    expect(() => suuntoRedirectUri(publicUrl, "https://other.example.com/suunto/callback")).toThrow(/must be on the address of PUBLIC_URL/);
+    expect(() => suuntoRedirectUri(publicUrl, "https://suunto.example.com:8443/suunto/callback")).toThrow(/must be on the address of PUBLIC_URL/);
+    // Another path: Suunto would send everyone to a page that does not exist.
+    expect(() => suuntoRedirectUri(publicUrl, "https://suunto.example.com/oauth/suunto/callback")).toThrow(/must have the path \/suunto\/callback/);
+    expect(() => suuntoRedirectUri(publicUrl, "https://suunto.example.com/")).toThrow(/must have the path/);
+    // At startup, as a configuration error.
+    expect(() => webOptionsFromEnv(env({ SUUNTO_REDIRECT_URI: "https://suunto.example.com/cb" }), {}, () => {})).toThrow(/must have the path/);
+    // A PUBLIC_URL with a path prefix: the callback is below it.
+    const prefixed = new URL("https://example.com/suunto-mcp/");
+    expect(suuntoRedirectUri(prefixed, undefined)).toBe("https://example.com/suunto-mcp/suunto/callback");
+    expect(suuntoRedirectUri(prefixed, "https://example.com/suunto-mcp/suunto/callback")).toBe("https://example.com/suunto-mcp/suunto/callback");
+    expect(() => suuntoRedirectUri(prefixed, "https://example.com/suunto/callback")).toThrow(/must have the path \/suunto-mcp\/suunto\/callback/);
   });
 
   it("starts without keys and says what to do", async () => {
@@ -64,6 +81,25 @@ describe("the operator's Suunto settings", () => {
     } finally {
       await configured.close();
     }
+  });
+});
+
+describe("the listening port", () => {
+  it("treats an empty PORT as not set", () => {
+    expect(webOptionsFromEnv(env({ PORT: "" }), {}, () => {}).port).toBe(3000);
+    expect(webOptionsFromEnv(env({ PORT: " ", MCP_HTTP_PORT: "4000" }), {}, () => {}).port).toBe(4000);
+    expect(webOptionsFromEnv(env({ PORT: "5000", MCP_HTTP_PORT: "4000" }), {}, () => {}).port).toBe(5000);
+    expect(webOptionsFromEnv(env({ PORT: "" }), { port: 6000 }, () => {}).port).toBe(6000);
+    expect(() => webOptionsFromEnv(env({ PORT: "abc" }), {}, () => {})).toThrow(/PORT must be a valid port/);
+  });
+});
+
+describe("the Suunto call limits", () => {
+  it("default to 10 per minute and 100 per user per day, and can be changed or turned off", () => {
+    expect(webOptionsFromEnv(env({}), {}, () => {}).callLimits).toEqual({ perMinute: 10, perUserPerDay: 100 });
+    expect(webOptionsFromEnv(env({ SUUNTO_CALLS_PER_MINUTE: "", SUUNTO_CALLS_PER_USER_PER_DAY: "" }), {}, () => {}).callLimits).toEqual({ perMinute: 10, perUserPerDay: 100 });
+    expect(webOptionsFromEnv(env({ SUUNTO_CALLS_PER_MINUTE: "30", SUUNTO_CALLS_PER_USER_PER_DAY: "0" }), {}, () => {}).callLimits).toEqual({ perMinute: 30, perUserPerDay: 0 });
+    expect(() => webOptionsFromEnv(env({ SUUNTO_CALLS_PER_USER_PER_DAY: "many" }), {}, () => {})).toThrow(/SUUNTO_CALLS_PER_USER_PER_DAY/);
   });
 });
 

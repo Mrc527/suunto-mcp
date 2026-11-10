@@ -79,6 +79,8 @@ beforeAll(async () => {
     operator: { SUUNTO_OAUTH_URL: mock.oauthUrl, SUUNTO_API_URL: mock.apiUrl },
     suuntoKeys: mock.keys,
     suuntoFetch,
+    // Many Suunto calls in a minute: no call limits.
+    callLimits: { perMinute: 0, perUserPerDay: 0 },
     log: () => {},
   });
   server.on("request", web.app);

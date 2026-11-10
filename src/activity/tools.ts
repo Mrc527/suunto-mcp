@@ -46,6 +46,10 @@ const NOT_MEDICAL = "Values come from the watch and are not medical advice.";
 
 const FROM_DOC = (dflt: string) => `Start: a date YYYY-MM-DD or an ISO 8601 date-time. ${dflt}`;
 const TO_DOC = (dflt: string) => `End: a date YYYY-MM-DD (included) or an ISO 8601 date-time (not included). ${dflt}`;
+/** `to` of the 28-day tools: a date is included, so it is at most 27 days after from. */
+const RANGE_28_DAYS = "At most 28 days in all: a date at most 27 days after from, a date-time at most 28 days after from";
+
+const WORKOUT_KEY_DOC = "The workout_key from suunto_list_workouts (24 hex characters)";
 
 const POI_TYPE_NAMES = POI_TYPES.filter((t) => t.id >= 0)
   .map((t) => t.name)
@@ -95,7 +99,7 @@ export function registerActivityTools(ctx: ToolContext, service: ActivityService
         "start and end (the workout's own local time, ISO 8601 with its UTC offset), duration (h:mm:ss) and duration_s, distance (km or mi), ascent and descent (m or ft), avg_speed and max_speed (km/h or mph), " +
         "avg_pace (on foot: m:ss per km or mi; swimming: m:ss per 100 m or 100 yd, unit in the text), avg_hr and max_hr (bpm), energy_kcal, steps and recovery_time_h (hours). " +
         `${RANGE_TEXT} Default: the last 30 days. ` +
-        `sport filters by activity: ${SPORT_TEXT}. With sport, at most 1000 workouts of the range are searched (the answer says so when there are more). ` +
+        `sport filters by activity: ${SPORT_TEXT}. At most the newest 1000 workouts of the range are searched (the answer says so in note when there are more). ` +
         `Use offset=next_offset for the next page. Data appears after the watch synced with the Suunto App. ${USER_DATA}`,
       inputSchema: withDocs(listWorkoutsShape, {
         from: FROM_DOC("Default: 30 days before to"),
@@ -123,7 +127,7 @@ export function registerActivityTools(ctx: ToolContext, service: ActivityService
         "Each stream has unit, min, avg and max over all its points, original_points, and at most max_points points {t, v} (location: {t, lat, lon}), where t is seconds from the start; points are evenly spaced in time and keep the first and the last. A stream the workout does not have comes back with no points. " +
         `Units are in the answer's units field. ${NOT_MEDICAL} ${USER_DATA}`,
       inputSchema: withDocs(getWorkoutShape, {
-        workout_key: "The workout_key from suunto_list_workouts",
+        workout_key: WORKOUT_KEY_DOC,
         samples: "Streams to add (default none): heart_rate, altitude, speed, pace, cadence, power, temperature, depth, distance, location. Ask only for what is needed: each stream makes the answer longer",
         max_points: "Most points per stream, 10-1000 (default 200)",
         units: UNITS_ARG,
@@ -141,7 +145,7 @@ export function registerActivityTools(ctx: ToolContext, service: ActivityService
       description:
         "Statistics of the user's workouts in a range: count, total time (total_duration h:mm:ss and total_duration_s), total_distance (km or mi), total_ascent (m or ft), total_energy_kcal, avg_hr (bpm, weighted by workout time), " +
         "the longest and the farthest workout, first_date and last_date. group_by also gives the same numbers per week (ISO weeks starting on Monday, for example 2026-W19), month (2026-05), year or sport. " +
-        `${RANGE_TEXT} Default: the last 365 days. sport filters like in suunto_list_workouts. At most 2000 workouts are counted (the answer says so when there are more).`,
+        `${RANGE_TEXT} Default: the last 365 days. sport filters like in suunto_list_workouts. At most the newest 2000 workouts are counted (the answer says so in note when there are more).`,
       inputSchema: withDocs(workoutStatsShape, {
         from: FROM_DOC("Default: 365 days before to"),
         to: TO_DOC("Default: today"),
@@ -163,7 +167,7 @@ export function registerActivityTools(ctx: ToolContext, service: ActivityService
         "Download the FIT file of one workout (Garmin FIT format, with every sample, lap and summary value Suunto has), for other apps. " +
         "The answer is a short JSON text {workout_key, bytes, file_name} and the file as an embedded resource (uri suunto://workouts/<key>.fit, mimeType application/vnd.ant.fit, base64). " +
         "Files over 8 MB are refused. To read the data, use suunto_get_workout instead.",
-      inputSchema: withDocs(exportFitShape, { workout_key: "The workout_key from suunto_list_workouts" }),
+      inputSchema: withDocs(exportFitShape, { workout_key: WORKOUT_KEY_DOC }),
       kind: "read",
     },
     async (args) => fitResult(await service.exportFit(args)),
@@ -180,7 +184,7 @@ export function registerActivityTools(ctx: ToolContext, service: ActivityService
         "Data appears after the watch synced with the Suunto App.",
       inputSchema: withDocs(dailyActivityShape, {
         from: "First day, YYYY-MM-DD",
-        to: "Last day, YYYY-MM-DD (included); at most 92 days after from",
+        to: "Last day, YYYY-MM-DD (included); at most 92 days in all, so at most 91 days after from",
         units: UNITS_ARG,
       }),
       kind: "read",
@@ -199,7 +203,7 @@ export function registerActivityTools(ctx: ToolContext, service: ActivityService
         `${RANGE_TEXT} At most 28 days per call, at most 2 days with resolution raw. Default resolution: hour up to 2 days, else day. ${NOT_MEDICAL}`,
       inputSchema: withDocs(activitySamplesShape, {
         from: FROM_DOC(""),
-        to: TO_DOC("At most 28 days after from"),
+        to: TO_DOC(RANGE_28_DAYS),
         resolution: "raw (every sample, at most 2 days), hour or day (default: hour up to 2 days, else day)",
         units: UNITS_ARG,
       }),
@@ -220,7 +224,7 @@ export function registerActivityTools(ctx: ToolContext, service: ActivityService
         `Also averages over the sleeps that are not naps. ${NOT_MEDICAL}`,
       inputSchema: withDocs(sleepShape, {
         from: "First wake-up date, YYYY-MM-DD",
-        to: "Last wake-up date, YYYY-MM-DD (included); at most 92 days after from",
+        to: "Last wake-up date, YYYY-MM-DD (included); at most 92 days in all, so at most 91 days after from",
       }),
       kind: "read",
     },
@@ -238,7 +242,7 @@ export function registerActivityTools(ctx: ToolContext, service: ActivityService
         `summary has the balance over the whole range. ${RANGE_TEXT} At most 28 days per call, at most 2 days with resolution raw. ${NOT_MEDICAL}`,
       inputSchema: withDocs(recoveryShape, {
         from: FROM_DOC(""),
-        to: TO_DOC("At most 28 days after from"),
+        to: TO_DOC(RANGE_28_DAYS),
         resolution: "raw (at most 2 days), hour or day (default day)",
       }),
       kind: "read",

@@ -266,9 +266,25 @@ export function parseUtcTimestamp(value: string): number | undefined {
   return Number.isNaN(ms) ? undefined : ms;
 }
 
-/** True when an ISO 8601 date-time names a local offset other than "Z" (for example "+02:00"). */
+/** An ISO 8601 date-time with a zone: group 1 is "Z", or groups 2 to 4 are the sign, hours and minutes. */
+const DATE_TIME_WITH_ZONE = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:(Z)|([+-])(\d{2}):?(\d{2}))$/i;
+
+/** True when an ISO 8601 date-time names a numeric offset (for example "+02:00"; "Z" is not one). */
 export function hasLocalOffset(value: string): boolean {
-  return /T\d{2}:\d{2}.*[+-]\d{2}:?\d{2}$/.test(value.trim());
+  const m = DATE_TIME_WITH_ZONE.exec(value.trim());
+  return !!m && !m[1];
+}
+
+/**
+ * The offset from UTC written in an ISO 8601 date-time, in minutes: "+02:00" gives 120, "-05:30"
+ * gives -330, "Z" and "+00:00" give 0. undefined when the text has no zone.
+ */
+export function writtenOffsetMinutes(value: string): number | undefined {
+  const m = DATE_TIME_WITH_ZONE.exec(value.trim());
+  if (!m) return undefined;
+  if (m[1]) return 0;
+  const minutes = Number(m[3]) * 60 + Number(m[4]);
+  return m[2] === "-" ? -minutes : minutes;
 }
 
 /** The instant the local clock in `tz` showed the start of the hour that holds `ms` (DST safe). */

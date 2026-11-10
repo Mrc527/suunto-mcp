@@ -58,13 +58,39 @@ describe("activity ids", () => {
 
   it("accepts exact activity names and ids", () => {
     expect(activityIdsFor("Trail running")).toEqual([22]);
-    expect(activityIdsFor("cross-country skiing")).toEqual([3]);
-    expect(activityIdsFor("Cross country skiing")).toEqual([3]);
+    expect(activityIdsFor("Classic skiing")).toEqual([118]);
     expect(activityIdsFor("Scubadiving")).toEqual([78]);
     expect(activityIdsFor("Mountain biking")).toEqual([10, 106]);
     expect(activityIdsFor("22")).toEqual([22]);
     expect(activityIdsFor("quidditch")).toEqual([]);
     expect(activityIdsFor("  ")).toEqual([]);
+  });
+
+  it("finds the whole family for the name of the activity a family is named after", () => {
+    // The tool texts give these names as examples, so AI apps use them as filters.
+    const families: Array<[string, number[]]> = [
+      ["Running", [1, 22, 53, 103, 115]],
+      ["Cycling", [2, 10, 52, 99, 105, 106, 114]],
+      ["Mountain biking", [10, 106]],
+      ["Swimming", [21, 85]],
+      ["Hiking", [11, 70]],
+      ["Walking", [0, 24]],
+      ["Cross-country skiing", [3, 117, 118]],
+      ["Ski touring", [31, 107, 116]],
+      ["Gym", [23, 20]],
+      ["Yoga", [51, 121]],
+      ["Pilates", [51, 120]],
+      ["Rowing", [15, 57]],
+      ["Paddling", [14, 61, 72, 82]],
+      ["Multisport", [68, 74, 92, 93, 94]],
+    ];
+    for (const [name, ids] of families) {
+      expect(activityIdsFor(name), name).toEqual(ids);
+      // Each spelling of the name works.
+      expect(activityIdsFor(name.toUpperCase().replace("-", " ")), name).toEqual(ids);
+    }
+    // One id for a route or a point of interest is still the activity of that name.
+    expect(activityIdFor("Cross-country skiing")).toBe(3);
   });
 
   it("picks one id for routes and points of interest", () => {

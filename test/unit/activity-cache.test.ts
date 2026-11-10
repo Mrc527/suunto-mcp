@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { CachedBackend, LONG_TTL_MS, SHORT_TTL_MS } from "../../src/activity/cache.js";
+import { CACHE_MAX_BINARY_BYTES, CachedBackend, LONG_TTL_MS, SHORT_TTL_MS } from "../../src/activity/cache.js";
+import { MAX_FIT_BYTES } from "../../src/activity/service.js";
 import type { ActivityBackend, WireDailyStatistic, WirePoiInput, WireRoute, WireWorkoutList } from "../../src/activity/types.js";
 
 // Invented test data only.
@@ -82,6 +83,8 @@ function setup(opts: { maxEntries?: number; maxBytes?: number } = {}) {
     advance: (ms: number) => {
       now += ms;
     },
+    /** The clock of the cache. */
+    now: () => now,
   };
 }
 
@@ -104,6 +107,32 @@ describe("CachedBackend", () => {
     advance(1);
     await cache.listWorkouts(LIST);
     expect(inner.count("listWorkouts")).toBe(4);
+  });
+
+  it("keys a workout by its set of extensions, in any order", async () => {
+    const { inner, cache } = setup();
+    await cache.getWorkout("w1", ["SummaryExtension", "HeartrateStreamExtension", "AltitudeStreamExtension"]);
+    await cache.getWorkout("w1", ["AltitudeStreamExtension", "SummaryExtension", "HeartrateStreamExtension"]);
+    expect(inner.count("getWorkout")).toBe(1);
+    await cache.getWorkout("w1", ["SummaryExtension", "HeartrateStreamExtension"]);
+    expect(inner.count("getWorkout")).toBe(2);
+  });
+
+  it("never keeps a FIT file larger than the export tool sends", async () => {
+    expect(CACHE_MAX_BINARY_BYTES).toBe(MAX_FIT_BYTES);
+    let size = CACHE_MAX_BINARY_BYTES + 1;
+    let calls = 0;
+    const cache = new CachedBackend({ ...fakeBackend(), exportFit: async () => (calls++, Buffer.alloc(size)) }, { maxBytes: 50 * 1024 * 1024 });
+    await cache.exportFit("big");
+    await cache.exportFit("big");
+    expect(calls).toBe(2);
+    expect(cache.size).toBe(0);
+    // A file the tool can send is kept.
+    size = CACHE_MAX_BINARY_BYTES;
+    await cache.exportFit("ok");
+    await cache.exportFit("ok");
+    expect(calls).toBe(3);
+    expect(cache.size).toBe(1);
   });
 
   it("keeps a workout by key and FIT files for 30 minutes", async () => {
@@ -152,16 +181,61 @@ describe("CachedBackend", () => {
     await cache.sleep(...past);
     expect(inner.count("sleep")).toBe(2);
 
-    // A window into the current hour: kept 2 minutes.
-    const { inner: inner2, cache: cache2, advance: advance2 } = setup();
+    // A window up to now: kept 2 minutes (the service asks up to now - 1 ms every time).
+    const { inner: inner2, cache: cache2, advance: advance2, now } = setup();
     const from = HOUR_START - 2 * HOUR;
-    await cache2.recovery(from, START - 1);
+    await cache2.recovery(from, now() - 1);
     advance2(SHORT_TTL_MS - 1);
-    await cache2.recovery(from, START - 1);
+    await cache2.recovery(from, now() - 1);
     expect(inner2.count("recovery")).toBe(1);
     advance2(1);
-    await cache2.recovery(from, START - 1);
+    await cache2.recovery(from, now() - 1);
     expect(inner2.count("recovery")).toBe(2);
+
+    // A window that ended earlier in the current hour: kept 2 minutes under its exact end.
+    const { inner: inner3, cache: cache3, advance: advance3 } = setup();
+    await cache3.recovery(from, HOUR_START + 5 * 60_000);
+    advance3(SHORT_TTL_MS - 1);
+    await cache3.recovery(from, HOUR_START + 5 * 60_000);
+    expect(inner3.count("recovery")).toBe(1);
+    advance3(1);
+    await cache3.recovery(from, HOUR_START + 5 * 60_000);
+    expect(inner3.count("recovery")).toBe(2);
+  });
+
+  it("never serves a window that ended before now to a later call that ends now", async () => {
+    // 10:20: samples from 10:00 to 10:05, then from 10:00 to now. The second must be asked again.
+    const { inner, cache, advance, now } = setup();
+    await cache.activitySamples(HOUR_START, HOUR_START + 5 * 60_000);
+    advance(60_000);
+    await cache.activitySamples(HOUR_START, now() - 1);
+    expect(inner.count("activitySamples")).toBe(2);
+    // The window up to now serves the next call up to now...
+    advance(30_000);
+    await cache.activitySamples(HOUR_START, now() - 1);
+    expect(inner.count("activitySamples")).toBe(2);
+    // ...and a shorter window asked in between neither uses it nor replaces it.
+    await cache.activitySamples(HOUR_START, HOUR_START + 10 * 60_000);
+    expect(inner.count("activitySamples")).toBe(3);
+    advance(10_000);
+    const later = await cache.activitySamples(HOUR_START, now() - 1);
+    expect(inner.count("activitySamples")).toBe(3);
+    // The answer is the one fetched up to now (call 2), not the short window (call 3).
+    expect(later[0]!.entryData.HR).toBe(2);
+  });
+
+  it("shares one request between identical calls up to now at the same time", async () => {
+    const { inner, cache, advance, now } = setup();
+    const from = HOUR_START - 24 * HOUR;
+    const release = inner.hold("sleep");
+    const first = cache.sleep(from, now() - 1);
+    // A moment later: the end ("now - 1 ms") has moved, but it is the same request.
+    advance(3);
+    const second = cache.sleep(from, now() - 1);
+    release();
+    const [a, b] = await Promise.all([first, second]);
+    expect(inner.count("sleep")).toBe(1);
+    expect(a).toEqual(b);
   });
 
   it("serves a window that ends now to a later call with the same start", async () => {
