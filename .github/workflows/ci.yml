@@ -209,8 +209,8 @@ jobs:
           # with this host name and administrator, and copies the Traefik routing of a container
           # Traefik already routes there. An existing .env is never changed by these.
           SETUP_DOMAIN: ${{ vars.SUUNTO_DOMAIN || 'suunto.mcp.visin.ch' }}
-          SETUP_ADMIN_EMAIL: ${{ secrets.SUUNTO_ADMIN_EMAIL }}
-          SETUP_ADMIN_PASSWORD: ${{ secrets.SUUNTO_ADMIN_PASSWORD }}
+          SETUP_ADMIN_EMAIL: ${{ secrets.SUUNTO_ADMIN_EMAIL || vars.SUUNTO_ADMIN_EMAIL || secrets.ADMIN_EMAIL || vars.ADMIN_EMAIL }}
+          SETUP_ADMIN_PASSWORD: ${{ secrets.SUUNTO_ADMIN_PASSWORD || secrets.ADMIN_PASSWORD }}
       - name: Check the public URL
         if: steps.deploy.outputs.url != ''
         run: .github/scripts/ssh-deploy.sh check-url "$URL"
