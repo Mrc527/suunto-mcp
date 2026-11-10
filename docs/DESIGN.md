@@ -285,7 +285,16 @@ the token cache, prints the Suunto username and exits. It never opens a browser 
 
 - **Operator settings** (environment, never per user): `SUUNTO_CLIENT_ID`,
   `SUUNTO_CLIENT_SECRET` (`_FILE`), `SUUNTO_SUBSCRIPTION_KEY` (`_FILE`), optional
-  `SUUNTO_REDIRECT_URI` (default `<PUBLIC_URL>/suunto/callback`), and the test-only URL overrides.
+  `SUUNTO_REDIRECT_URI` (default `<PUBLIC_URL>/suunto/callback`), `SUUNTO_CALLS_PER_MINUTE` and
+  `SUUNTO_CALLS_PER_USER_PER_DAY` (section 4; defaults 10 and 100 here), and the test-only URL
+  overrides. A configured `SUUNTO_REDIRECT_URI` must be on the origin of `PUBLIC_URL` (only there
+  does the browser send the sign-in cookie), have the path of the callback route below
+  `PUBLIC_URL`'s path, and be https (plain http only on a loopback host); anything else is a
+  ConfigError at startup (`suuntoRedirectUri` in src/web/server.ts).
+- **Host header.** Every request except `/healthz` must name this server (`isPublicHost`): the
+  host of `PUBLIC_URL`, or any loopback name when `PUBLIC_URL` is a loopback address. Other names
+  get HTTP 421, so a web page cannot reach a server through DNS rebinding. `/healthz` stays open
+  because health checks ask by address.
 - **Account page** ("Connect your Suunto account"): before a connection, a short text and a
   "Connect Suunto" button (a POST form with the CSRF token). The server creates a random `state`
   (32 bytes, base64url), stores it (table `suunto_oauth_states`: state hash, user id, created_at,
@@ -293,9 +302,13 @@ the token cache, prints the Suunto username and exits. It never opens a browser 
   minutes; at most 5 open states per user (oldest dropped).
 - **Callback** `GET /suunto/callback?code=..&state=..` (or `error=..`): needs the signed-in user who
   started it (same user id as the state). Checks and consumes the state, exchanges the code, reads
-  the `user` claim, makes one test call (list 1 workout; a 403 there is shown as "connected, but
-  Suunto refused the data request" and the connection is still saved), saves the encrypted
-  settings, and redirects to `/account?m=connected` or back to the pending consent page (`next`).
+  the `user` claim, makes one test call (the workouts of the last 30 days, at most 100, through the
+  call limiter, without retries, within 15 s; a failure there, for example a 403, is saved as
+  `lastCheck.error` and the connection is still saved), saves the encrypted settings, and
+  redirects to `/account?m=connected` (or `?m=checkfailed`) or back to the pending consent page
+  (`next`). When the new connection is for another Suunto username than the saved one, the
+  previous connection is deauthorized at Suunto (best effort, after the new one is saved). Not for
+  the same username: Suunto's deauthorize would end the new connection too.
   Errors (denied, bad or expired state, token exchange failed) redirect to `/account` with a flash
   code; no Suunto text is put in URLs. A demo account cannot connect Suunto.
 - **Stored** (encrypted with the SecretBox, AAD = user id): `SuuntoAccountSettings { username,
@@ -303,8 +316,11 @@ the token cache, prints the Suunto username and exits. It never opens a browser 
   connectedAt }`. `timeZone` (IANA) becomes `SUUNTO_TIMEZONE` of the user's services; it is the
   browser's zone on the first connection (hidden field), then the user's choice; without it the
   admin page's default. Shows the connection (Suunto username, connected since, workouts in the last
-  30 days or why unknown), "Reconnect" (runs the OAuth flow again) and "Remove" (deauthorize at
-  Suunto, best effort, then delete).
+  30 days or why unknown), "Reconnect" (runs the OAuth flow again; see the callback for the
+  deauthorize of a replaced account) and "Remove" (deauthorize at Suunto, best effort, then
+  delete). Without operator keys a stored connection is kept and shown as "not available right
+  now"; the pool gives it no services, and Remove or deleting the account cannot tell Suunto (the
+  confirm texts say so).
 - **Token state**: a refresh that returns new tokens is saved with
   `store.saveSuuntoTokens(userId, ...)` without changing `service_updated_at` (so the service pool
   is not rebuilt). A refresh refused with `invalid_grant` marks the connection `needsReconnect`;
@@ -317,7 +333,8 @@ the token cache, prints the Suunto username and exits. It never opens a browser 
 - **Admin page**: as in PADI (no service checkboxes); user list column "Suunto" (connected / not /
   needs reconnect / sample data); overview counts connected users; a "Suunto API" card that says
   whether the three keys are set (never shows them), and shows the redirect URI to register in
-  the Suunto API Zone.
+  the Suunto API Zone, the Suunto servers (default or the operator's overrides) and the call
+  limits in use (`ServicePool.limits`, section 4).
 - **Access-request e-mails**: as in PADI (optional operator `SMTP_URL`, `NOTIFY_FROM`, TLS required).
 - **Consent page**: the permission lines say what the AI app can do: read workouts, daily activity,
   heart rate, sleep, recovery, routes and points of interest; unless read-only, add routes and
@@ -375,30 +392,47 @@ export function endpointEnv(env: Record<string, string | undefined>): Record<str
 export interface SuuntoAppKeys { clientId: string; clientSecret: string; subscriptionKey: string }
 export interface StoredSuuntoTokens { refreshToken: string; accessToken?: string; accessTokenExpiresAt?: number; clientId: string }
 export type SuuntoAuthErrorCode = "invalid_grant" | "denied" | "bad_client" | "network" | "unknown";
-export class SuuntoAuthError extends Error { readonly code: SuuntoAuthErrorCode; readonly status?: number }
+export class SuuntoAuthError extends UserFacingError { readonly code: SuuntoAuthErrorCode; readonly status?: number }
 export interface OAuthOptions { endpoints: SuuntoEndpoints; keys: Pick<SuuntoAppKeys, "clientId" | "clientSecret">; fetch?: typeof fetch; timeoutMs?: number; now?: () => number }
 export interface TokenResult { tokens: Required<Pick<StoredSuuntoTokens, "accessToken" | "accessTokenExpiresAt">> & StoredSuuntoTokens; username: string; scope?: string }
 export function authorizeUrl(endpoints: SuuntoEndpoints, clientId: string, redirectUri: string, state: string): string;
 export function exchangeCode(code: string, redirectUri: string, opts: OAuthOptions): Promise<TokenResult>;
-export function refreshTokens(refreshToken: string, opts: OAuthOptions): Promise<TokenResult>;
+export type RefreshResult = Omit<TokenResult, "username"> & { username?: string };   // a refresh answer may not carry the username
+export function refreshTokens(refreshToken: string, opts: OAuthOptions): Promise<RefreshResult>;
 export function deauthorize(accessToken: string, opts: OAuthOptions): Promise<void>;
 
 // src/suunto/session.ts
-export interface TokenSink { save(tokens: StoredSuuntoTokens): void; invalid(reason: string): void }
-export interface SuuntoSessionOptions { tokens: StoredSuuntoTokens; keys: SuuntoAppKeys; endpoints: SuuntoEndpoints; sink?: TokenSink; fetch?: typeof fetch; timeoutMs?: number; now?: () => number }
+export interface TokenSink {
+  save(tokens: StoredSuuntoTokens): void;
+  invalid(reason: string): void;
+  load?(): StoredSuuntoTokens | undefined;      // the tokens stored now (maybe newer); cheap, a throw counts as undefined
+}
+export interface SuuntoSessionOptions { tokens: StoredSuuntoTokens; keys: SuuntoAppKeys; endpoints: SuuntoEndpoints; sink?: TokenSink; fetch?: typeof fetch; timeoutMs?: number; now?: () => number; connectAgain?: string; backoffMs?: number; invalidGrantCooldownMs?: number }
 export class SuuntoSession {
   constructor(opts: SuuntoSessionOptions);
+  readonly connectAgain: string;                  // "Connect Suunto again." or the caller's sentence
   accessToken(): Promise<string>;                 // refreshes first when needed
   refreshNow(staleToken?: string): Promise<string>;
   username(): Promise<string>;                    // the `user` claim (refreshes first if no access token)
   get tokenExpiresAt(): number | undefined;
   get storedTokens(): StoredSuuntoTokens;
+  get expired(): boolean;                         // Suunto's last answer to the refresh token was invalid_grant
   deauthorize(): Promise<void>;                   // best effort; never throws
 }
 
+// src/suunto/limiter.ts (section 4, call limiter)
+export interface CallLimits { perMinute: number; perUserPerDay: number }       // 0 = no limit
+export const DEFAULT_LIMITS: CallLimits;                                      // { perMinute: 10, perUserPerDay: 0 }
+export interface CallLimiterOptions { perMinute: number; perKeyPerDay?: number; now?: () => number; sleep?: (ms: number) => Promise<void>; maxWaitMs?: number }
+export class CallLimiter {
+  constructor(opts: CallLimiterOptions);
+  acquire(key: string): Promise<void>;            // waits for a slot (up to maxWaitMs, default 45 s) or throws SuuntoHttpError kind "rate_limit"
+}
+
 // src/suunto/api.ts
+export interface SuuntoApiOptions { session: SuuntoSession; keys: SuuntoAppKeys; endpoints: SuuntoEndpoints; fetch?: typeof fetch; log?: (m: string) => void; timeoutMs?: number; backoffMs?: number; sleep?: (ms: number) => Promise<void>; limiter?: CallLimiter; limiterKey?: string }
 export class SuuntoApi implements ActivityBackend {
-  constructor(opts: { session: SuuntoSession; keys: SuuntoAppKeys; endpoints: SuuntoEndpoints; fetch?: typeof fetch; log?: (m: string) => void; timeoutMs?: number; backoffMs?: number });
+  constructor(opts: SuuntoApiOptions);
 }
 
 // src/suunto/activities.ts
@@ -441,8 +475,12 @@ export interface SuuntoSettings {
   redirectUri: string;                    // --login only
   endpoints: SuuntoEndpoints;
 }
-export interface AppConfig { suunto: SuuntoSettings; units: UnitChoice; readOnly: boolean; timeZone: string; transport: "stdio" | "http"; http: HttpSettings; secrets: string[] }
+export interface AppConfig { suunto: SuuntoSettings; units: UnitChoice; readOnly: boolean; timeZone: string; transport: "stdio" | "http"; http: HttpSettings; secrets: string[]; callLimits?: CallLimits }
 export function loadConfig(env?: Record<string, string | undefined>, cli?: CliOverrides, warn?: (m: string) => void): AppConfig;
+export function loadLoginConfig(env?: Record<string, string | undefined>, warn?: (m: string) => void): AppConfig;   // --login: keys and SUUNTO_TOKEN_CACHE, no sign-in yet
+export function callLimitsFromEnv(env: Record<string, string | undefined>, defaults?: Partial<CallLimits>): CallLimits;  // empty = default; throws ConfigError for a bad value
+export function expandPath(path: string): string;                             // "~" and "~/..." in the home folder, made absolute
+export function inspectTokenCache(file: string, clientId?: string): { tokens: StoredSuuntoTokens } | { problem: string; missing: boolean };  // never throws
 export function suuntoKeysFromEnv(env: Record<string, string | undefined>): SuuntoAppKeys | undefined;  // undefined unless all three are set; throws ConfigError when only some are
 export function describeConfig(config: AppConfig): Record<string, unknown>;    // no secrets
 
@@ -450,20 +488,33 @@ export function describeConfig(config: AppConfig): Record<string, unknown>;    /
 export class CachedBackend implements ActivityBackend { constructor(inner: ActivityBackend, opts?: { now?: () => number; maxEntries?: number; maxBytes?: number }) }
 
 // src/server.ts
-export interface Services { activity?: ActivityService; backend?: ActivityBackend; session?: SuuntoSession }
+export interface Services { activity?: ActivityService; backend?: ActivityBackend; session?: SuuntoSession; reused: boolean }
 export interface CreateServicesOptions {
   demo?: DemoActivityStore;               // demo account: no connection to Suunto, ever
   tokens?: StoredSuuntoTokens;            // the web store's tokens (win over config and cache)
-  tokenSink?: TokenSink;                  // where new tokens are saved (web store); default SUUNTO_TOKEN_CACHE or memory
+  tokenSink?: TokenSink;                  // where new tokens are saved (web store); default fileTokenSink(SUUNTO_TOKEN_CACHE) or memory
+  connectAgain?: string;                  // the sentence after "Your Suunto connection expired."
+  cache?: boolean;                        // default true (CachedBackend)
   fetch?: typeof fetch;
   log?: (m: string) => void;
+  limiter?: CallLimiter;                  // the web service's one limiter; default one per process from config.callLimits
+  limiterKey?: string;                    // the user id (web); single-user mode uses one key for the process
+  reuse?: { session: SuuntoSession; backend: ActivityBackend };   // same connection, new settings (web pool)
 }
-export function createServices(config: AppConfig, opts?: CreateServicesOptions): Services;   // {} when there is no refresh token
+export function createServices(config: AppConfig, opts?: CreateServicesOptions): Services;   // { reused: false } when there is no refresh token
+export function fileTokenSink(file: string, log: (m: string) => void, clientId?: string): TokenSink;   // load() reads the file again
 export function closeServices(services: Services): Promise<void>;
 export function createMcpServer(config: AppConfig, services: Services, log: (m: string) => void, hooks?: McpServerHooks): McpServer;
 export const SERVER_TITLE: string;        // "MCP for Suunto (workouts, sleep, recovery)"
 export const SERVER_DESCRIPTION: string;
 export function buildInstructions(config: AppConfig): string;
+
+// src/web/server.ts and src/web/accounts.ts (section 8)
+export const WEB_DEFAULT_LIMITS: CallLimits;                                  // { perMinute: 10, perUserPerDay: 100 }
+export function suuntoRedirectUri(publicUrl: URL, configured: string | undefined): string;   // throws ConfigError (section 8)
+export function isPublicHost(hostHeader: string | undefined, publicUrl: URL): boolean;
+export const POOL_IDLE_MS: number;                                            // 35 minutes
+// ServicePool keeps one Connection { connectedAt, session, backend } per user across rebuilds; get limiter(), get limits()
 
 // src/web/store.ts (section 8)
 export interface SuuntoAccountSettings { username: string; refreshToken: string; accessToken?: string; accessTokenExpiresAt?: number; clientId: string; units: UnitChoice; readOnly: boolean; timeZone?: string; connectedAt: number; lastCheck?: { at: number; workouts?: number; error?: string } }
