@@ -136,6 +136,18 @@ Files of the PADI template that are dropped: `src/padi/**`, `src/logbook/**`,
   quota), and possibly 401 with "RateLimitExceeded": all three are rate limit errors ("Suunto's
   call limit for this service is reached; try again in <time>"), never a sign-in problem and never
   a refresh. A 401 whose body names the subscription key is an operator configuration error.
+- **Call limiter.** One process-wide `CallLimiter` (`src/suunto/limiter.ts`) spaces every data
+  request (retries included) to stay under `SUUNTO_CALLS_PER_MINUTE` (default 10, Suunto's
+  Developer limit; 0 = off) and, in the web service, caps each user at
+  `SUUNTO_CALLS_PER_USER_PER_DAY` (default 100 there, 0 = off), so one account cannot use up the
+  shared weekly quota. Raise both after Suunto accepts the Production subscription. Only HTTP 429,
+  502, 503, 504 and network errors are retried (never 500: Suunto answers a malformed workout key
+  with 500); workout keys are checked (24 hex characters) before any request.
+- **One session per connection.** The web pool keeps one `SuuntoSession` and one cached backend
+  per user and connection (user id + connectedAt) across rebuilds of the user's services, so there
+  is never more than one refresh per user and the cache survives settings changes. Token sinks
+  have `load()`: a session adopts a newer stored refresh token before it refreshes and after an
+  `invalid_grant`.
 - **False invalid_grant.** Suunto has answered `invalid_grant` by mistake during outages and
   accepted the same refresh token later. So an `invalid_grant` marks the connection
   `needsReconnect` but keeps the stored tokens, and the session tries the refresh again after a
