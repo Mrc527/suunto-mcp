@@ -116,12 +116,23 @@ Files of the PADI template that are dropped: `src/padi/**`, `src/logbook/**`,
   (HTTP 400/401) answer to a refresh means the user must connect again (TokenSink.invalid).
 - **Deauthorize.** `GET /oauth/deauthorize?client_id=<id>` with the Bearer access token. Called,
   best effort, when the user removes the connection or deletes the account here.
-- **Errors.** 401 after a refresh: "Suunto refused the sign-in. Connect Suunto again at
-  <PUBLIC_URL>/account". 403: Suunto refused the request (the subscription key does not cover this
-  API, or the user did not allow it). 404: not found (workout key, route id). 429 and 503: retry
-  with backoff (honour `Retry-After` up to 30 s, at most 3 tries for reads), then "Suunto is busy or
-  the rate limit is reached; try again later". Writes are never retried after the request may have
-  reached Suunto: the error says "check before you try again".
+- **Errors.** The data gateway answers errors as plain text, not JSON, with a code in brackets at
+  the end of the first line, for example "JWT not present. (TokenNotPresent)" (suunto-api.md
+  section 6b). A 401 that names the subscription key ("(SubscriptionKeyInvalid)") is an operator
+  error ("Suunto refused this server's API subscription key"), never a refresh. Any other 401
+  (for example a `Token...` code): refresh once and send once more; a second 401: "Suunto refused
+  the sign-in. Connect Suunto again at <PUBLIC_URL>/account". 403: "Suunto refused <what> (HTTP
+  403)" (the subscription key does not cover this API, or Suunto does not allow it for this
+  account). 404: not found (workout key, route id). 503 on a read: "Suunto is busy right now".
+  500 with a workout key: "Suunto could not answer (HTTP 500, ...)" plus a hint to check the key.
+  Writes are never retried after the request may have reached Suunto: the error says "check
+  before you try again".
+- **Retries** (reads only, at most 3 tries, backoff): only HTTP 429, 502, 503, 504 and network
+  errors, also while the answer is read. Never 500 (Suunto answers a malformed or unknown workout
+  key with 500, and every try counts against the call limit). `Retry-After` is honoured up to
+  30 s; a longer one, or a 429 without `Retry-After`, ends the tries at once. A read that timed
+  out reached Suunto: it is tried again at most once, and the FIT export never
+  (`retryOnTimeout: false`). A connection that never opened may be tried again for any request.
 - **Timeouts** 20 s per request (FIT export 60 s).
 - **Rate limits.** The Developer API allows 10 calls per minute and at most 200 calls per week
   per subscription; Production limits are higher but not published, and Suunto forbids polling.
@@ -136,18 +147,38 @@ Files of the PADI template that are dropped: `src/padi/**`, `src/logbook/**`,
   quota), and possibly 401 with "RateLimitExceeded": all three are rate limit errors ("Suunto's
   call limit for this service is reached; try again in <time>"), never a sign-in problem and never
   a refresh. A 401 whose body names the subscription key is an operator configuration error.
-- **Call limiter.** One process-wide `CallLimiter` (`src/suunto/limiter.ts`) spaces every data
-  request (retries included) to stay under `SUUNTO_CALLS_PER_MINUTE` (default 10, Suunto's
-  Developer limit; 0 = off) and, in the web service, caps each user at
-  `SUUNTO_CALLS_PER_USER_PER_DAY` (default 100 there, 0 = off), so one account cannot use up the
-  shared weekly quota. Raise both after Suunto accepts the Production subscription. Only HTTP 429,
-  502, 503, 504 and network errors are retried (never 500: Suunto answers a malformed workout key
-  with 500); workout keys are checked (24 hex characters) before any request.
+- **Call limiter.** One process-wide `CallLimiter` (`src/suunto/limiter.ts`) is asked before
+  every data request that is sent (retries included; OAuth calls and demo accounts never count):
+  - `SUUNTO_CALLS_PER_MINUTE` (default 10, Suunto's Developer limit; 0 = off): a sliding window
+    of 60 s for the whole process. A request without a free slot waits for one, up to 45 s; a
+    longer wait fails at once with a `rate_limit` error ("Suunto's call limit for this service is
+    reached. Try again in <time>.").
+  - `SUUNTO_CALLS_PER_USER_PER_DAY` (0 = off): at most this many requests per user id and UTC day
+    ("You reached this service's daily limit of <n> Suunto requests for your account. Try again
+    tomorrow."). Default 100 in the web service (`WEB_DEFAULT_LIMITS`), so one account cannot use
+    up the shared weekly quota; default 0 in single-user mode, where the whole process is one key.
+  - `callLimitsFromEnv` (src/config.ts) reads both; an empty value means the default, a value that
+    is not a whole number of 0 or more is a ConfigError at startup. The deploy compose files pass
+    both as `${VAR:-}`. The admin page's Suunto API card shows the limits in use. The test request
+    of "Connect Suunto" counts too. Raise both after Suunto accepts the Production subscription.
+- **Workout keys** are checked (24 hex characters, `WORKOUT_KEY` in src/activity/service.ts)
+  before any request: Suunto answers any other key with HTTP 500.
+- **Workout lists** do not trust the order of Suunto's list (it is not documented). The service
+  walks the range backward from its end in time windows (the first 60 days, the next sized from the
+  count of the last), asks each window with `filter-by-modification-time=false` and limit 100,
+  keeps only whole windows and sorts newest first itself. It stops when the list page (plus one)
+  is known, at the cap (1000 for lists, 2000 for statistics) or after 40 requests; a window
+  stopped by a call limit is dropped and the answer says which part is missing.
 - **One session per connection.** The web pool keeps one `SuuntoSession` and one cached backend
-  per user and connection (user id + connectedAt) across rebuilds of the user's services, so there
-  is never more than one refresh per user and the cache survives settings changes. Token sinks
-  have `load()`: a session adopts a newer stored refresh token before it refreshes and after an
-  `invalid_grant`.
+  per user and connection (user id + connectedAt) across rebuilds of the user's services
+  (`CreateServicesOptions.reuse`), so there is never more than one refresh per user and the cache
+  survives settings changes. Unused entries are closed after `POOL_IDLE_MS` (35 minutes, longer
+  than the 30 minute cache entries). Token sinks have `load()`: a session adopts a newer stored
+  refresh token before it refreshes and after an `invalid_grant`, and newer stored tokens end the
+  invalid_grant cool-down at once. The web sink returns the stored tokens of the same connection
+  only; the single-user `fileTokenSink` reads `SUUNTO_TOKEN_CACHE` again, so processes that share
+  the file never use a rotated refresh token, and a running server picks up a new `--login`
+  without a restart.
 - **False invalid_grant.** Suunto has answered `invalid_grant` by mistake during outages and
   accepted the same refresh token later. So an `invalid_grant` marks the connection
   `needsReconnect` but keeps the stored tokens, and the session tries the refresh again after a
@@ -224,13 +255,26 @@ user data.
 
 `SUUNTO_CLIENT_ID`, `SUUNTO_CLIENT_SECRET` / `_FILE`, `SUUNTO_SUBSCRIPTION_KEY` / `_FILE` (all
 three required), `SUUNTO_REFRESH_TOKEN` / `_FILE`, `SUUNTO_TOKEN_CACHE` (file with the current
-tokens, mode 0600, written atomically with O_EXCL as in the template; default none = memory only),
+tokens, mode 0600, written atomically with O_EXCL as in the template; default none = memory only;
+a leading `~` is the home folder, because MCP apps do not expand it: `expandPath`),
 `SUUNTO_REDIRECT_URI` (only for `--login`; default `http://localhost:8723/callback`; it must be a
 loopback http URL and must be registered in the Suunto app settings), `SUUNTO_UNITS`
-(metric/imperial, default metric), `SUUNTO_READ_ONLY`, `SUUNTO_TIMEZONE` (default system), plus
-the template's `MCP_HTTP_*` settings and the operator URL overrides of section 4.
+(metric/imperial, default metric), `SUUNTO_READ_ONLY`, `SUUNTO_TIMEZONE` (default `TZ` when it is
+an IANA name, else the system's), `SUUNTO_CALLS_PER_MINUTE` (default 10) and
+`SUUNTO_CALLS_PER_USER_PER_DAY` (default 0 here) of section 4 (`AppConfig.callLimits`), plus the
+template's `MCP_HTTP_*` settings and the operator URL overrides of section 4.
 `AppConfig.secrets` holds the client secret, the subscription key, the refresh token and the HTTP
-token for redaction.
+token for redaction. An empty value means "not set" everywhere (Docker Compose passes unset
+variables as empty strings).
+
+The serving modes need a sign-in: `SUUNTO_REFRESH_TOKEN` or an existing token cache. A token cache
+that exists but cannot be used (`inspectTokenCache`: unreadable, not JSON, no refresh token or
+client id, or written for another `SUUNTO_CLIENT_ID`) is never skipped in silence: it is a
+ConfigError that names the file and says to run `--login` again, or a warning when
+`SUUNTO_REFRESH_TOKEN` is set (that token is used, and the next refresh replaces the file).
+
+Flags: `--login` cannot be combined with `--check`, `--web`, `--http` or `--stdio`; `--web` cannot
+be combined with `--check`, `--http` or `--stdio`.
 
 `suunto-mcp --login`: needs the three keys and `SUUNTO_TOKEN_CACHE`. It listens on the loopback
 address and port of `SUUNTO_REDIRECT_URI`, prints the authorize URL (with a random `state`),
