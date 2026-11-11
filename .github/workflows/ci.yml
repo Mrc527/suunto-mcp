@@ -211,6 +211,12 @@ jobs:
           SETUP_DOMAIN: ${{ vars.SUUNTO_DOMAIN || 'suunto.mcp.visin.ch' }}
           SETUP_ADMIN_EMAIL: ${{ secrets.SUUNTO_ADMIN_EMAIL || vars.SUUNTO_ADMIN_EMAIL || secrets.ADMIN_EMAIL || vars.ADMIN_EMAIL }}
           SETUP_ADMIN_PASSWORD: ${{ secrets.SUUNTO_ADMIN_PASSWORD || secrets.ADMIN_PASSWORD }}
+          # Limits of Suunto requests for the hosted service, written to .env on every deploy.
+          # Defaults for the Production API; change them with repository variables of the same
+          # name (0 = no limit). Self-hosters without these variables get the code's defaults.
+          SUUNTO_CALLS_PER_MINUTE: ${{ vars.SUUNTO_CALLS_PER_MINUTE || '60' }}
+          SUUNTO_CALLS_PER_USER_PER_DAY: ${{ vars.SUUNTO_CALLS_PER_USER_PER_DAY || '500' }}
+          SUUNTO_CALLS_PER_USER_PER_WEEK: ${{ vars.SUUNTO_CALLS_PER_USER_PER_WEEK || '0' }}
       - name: Check the public URL
         if: steps.deploy.outputs.url != ''
         run: .github/scripts/ssh-deploy.sh check-url "$URL"

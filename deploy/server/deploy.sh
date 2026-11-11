@@ -44,6 +44,10 @@ NEW_SUBSCRIPTION_KEY=""
 NEW_DOMAIN=""
 NEW_ADMIN_EMAIL=""
 NEW_ADMIN_PASSWORD=""
+# Call limits from the pipeline (empty: keep what .env has).
+NEW_CALLS_PER_MINUTE=""
+NEW_CALLS_PER_USER_PER_DAY=""
+NEW_CALLS_PER_USER_PER_WEEK=""
 REG_CONFIG=""
 REG_HOST=""
 
@@ -281,6 +285,9 @@ read_credentials() {
     IFS= read -r NEW_DOMAIN || true
     IFS= read -r NEW_ADMIN_EMAIL || true
     IFS= read -r NEW_ADMIN_PASSWORD || true
+    IFS= read -r NEW_CALLS_PER_MINUTE || true
+    IFS= read -r NEW_CALLS_PER_USER_PER_DAY || true
+    IFS= read -r NEW_CALLS_PER_USER_PER_WEEK || true
   fi
   REG_USER=${REG_USER%$'\r'}
   REG_TOKEN=${REG_TOKEN%$'\r'}
@@ -290,6 +297,9 @@ read_credentials() {
   NEW_DOMAIN=${NEW_DOMAIN%$'\r'}
   NEW_ADMIN_EMAIL=${NEW_ADMIN_EMAIL%$'\r'}
   NEW_ADMIN_PASSWORD=${NEW_ADMIN_PASSWORD%$'\r'}
+  NEW_CALLS_PER_MINUTE=${NEW_CALLS_PER_MINUTE%$'\r'}
+  NEW_CALLS_PER_USER_PER_DAY=${NEW_CALLS_PER_USER_PER_DAY%$'\r'}
+  NEW_CALLS_PER_USER_PER_WEEK=${NEW_CALLS_PER_USER_PER_WEEK%$'\r'}
 }
 
 # The Suunto app keys from the pipeline: all three or none (the service does not start with only
@@ -353,6 +363,26 @@ apply_suunto_keys() {
   else
     log "the Suunto app keys in .env match the GitHub secrets"
   fi
+}
+
+# Write the call limits from the pipeline to .env when they differ from what is there (they are
+# not secret). An empty value keeps the line of .env as it is.
+apply_call_limits() {
+  local name value changed=""
+  for name in SUUNTO_CALLS_PER_MINUTE SUUNTO_CALLS_PER_USER_PER_DAY SUUNTO_CALLS_PER_USER_PER_WEEK; do
+    case $name in
+      SUUNTO_CALLS_PER_MINUTE) value=$NEW_CALLS_PER_MINUTE ;;
+      SUUNTO_CALLS_PER_USER_PER_DAY) value=$NEW_CALLS_PER_USER_PER_DAY ;;
+      SUUNTO_CALLS_PER_USER_PER_WEEK) value=$NEW_CALLS_PER_USER_PER_WEEK ;;
+    esac
+    [ -n "$value" ] || continue
+    [[ $value =~ ^[0-9]{1,7}$ ]] || die "the call limit $name from the pipeline is not a whole number: $value"
+    if [ "$(env_get "$name")" != "$value" ]; then
+      env_set "$name" "$value"
+      changed="$changed $name=$value"
+    fi
+  done
+  if [ -n "$changed" ]; then log "wrote the call limits from the pipeline to .env:$changed"; fi
 }
 
 # Without the Suunto app keys the service runs, but only demo accounts work.
@@ -554,6 +584,7 @@ cmd_deploy() {
   check_config "$image"
   lock "deploy $image $revision"
   apply_suunto_keys
+  apply_call_limits
   warn_missing_suunto_keys
   current=$(env_get SUUNTO_MCP_IMAGE)
   # Normally the running version; if that one never became healthy, the last one that did.

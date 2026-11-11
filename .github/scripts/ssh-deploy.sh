@@ -18,6 +18,8 @@
 #   SETUP_DOMAIN, SETUP_ADMIN_EMAIL, SETUP_ADMIN_PASSWORD
 #                                        (optional) first deploy only: deploy.sh creates .env
 #                                        with them when the server has none yet
+#   SUUNTO_CALLS_PER_MINUTE, SUUNTO_CALLS_PER_USER_PER_DAY, SUUNTO_CALLS_PER_USER_PER_WEEK
+#                                        (optional) call limits; deploy.sh writes them to .env
 set -euo pipefail
 
 IMAGE_RE='^[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}$'
@@ -173,9 +175,13 @@ cmd_deploy() {
   echo "Running deploy.sh on the server"
   log=$(mktemp)
   # Secrets travel on stdin, never on a command line: registry login, then the Suunto app keys.
-  printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "${REGISTRY_USER:-}" "${REGISTRY_TOKEN:-}" \
+  for limit in "${SUUNTO_CALLS_PER_MINUTE:-}" "${SUUNTO_CALLS_PER_USER_PER_DAY:-}" "${SUUNTO_CALLS_PER_USER_PER_WEEK:-}"; do
+    [[ -z $limit || $limit =~ ^[0-9]{1,7}$ ]] || fail "A SUUNTO_CALLS_* variable is not a whole number of 0 or more: '$limit'"
+  done
+  printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "${REGISTRY_USER:-}" "${REGISTRY_TOKEN:-}" \
     "${SUUNTO_CLIENT_ID:-}" "${SUUNTO_CLIENT_SECRET:-}" "${SUUNTO_SUBSCRIPTION_KEY:-}" \
-    "${SETUP_DOMAIN:-}" "${SETUP_ADMIN_EMAIL:-}" "${SETUP_ADMIN_PASSWORD:-}" |
+    "${SETUP_DOMAIN:-}" "${SETUP_ADMIN_EMAIL:-}" "${SETUP_ADMIN_PASSWORD:-}" \
+    "${SUUNTO_CALLS_PER_MINUTE:-}" "${SUUNTO_CALLS_PER_USER_PER_DAY:-}" "${SUUNTO_CALLS_PER_USER_PER_WEEK:-}" |
     run_untrusted ssh_target "cd -- '$dir' && bash ./deploy.sh deploy '$image' '$revision'" 2>&1 | tee "$log" || rc=$?
   summary "### Deploy to $DEPLOY_HOST" "- Image: \`$image\`" "- Revision: \`$revision\`"
   if [ "$SUUNTO_KEYS_SET" -eq 3 ]; then

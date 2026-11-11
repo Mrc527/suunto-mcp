@@ -181,6 +181,11 @@ Files of the PADI template that are dropped: `src/padi/**`, `src/logbook/**`,
     pass them as `${VAR:-}`. The admin page's Suunto API card shows the limits in use. The test
     request of "Connect Suunto" counts too. Raise them after Suunto accepts the Production
     subscription.
+- **Hosted limits.** The hosted service runs on the Production API (approved 2026-11-11). Its
+  limits come from the CI workflow (repository variables `SUUNTO_CALLS_PER_MINUTE`,
+  `SUUNTO_CALLS_PER_USER_PER_DAY`, `SUUNTO_CALLS_PER_USER_PER_WEEK`, defaults 60, 500 and 0):
+  `deploy.sh` writes them to the server's `.env` on every deploy, like the Suunto app keys. The
+  code's own defaults stay at the Developer API's values for self-hosters.
 - **Workout keys** are checked (24 hex characters, `WORKOUT_KEY` in src/activity/service.ts)
   before any request: Suunto answers any other key with HTTP 500.
 - **Workout lists** do not trust the order of Suunto's list (it is not documented). The service
