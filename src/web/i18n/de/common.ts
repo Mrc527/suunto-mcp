@@ -34,7 +34,6 @@ export default {
   "common.flash.sessions": "Von allen anderen Browsern abgemeldet.",
   "common.flash.settings": "Servereinstellungen gespeichert.",
   "common.flash.user": "Benutzer aktualisiert.",
-  "common.flash.approved": "Anfrage genehmigt. Die Person wird nicht automatisch benachrichtigt: Sag ihr, dass sie sich jetzt anmelden kann.",
   "common.flash.rejected": "Anfrage abgelehnt und gelöscht.",
   "common.flash.deleted": "Gelöscht.",
   "common.flash.welcome": "Willkommen! Verbinde unten deinen Suunto-Account und danach deine KI-App.",

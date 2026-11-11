@@ -28,7 +28,7 @@ messages): simple English, short sentences, **never the em dash character**, no 
 | Product name (UI, docs) | MCP for Suunto |
 | npm package, binary, Docker image, compose service | `suunto-mcp` |
 | GitHub repo | `Mrc527/suunto-mcp` (image `ghcr.io/mrc527/suunto-mcp`) |
-| MCP registry name (`server.json`) | `io.github.Mrc527/mcp-for-suunto` |
+| MCP registry name (`server.json`) | `ch.visin.mcp/suunto` |
 | Hosted service | `https://suunto.mcp.visin.ch` (MCP address `https://suunto.mcp.visin.ch/mcp`), deployed to `nebula.visin.ch` like PADI and iCloud |
 | Suunto OAuth redirect URI of the hosted service | `https://suunto.mcp.visin.ch/suunto/callback` |
 | MCP `serverInfo.name` | `suunto-mcp` |
@@ -361,14 +361,31 @@ the token cache, prints the Suunto username and exits. It never opens a browser 
 - **No Suunto calls on page views.** The account page shows what was saved at connect time
   (`SuuntoAccountSettings.lastCheck`: when, and the workouts counted in the last 30 days, or the
   error); it never calls Suunto just to show the page.
-- **DB**: one fresh initial schema (no migrations): column `service_enc`, `service_updated_at`,
-  `suunto_needs_reconnect`, table `suunto_oauth_states`, and the template's other tables.
+- **DB**: one fresh initial schema: column `service_enc`, `service_updated_at`,
+  `suunto_needs_reconnect`, table `suunto_oauth_states`, and the template's other tables. Later
+  versions are new entries at the end of the list (never a change to an applied one): 2 the
+  call limiter's `suunto_calls`, 3 the index `activity_at` for the usage statistics.
 - **Admin page**: as in PADI (no service checkboxes); user list column "Suunto" (connected / not /
   needs reconnect / sample data); overview counts connected users; a "Suunto API" card that says
   whether the three keys are set (never shows them), and shows the redirect URI to register in
   the Suunto API Zone, the Suunto servers (default or the operator's overrides) and the call
-  limits in use (`ServicePool.limits`, section 4).
+  limits in use (`ServicePool.limits`, section 4). A **Usage statistics** page (`/admin/stats`,
+  src/web/admin-stats.ts, as in MCP for iCloud) reads the activity log (`Store.usageStats`): 24
+  hours, 7, 30 or 90 days; calls, active users, failed calls, median time; calls per day (per
+  hour) as an SVG chart drawn on the server (the CSP allows no inline scripts or styles); tools,
+  users and AI apps (an app is "Claude" only when every redirect URI is Claude's); one user on
+  their own; a one-minute cache per database. The privacy policy says the administrator sees
+  these statistics.
 - **Access-request e-mails**: as in PADI (optional operator `SMTP_URL`, `NOTIFY_FROM`, TLS required).
+- **Welcome e-mail** when an administrator approves a request (src/web/welcome-mail.ts, sent by
+  `RequestNotices.welcome`): through the operator's SMTP server, from `NOTIFY_FROM`, Reply-To the
+  approving administrator (the operator's `CONTACT_EMAIL` if that address is not an ordinary
+  one), to the person's address only when `isEmail` accepts it, in the language they requested
+  access in (`users.lang`, saved at the request and kept with the account, as the privacy
+  policy says; English otherwise). Plain text and HTML (the logo as an inline `cid:` image, every
+  value HTML-escaped), with the trademark line of the page footer. Steps: sign in, Connect Suunto on the account page, add the MCP address to the AI app;
+  free while experimental, own risk, link to `/terms`. Nothing the person typed is in it. Without
+  SMTP, or when sending fails, the request is approved anyway and the admin page says why.
 - **Consent page**: the permission lines say what the AI app can do: read workouts, daily activity,
   heart rate, sleep, recovery, routes and points of interest; unless read-only, add routes and
   points of interest to the Suunto App.

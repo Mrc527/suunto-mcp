@@ -135,6 +135,8 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX suunto_calls_user ON suunto_calls(user_id, at);
   `,
+  // 3: the usage statistics on the admin page read the activity of all users by time.
+  `CREATE INDEX activity_at ON activity(at);`,
 ];
 
 export type Db = DatabaseSync;

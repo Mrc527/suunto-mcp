@@ -70,8 +70,9 @@ describe("access requests", () => {
     expect(adminPage.html).toContain('title="Access requests waiting">1</span>');
 
     const approve = await admin.post("/admin/requests/action", { _csrf: adminPage.csrf, id: idOf("asker@example.com"), action: "approve" });
-    expect(approve.status).toBe(303);
-    expect(approve.headers.get("location")).toBe("/admin?m=approved#requests");
+    expect(approve.status).toBe(200);
+    // This server has no SMTP server, so no welcome e-mail can be sent: the page says so.
+    expect(await approve.text()).toContain("Request approved, but no welcome e-mail could be sent: no mail server is set up for this service (SMTP_URL). Let the person know that they can sign in now.");
     const user = web.ctx.store.getUser(idOf("asker@example.com"))!;
     expect(user.pending).toBe(false);
     expect(user.disabled).toBe(false);

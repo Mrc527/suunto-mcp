@@ -30,7 +30,6 @@ export default {
   "common.flash.sessions": "Déconnexion effectuée sur tous les autres navigateurs.",
   "common.flash.settings": "Réglages du serveur enregistrés.",
   "common.flash.user": "Utilisateur mis à jour.",
-  "common.flash.approved": "Demande approuvée. La personne n'est pas prévenue automatiquement : informez-la qu'elle peut maintenant se connecter.",
   "common.flash.rejected": "Demande refusée et supprimée.",
   "common.flash.deleted": "Suppression effectuée.",
   "common.flash.welcome": "Bienvenue ! Connectez votre compte Suunto ci-dessous, puis connectez votre app d'IA.",

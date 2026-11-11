@@ -10,6 +10,21 @@ import type { StoredSuuntoTokens } from "../suunto/oauth.js";
 import { randomToken, SecretBox, sha256 } from "./crypto.js";
 import { transaction, type Db } from "./db.js";
 
+/** Usage statistics from the activity log (see Store.usageStats). */
+export interface UsageStats {
+  calls: number;
+  failed: number;
+  /** Users with at least one call. */
+  users: number;
+  medianMs?: number;
+  /** Calls per quarter hour that had any (start: in ms, UTC). */
+  quarters: { start: number; calls: number; failed: number }[];
+  tools: { tool: string; calls: number; failed: number; medianMs: number }[];
+  byUser: { userId: string; calls: number; failed: number; lastAt: number; topTool: string }[];
+  /** Calls per OAuth client (an app connection) and user; calls without a client have no clientId. */
+  byClient: { clientId?: string; userId: string; calls: number }[];
+}
+
 export interface User {
   id: string;
   email: string;
@@ -39,7 +54,10 @@ export interface User {
   demoReadOnly?: boolean;
   /** An administrator wants an e-mail when someone requests access. */
   notifyRequests: boolean;
-  /** The language of the user's last visit to the admin page (for the e-mails it sends them). */
+  /**
+   * The language for e-mails to this user: an administrator's last visit to the admin page, or
+   * the language a person requested access in (for the welcome e-mail).
+   */
   lang?: string;
 }
 
@@ -889,6 +907,99 @@ export class Store {
   activitySince(userId: string, afterId: number, limit = 50): ActivityEntry[] {
     const rows = this.db.prepare("SELECT * FROM activity WHERE user_id = ? AND id > ? ORDER BY id DESC LIMIT ?").all(userId, afterId, limit) as Row[];
     return rows.map(toActivity).reverse();
+  }
+
+  /**
+   * Usage statistics for the admin page, from the activity log (which holds 90 days): since
+   * `since`, for every user or for one. Four passes over the period, each through an index
+   * (the time index for all users, the user index for one), and the rest added up here; the
+   * medians come from counts per tool and duration. Times are grouped by quarter hour (UTC), so
+   * the page can group them into hours or days in any time zone, half-hour ones included.
+   */
+  usageStats(since: number, userId?: string): UsageStats {
+    // Without INDEXED BY, SQLite reads the whole table through the user index for GROUP BY user_id.
+    const from = userId ? "activity" : "activity INDEXED BY activity_at";
+    const where = userId ? "at > ? AND user_id = ?" : "at > ?";
+    const args = userId ? [since, userId] : [since];
+    const all = (sql: string) => this.db.prepare(sql).all(...args) as Row[];
+
+    let calls = 0;
+    let failed = 0;
+    const tools = new Map<string, { tool: string; calls: number; failed: number; medianMs: number }>();
+    const users = new Map<string, { userId: string; calls: number; failed: number; lastAt: number; topTool: string; topCalls: number }>();
+    for (const r of all(`SELECT user_id, tool, COUNT(*) AS n, SUM(1 - ok) AS failed, MAX(at) AS last_at FROM ${from} WHERE ${where} GROUP BY user_id, tool`)) {
+      const n = Number(r.n);
+      const f = Number(r.failed);
+      const tool = String(r.tool);
+      calls += n;
+      failed += f;
+      const t = tools.get(tool) ?? { tool, calls: 0, failed: 0, medianMs: 0 };
+      t.calls += n;
+      t.failed += f;
+      tools.set(tool, t);
+      const id = String(r.user_id);
+      const u = users.get(id) ?? { userId: id, calls: 0, failed: 0, lastAt: 0, topTool: "", topCalls: 0 };
+      u.calls += n;
+      u.failed += f;
+      u.lastAt = Math.max(u.lastAt, Number(r.last_at));
+      if (n > u.topCalls || (n === u.topCalls && tool < u.topTool)) Object.assign(u, { topTool: tool, topCalls: n });
+      users.set(id, u);
+    }
+
+    // Medians (the lower middle value): from the number of calls per tool and duration.
+    const durations = new Map<string, [number, number][]>();
+    for (const r of all(`SELECT tool, duration_ms, COUNT(*) AS n FROM ${from} WHERE ${where} GROUP BY tool, duration_ms`)) {
+      const list = durations.get(String(r.tool)) ?? [];
+      list.push([Number(r.duration_ms), Number(r.n)]);
+      durations.set(String(r.tool), list);
+    }
+    const median = (list: [number, number][], total: number) => {
+      const sorted = [...list].sort((a, b) => a[0] - b[0]);
+      let seen = 0;
+      const middle = Math.floor((total - 1) / 2);
+      for (const [ms, n] of sorted) {
+        seen += n;
+        if (seen > middle) return ms;
+      }
+      return 0;
+    };
+    for (const [tool, list] of durations) {
+      const t = tools.get(tool);
+      if (t) t.medianMs = median(list, t.calls);
+    }
+    const medianMs = calls ? median([...durations.values()].flat(), calls) : undefined;
+
+    return {
+      calls,
+      failed,
+      users: users.size,
+      ...(medianMs !== undefined ? { medianMs } : {}),
+      quarters: all(`SELECT at / 900000 AS q, COUNT(*) AS n, SUM(1 - ok) AS failed FROM ${from} WHERE ${where} GROUP BY q ORDER BY q`).map((r) => ({
+        start: Number(r.q) * 900_000,
+        calls: Number(r.n),
+        failed: Number(r.failed),
+      })),
+      tools: [...tools.values()].sort((a, b) => b.calls - a.calls || a.tool.localeCompare(b.tool)),
+      byUser: [...users.values()].sort((a, b) => b.calls - a.calls || b.lastAt - a.lastAt).map(({ topCalls: _n, ...u }) => u),
+      byClient: all(`SELECT client_id, user_id, COUNT(*) AS n FROM ${from} WHERE ${where} GROUP BY client_id, user_id`).map((r) => ({
+        ...(r.client_id == null ? {} : { clientId: String(r.client_id) }),
+        userId: String(r.user_id),
+        calls: Number(r.n),
+      })),
+    };
+  }
+
+  /** The name an OAuth client gave itself (if any) and its redirect addresses, for showing which app it is. */
+  clientInfo(clientIds: string[]): Map<string, { name?: string; redirectUris: string[] }> {
+    const out = new Map<string, { name?: string; redirectUris: string[] }>();
+    const get = this.db.prepare("SELECT data FROM oauth_clients WHERE client_id = ?");
+    for (const id of new Set(clientIds)) {
+      const r = get.get(id) as Row | undefined;
+      if (!r) continue;
+      const c = JSON.parse(String(r.data)) as OAuthClientInformationFull;
+      out.set(id, { ...(c.client_name ? { name: c.client_name } : {}), redirectUris: (c.redirect_uris ?? []).map(String) });
+    }
+    return out;
   }
 
   activityCounts(sinceMs: number): Map<string, number> {

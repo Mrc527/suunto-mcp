@@ -11,6 +11,7 @@ import { bool, page, str, type WebContext } from "./context.js";
 import { hashPassword, randomToken, readablePassword } from "./crypto.js";
 import { formatDate, html, type SafeHtml } from "./html.js";
 import { locale, t, th, tn, type MessageKey } from "./i18n/index.js";
+import { renderStats } from "./admin-stats.js";
 import type { NoticeProblem } from "./request-notices.js";
 import { isEmail } from "./routes-auth.js";
 import { csrfOk, locals, perUserLimit, requireAdmin } from "./session.js";
@@ -132,7 +133,7 @@ export function adminRoutes(ctx: WebContext): Router {
       req,
       res,
       { title: t("admin.title"), active: "admin", wide: true, ...(extra.flash ? { flash: extra.flash } : {}) },
-      html`<div class="page-title"><h1>${t("admin.heading")}</h1><p>${t("admin.intro")}</p></div>
+      html`<div class="page-title"><h1>${t("admin.heading")}</h1><p>${t("admin.intro")}</p><p><a href="/admin/stats">${t("admin.stats.link")}</a></p></div>
       ${extra.secret
         ? html`<div class="card"><h2>${extra.secret.label}</h2><p>${t("admin.secret.copyNow")}</p>
             <div class="copy"><code id="secret">${extra.secret.value}</code><button type="button" class="secondary small" data-copy="secret">${t("admin.secret.copy")}</button></div></div>`
@@ -348,6 +349,7 @@ export function adminRoutes(ctx: WebContext): Router {
   };
 
   r.get("/admin", (req, res) => render(req, res));
+  r.get("/admin/stats", (req, res) => renderStats(ctx, req, res));
 
   /** Tell Suunto that a user's connection ends (best effort; never throws). */
   const disconnect = (userId: string) =>
@@ -486,12 +488,20 @@ export function adminRoutes(ctx: WebContext): Router {
     res.redirect(303, "/admin?m=demoreset#demo");
   });
 
-  r.post("/admin/requests/action", form, (req, res) => {
+  r.post("/admin/requests/action", form, async (req, res) => {
     if (!csrfOk(req, res, ctx.cookies)) return void res.redirect(303, "/admin?m=csrf");
     const id = str(req.body.id, 100);
-    if (req.body.action === "approve" && ctx.store.approveAccessRequest(id)) {
+    const person = req.body.action === "approve" ? ctx.store.getUser(id) : undefined;
+    if (person && ctx.store.approveAccessRequest(id)) {
       ctx.log("Access request approved by an administrator");
-      return void res.redirect(303, "/admin?m=approved#requests");
+      // A welcome e-mail through the operator's SMTP server: how to start, and the terms. The
+      // request is approved even when it cannot be sent: the page says why.
+      const welcome = await ctx.notices.welcome(locals(res).session!.user, person);
+      return render(req, res, {
+        flash: welcome.ok
+          ? { kind: "ok", text: t("admin.welcome.sent", { address: welcome.address }) }
+          : { kind: "info", text: t("admin.welcome.notSent", { reason: noticeProblemText(welcome.problem) }) },
+      });
     }
     if (req.body.action === "reject" && ctx.store.rejectAccessRequest(id)) {
       ctx.log("Access request rejected by an administrator");

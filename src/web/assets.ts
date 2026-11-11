@@ -367,6 +367,31 @@ main > .flash:has(+ .sheet) { max-width: 440px; margin-left: auto; margin-right:
 .perm-list span.what { color: var(--muted); font-size: 14px; }
 .notice { display: flex; gap: 10px; align-items: flex-start; font-size: 13px; color: var(--muted); background: var(--fill-2); border-radius: var(--r); padding: 10px 12px; margin: 14px 0 0; }
 .notice svg { width: 16px; height: 16px; flex: none; margin-top: 1px; }
+
+/* Usage statistics (admin) */
+.stats-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; margin-bottom: 20px; }
+.stats-controls .notice { margin: 0; }
+.segmented { display: inline-flex; flex-wrap: wrap; gap: 2px; background: var(--fill); border-radius: 999px; padding: 3px; }
+.segmented .segment { padding: 6px 14px; border-radius: 999px; font-size: 14px; color: var(--text-2); text-decoration: none; }
+.segmented a.segment:hover { color: var(--text); background: var(--fill-2); }
+.segmented .segment[aria-current] { background: var(--card); color: var(--text); font-weight: 600; box-shadow: 0 1px 2px rgba(0, 0, 0, .08); }
+.stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); gap: 16px 24px; }
+.stat { display: flex; flex-direction: column; gap: 4px; }
+.stat-label { font-size: 13px; color: var(--muted); }
+.stat-value { font-size: 32px; font-weight: 600; letter-spacing: -.01em; line-height: 1.1; color: var(--text); }
+/* On narrow screens the chart keeps a readable size and scrolls sideways. */
+.stats-chart-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; margin-top: 8px; }
+.stats-chart { display: block; width: 100%; min-width: 560px; height: auto; }
+.table-wrap.wide code { white-space: nowrap; }
+.stats-bar { fill: var(--accent); }
+.stats-col:hover .stats-bar { fill: var(--link); }
+.stats-hit { fill: transparent; }
+.stats-grid { stroke: var(--hairline); stroke-width: 1; }
+.stats-tick { fill: var(--muted); font-size: 12px; font-family: var(--font); font-variant-numeric: tabular-nums; }
+.stats-rank { width: 80px; height: 8px; margin-right: 10px; vertical-align: middle; }
+.stats-rank-track { fill: var(--fill-2); }
+.stats-ranked { white-space: nowrap; }
+:is(td, th).num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 ` + HOME_CSS;
 
 export const APP_JS = `

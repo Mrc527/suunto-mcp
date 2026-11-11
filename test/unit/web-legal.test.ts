@@ -293,6 +293,23 @@ describe("what the privacy policy states matches the code", () => {
     expect(html).toContain("after 30 days if nobody answers. The message to the administrator is deleted when the request is approved.");
   });
 
+  it("says that the language of an access request stays with the account", async () => {
+    // A request from the Italian sign-up page saves its language for the welcome e-mail.
+    const visitor = new Browser();
+    await visitor.page("/signup?lang=it");
+    expect((await visitor.signup("lang-request@example.com", PASSWORD)).status).toBe(200);
+    const { store } = web.ctx;
+    const person = store.getUserByEmail("lang-request@example.com")!;
+    expect(person.pending).toBe(true);
+    expect(person.lang).toBe("it");
+    // Approving deletes the message to the administrator, not the language.
+    expect(store.approveAccessRequest(person.id)).toBe(true);
+    expect(store.getUser(person.id)?.lang).toBe("it");
+    const { html } = await get("/privacy");
+    expect(html).toContain("in the language you used for the request (we save this language with your account).");
+    expect(html).not.toContain("we save it with the request");
+  });
+
   it("deletes everything linked to an account when the account is deleted, except a used invite", async () => {
     const { store } = web.ctx;
     const user = store.createUser("leaving@example.com", await hashPassword(PASSWORD), false);

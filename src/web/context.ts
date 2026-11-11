@@ -47,7 +47,6 @@ export const FLASH: Record<string, { kind: "ok" | "error" | "info"; key: Message
   sessions: { kind: "ok", key: "common.flash.sessions" },
   settings: { kind: "ok", key: "common.flash.settings" },
   user: { kind: "ok", key: "common.flash.user" },
-  approved: { kind: "ok", key: "common.flash.approved" },
   rejected: { kind: "ok", key: "common.flash.rejected" },
   deleted: { kind: "ok", key: "common.flash.deleted" },
   welcome: { kind: "info", key: "common.flash.welcome" },

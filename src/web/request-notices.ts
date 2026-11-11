@@ -1,5 +1,6 @@
 /**
- * E-mails administrators when someone requests access (the waitlist).
+ * E-mails administrators when someone requests access (the waitlist), and welcomes a person
+ * whose request an administrator approved.
  *
  * The e-mails go through the operator's SMTP server (SMTP_URL), from NOTIFY_FROM (or the SMTP user
  * name when it is an e-mail address) to the address each administrator signs in with. The
@@ -13,23 +14,38 @@
  * The address and the message of a request are typed by a stranger: the e-mail is plain text,
  * the subject never contains them, invisible, control and direction-changing characters are
  * removed, and links are made unclickable ("example[.]com").
+ *
+ * The welcome e-mail goes the same way (from NOTIFY_FROM, through the operator's SMTP server) to
+ * the person whose request was approved, in the language they requested access in: how to sign
+ * in and start, that the service is free while it is experimental, and that it is used at their
+ * own risk (as in the terms of use). Replies go to the approving administrator (Reply-To). It
+ * contains no text the person typed, and it is sent only to an ordinary address (isEmail), so
+ * nothing they typed can reach a header. When it cannot be sent, the request is approved anyway
+ * and the admin page says why.
  */
 
 import nodemailer from "nodemailer";
 import { isEmail } from "./email.js";
 import { DEFAULT_LOCALE, HTML_LANG, isLocale, t, tn, type Locale } from "./i18n/index.js";
+import { CONTACT_EMAIL } from "./operator.js";
 import type { Store, User } from "./store.js";
+import { welcomeMail } from "./welcome-mail.js";
 
-/** Why an administrator could not be e-mailed. */
-export type NoticeProblem = "noSmtp" | "invalid" | "auth" | "network" | "rejected" | "other";
+/** Why an administrator (or a welcomed person: "recipient") could not be e-mailed. */
+export type NoticeProblem = "noSmtp" | "invalid" | "auth" | "network" | "rejected" | "recipient" | "other";
 
 export interface NoticeMail {
-  /** The administrator's address. */
+  /** The administrator's address, or the welcomed person's (always checked with isEmail). */
   to: string;
   /** NOTIFY_FROM, or the SMTP user name when it is an e-mail address. */
   from: string;
+  /** Where replies go (the welcome e-mail: the approving administrator). */
+  replyTo?: string;
   subject: string;
   text: string;
+  /** An HTML version of the text (the welcome e-mail), and the images it shows (cid:). */
+  html?: string;
+  inline?: { cid: string; filename: string; contentType: string; content: Buffer }[];
 }
 
 /** Sends one e-mail (tests pass their own). */
@@ -104,6 +120,14 @@ export function smtpUserAddress(smtpUrl: string): string | undefined {
 }
 
 /**
+ * How long to wait for the SMTP server, in milliseconds: to connect, for its greeting, and for
+ * each answer. Without them nodemailer waits up to two minutes to connect and ten minutes for an
+ * answer. The approve button waits for the welcome e-mail, so a silent server would keep the
+ * administrator waiting (and a proxy in front of the service would show an error page).
+ */
+export const SMTP_TIMEOUTS = { connectionTimeout: 30_000, greetingTimeout: 30_000, socketTimeout: 60_000 } as const;
+
+/**
  * Sends through the operator's SMTP server, given as a URL (smtps://user:pass@host:465).
  *
  * The connection must be encrypted before the password is sent. smtps:// uses TLS from the
@@ -111,11 +135,12 @@ export function smtpUserAddress(smtpUrl: string): string | undefined {
  * someone on the network can remove that offer: then the password and the e-mail would go out
  * in clear text. requireTLS makes the send fail instead. An operator can turn this off on
  * purpose with ?requireTLS=false in the URL (the URL's options win), for example for a mail
- * server on the same machine.
+ * server on the same machine. The waits are limited (SMTP_TIMEOUTS); the URL can change them
+ * too (?socketTimeout=120000).
  */
 export function smtpSender(smtpUrl: string): NoticeSender {
   return async (mail) => {
-    const transport = nodemailer.createTransport({ url: smtpUrl, requireTLS: true });
+    const transport = nodemailer.createTransport({ url: smtpUrl, requireTLS: true, ...SMTP_TIMEOUTS });
     try {
       await sendOne(transport, mail);
     } finally {
@@ -128,8 +153,11 @@ async function sendOne(transport: ReturnType<typeof nodemailer.createTransport>,
   await transport.sendMail({
     from: mail.from,
     to: mail.to,
+    ...(mail.replyTo ? { replyTo: mail.replyTo } : {}),
     subject: mail.subject,
     text: mail.text,
+    ...(mail.html ? { html: mail.html } : {}),
+    ...(mail.inline?.length ? { attachments: mail.inline.map((a) => ({ ...a, contentDisposition: "inline" as const })) } : {}),
     // Marks the e-mail as automatic, so no out-of-office reply answers it.
     headers: { "Auto-Submitted": "auto-generated" },
     xMailer: false,
@@ -278,6 +306,36 @@ export class RequestNotices {
     } catch (error) {
       const problem = classifySendError(error);
       this.opts.log(`Test e-mail about access requests failed (${problem})`);
+      return { ok: false, problem };
+    }
+  }
+
+  /**
+   * Welcome a person whose access request was just approved: to their address, in the language
+   * they requested access in, with replies to the approving administrator.
+   */
+  async welcome(admin: User, person: User): Promise<{ ok: true; address: string } | { ok: false; problem: NoticeProblem }> {
+    if (!this.send) return { ok: false, problem: "noSmtp" };
+    if (person.demo || !isEmail(person.email)) return { ok: false, problem: "recipient" };
+    const lang = isLocale(person.lang) ? person.lang : DEFAULT_LOCALE;
+    const welcome = welcomeMail(lang, this.opts.publicUrl);
+    const mail: NoticeMail = {
+      to: person.email,
+      from: this.opts.from!,
+      // The operator's contact address when the administrator's is not an ordinary one.
+      replyTo: !admin.demo && isEmail(admin.email) ? admin.email : CONTACT_EMAIL,
+      subject: welcome.subject,
+      text: welcome.text,
+      html: welcome.html,
+      inline: welcome.inline,
+    };
+    try {
+      await this.send(mail);
+      this.opts.log("Welcome e-mail sent for an approved access request");
+      return { ok: true, address: person.email };
+    } catch (error) {
+      const problem = classifySendError(error);
+      this.opts.log(`Welcome e-mail for an approved access request failed (${problem})`);
       return { ok: false, problem };
     }
   }

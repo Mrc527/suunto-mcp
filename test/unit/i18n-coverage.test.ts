@@ -8,6 +8,7 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { clearStatsCache } from "../../src/web/admin-stats.js";
 import { CATALOGS, type MessageKey } from "../../src/web/i18n/index.js";
 import { en } from "../../src/web/i18n/en/index.js";
 import { createWebApp, type WebApp } from "../../src/web/server.js";
@@ -72,7 +73,7 @@ afterAll(async () => {
 
 /** Texts that are the same in every language. */
 const ALLOWED = [
-  /^[\s\d.,:;!?()[\]{}<>/\\|+*=#%&@'"`~^_·-]*$/, // numbers and punctuation (· in page titles)
+  /^[\s\d.,:;!?()[\]{}<>/\\|+*=#%&@'"`~^_·\u2013-]*$/, // numbers and punctuation (· in page titles, – for "no value")
   // Product and brand names, and technical names
   /^\s*(MCP for Suunto|Suunto|Suunto App|Suunto API|Suunto Cloud API|Suunto API Zone|MCP|OAuth|FIT|GPX|HTTP|JSON|YAML|SMTP|UTC|ms|ok)\s*$/,
   /^\s*(English|Italiano|Deutsch|Français|Español|简体中文)\s*$/, // the language menu names each language in itself
@@ -199,6 +200,28 @@ describe("every visible text is translated", () => {
 
   it("admin page", async () => {
     expect(await check(admin, "/admin")).toEqual([]);
+  });
+
+  it("usage statistics", async () => {
+    // No calls yet, then some (per hour for 24 hours, per day otherwise). Dates, times and
+    // numbers come from Intl in the page's language; tool names are code.
+    const words = (s: string) => s.replace(/[\d\s.,:\u2013]+/g, "");
+    const intl = new Set<string>();
+    const add = (ms: number, o: Intl.DateTimeFormatOptions) => intl.add(words(new Intl.DateTimeFormat("it", { timeZone: "UTC", ...o }).format(ms)));
+    expect(await check(admin, "/admin/stats")).toEqual([]);
+    const id = adminId();
+    web.ctx.store.logActivity(id, "suunto_list_workouts", true, 120);
+    web.ctx.store.logActivity(id, "suunto_sleep", false, 2400, "no-such-client");
+    clearStatsCache(web.ctx.store);
+    for (let d = 0; d < 32; d++) {
+      const ms = Date.now() - d * 86_400_000;
+      add(ms, { day: "numeric", month: "short" });
+      add(ms, { weekday: "short", day: "numeric", month: "short", year: "numeric" });
+      for (let h = 0; h < 24; h++) add(ms - h * 3_600_000, { weekday: "short", hour: "2-digit", minute: "2-digit" });
+    }
+    for (const path of ["/admin/stats?days=1", "/admin/stats?days=30", `/admin/stats?days=7&user=${id}`]) {
+      expect((await check(admin, path)).filter((text) => !intl.has(words(text))), path).toEqual([]);
+    }
   });
 
   it("demo account: admin page, account page and consent page", async () => {

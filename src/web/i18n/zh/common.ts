@@ -35,7 +35,6 @@ export default {
   "common.flash.sessions": "已从所有其他浏览器退出登录。",
   "common.flash.settings": "服务器设置已保存。",
   "common.flash.user": "用户已更新。",
-  "common.flash.approved": "申请已批准。系统不会自动通知对方，请告诉对方现在可以登录了。",
   "common.flash.rejected": "申请已拒绝并删除。",
   "common.flash.deleted": "已删除。",
   "common.flash.welcome": "欢迎！请先在下方连接你的 Suunto 账户，然后连接你的 AI 应用。",

@@ -42,7 +42,8 @@ services:
       SUUNTO_CALLS_PER_MINUTE: ${SUUNTO_CALLS_PER_MINUTE:-}
       SUUNTO_CALLS_PER_USER_PER_DAY: ${SUUNTO_CALLS_PER_USER_PER_DAY:-}
       SUUNTO_CALLS_PER_USER_PER_WEEK: ${SUUNTO_CALLS_PER_USER_PER_WEEK:-}
-      # Optional: SMTP server for e-mails to administrators about access requests.
+      # Optional: SMTP server for e-mails to administrators about access requests, and for the
+      # welcome e-mail to approved people.
       SMTP_URL: ${SMTP_URL:-}
       NOTIFY_FROM: ${NOTIFY_FROM:-}
     # No port is published on this machine. Your reverse proxy reaches the service in one of

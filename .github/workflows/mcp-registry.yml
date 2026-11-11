@@ -4,9 +4,10 @@
 # Run workflow:  Actions > MCP Registry > Run workflow (from the default branch).
 # Tag push:      pushing a tag v<version> (for example v1.2.0) publishes that version.
 #
-# Login uses GitHub Actions OIDC (id-token: write), so no secret is needed. The registry grants
-# the namespace io.github.<repository owner>/* with the owner's exact casing, which is why the
-# name in server.json starts with io.github.Mrc527/.
+# Login proves the domain mcp.visin.ch (HTTP method): the hub at https://mcp.visin.ch serves the
+# public half of an Ed25519 key at /.well-known/mcp-registry-auth, and the private half is the
+# repository secret MCP_REGISTRY_PRIVATE_KEY (64 hex characters). The registry then grants the
+# namespace ch.visin.mcp/*, which is why the name in server.json is ch.visin.mcp/suunto.
 #
 # Version: the registry refuses a version it already has, and published versions can never be
 # changed. The version is always the one in package.json (a tag must match it). If that version is
@@ -34,7 +35,6 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-      id-token: write # GitHub OIDC login to the MCP Registry
     env:
       REGISTRY_URL: https://registry.modelcontextprotocol.io
       # Upgrade deliberately: change both lines. The checksum is the one in that release's
@@ -114,8 +114,15 @@ jobs:
       - name: Validate server.json
         run: mcp-publisher validate server.json
 
-      - name: Log in to the MCP Registry (GitHub OIDC)
-        run: mcp-publisher login github-oidc
+      - name: Log in to the MCP Registry (domain mcp.visin.ch)
+        env:
+          MCP_REGISTRY_PRIVATE_KEY: ${{ secrets.MCP_REGISTRY_PRIVATE_KEY }}
+        run: |
+          if [ -z "$MCP_REGISTRY_PRIVATE_KEY" ]; then
+            echo "::error title=Missing secret::Set the repository secret MCP_REGISTRY_PRIVATE_KEY (the private key whose public half https://mcp.visin.ch/.well-known/mcp-registry-auth serves)."
+            exit 1
+          fi
+          mcp-publisher login http --domain mcp.visin.ch --private-key "$MCP_REGISTRY_PRIVATE_KEY"
 
       - name: Publish
         run: mcp-publisher publish server.json

@@ -15,4 +15,4 @@ export const OPERATOR_NAME = "Marco Visin";
 export const CONTACT_EMAIL = "marco@visin.ch";
 
 /** When the privacy policy or the terms of use last changed (YYYY-MM-DD). */
-export const LEGAL_UPDATED = "2026-11-10";
+export const LEGAL_UPDATED = "2026-11-11";

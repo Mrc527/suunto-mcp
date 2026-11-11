@@ -1,6 +1,6 @@
 {
   "name": "suunto-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "MCP for Suunto: an MCP server that lets Claude, ChatGPT and other AI apps read your Suunto workouts, sleep and recovery and add routes, through the official Suunto Cloud API, as a multi-user web service or locally. Not affiliated with Suunto.",
   "type": "module",
   "bin": {

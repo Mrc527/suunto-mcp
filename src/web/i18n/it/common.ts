@@ -34,7 +34,6 @@ export default {
   "common.flash.sessions": "Uscita eseguita da tutti gli altri browser.",
   "common.flash.settings": "Impostazioni del server salvate.",
   "common.flash.user": "Utente aggiornato.",
-  "common.flash.approved": "Richiesta approvata. La persona non riceve alcuna notifica automatica: falle sapere che ora può accedere.",
   "common.flash.rejected": "Richiesta rifiutata ed eliminata.",
   "common.flash.deleted": "Eliminato.",
   "common.flash.welcome": "Ti diamo il benvenuto! Collega qui sotto il tuo account Suunto, poi collega la tua app di IA.",

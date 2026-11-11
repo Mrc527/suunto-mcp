@@ -39,7 +39,6 @@ export default {
   "common.flash.sessions": "Signed out of all other browsers.",
   "common.flash.settings": "Server settings saved.",
   "common.flash.user": "User updated.",
-  "common.flash.approved": "Request approved. The person is not notified automatically: let them know they can sign in now.",
   "common.flash.rejected": "Request rejected and deleted.",
   "common.flash.deleted": "Deleted.",
   "common.flash.welcome": "Welcome! Connect your Suunto account below, then connect your AI app.",
