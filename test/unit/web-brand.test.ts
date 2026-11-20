@@ -15,6 +15,7 @@ import { en } from "../../src/web/i18n/en/index.js";
 import legalEn from "../../src/web/i18n/en/legal.js";
 import { LOGO_SMALL_SVG, LOGO_SVG } from "../../src/web/brand-assets.js";
 import { createWebApp, type WebApp } from "../../src/web/server.js";
+import { connectClient } from "../helpers/mcp-client.js";
 import { Browser, connectMcp, setBase, TestOAuthClient } from "../helpers/web-client.js";
 
 let web: WebApp;
@@ -102,12 +103,13 @@ describe("icons", () => {
     for (const icon of info.icons!) expect((await fetch(icon.src)).status).toBe(200);
   });
 
-  it("puts the icon inline in single-user mode", () => {
+  it("puts the icon inline in single-user mode", async () => {
     const config = loadConfig(SINGLE_USER_ENV);
-    const mcp = createMcpServer(config, createServices(config), () => {});
-    const info = (mcp.server as unknown as { _serverInfo: { icons: { src: string; mimeType: string }[] } })._serverInfo;
-    expect(info.icons[0]!.mimeType).toBe("image/png");
-    expect(info.icons[0]!.src).toMatch(/^data:image\/png;base64,iVBOR/);
+    const client = await connectClient(createMcpServer(config, createServices(config), () => {}));
+    const info = client.getServerVersion()!;
+    expect(info.icons![0]!.mimeType).toBe("image/png");
+    expect(info.icons![0]!.src).toMatch(/^data:image\/png;base64,iVBOR/);
+    await client.close();
   });
 });
 
@@ -163,15 +165,16 @@ describe("product name", () => {
     }
   });
 
-  it("is the title of the logo files and of the MCP server, whose internal name is suunto-mcp", () => {
+  it("is the title of the logo files and of the MCP server, whose internal name is suunto-mcp", async () => {
     for (const svg of [LOGO_SVG, LOGO_SMALL_SVG, readFileSync(new URL("../../assets/brand/logo.svg", import.meta.url), "utf8")]) {
       expect(svg).toContain(`<title>${NAME}</title>`);
     }
     const config = loadConfig(SINGLE_USER_ENV);
-    const mcp = createMcpServer(config, createServices(config), () => {});
-    const info = (mcp.server as unknown as { _serverInfo: { name: string; title: string } })._serverInfo;
+    const client = await connectClient(createMcpServer(config, createServices(config), () => {}));
+    const info = client.getServerVersion()!;
     expect(info.name).toBe("suunto-mcp");
     // The title AI apps show starts with the product name (it may say what it is for after it).
-    expect(info.title.startsWith(NAME)).toBe(true);
+    expect(info.title!.startsWith(NAME)).toBe(true);
+    await client.close();
   });
 });

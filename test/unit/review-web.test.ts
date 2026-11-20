@@ -117,9 +117,9 @@ describe("the forced read-only of the administrator", () => {
         const info = await callTool(client, "suunto_account_info");
         expect(info.isError, who).toBeFalsy();
         expect(JSON.parse(info.content[0]!.text!).read_only, who).toBe(true);
-        // A write tool cannot be called either (an AI app may have cached the tool list).
-        const write = await callTool(client, "suunto_create_poi", { name: "Hut", latitude: 46.5, longitude: 8.1 });
-        expect(write.isError, who).toBe(true);
+        // A write tool cannot be called either (an AI app may have cached the tool list): an unknown
+        // tool is a protocol error (-32602).
+        await expect(callTool(client, "suunto_create_poi", { name: "Hut", latitude: 46.5, longitude: 8.1 }), who).rejects.toThrow(/Tool suunto_create_poi not found/);
       }
       // Nothing was added at Suunto.
       expect(mock.state.pois.some((p) => p.point.name === "Hut")).toBe(false);

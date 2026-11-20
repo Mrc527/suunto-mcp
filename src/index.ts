@@ -9,9 +9,9 @@
  *   suunto-mcp --login      # sign in to Suunto once and save the tokens to SUUNTO_TOKEN_CACHE
  */
 
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { describeConfig, loadConfig, loadLoginConfig, type AppConfig, type CliOverrides } from "./config.js";
 import { startHttpServer } from "./http.js";
+import { serveStdio } from "./mcp-transport.js";
 import { accountInfo, closeServices, createMcpServer, createServices, runLogin } from "./server.js";
 import { describeError, redact, redactForLog, UserFacingError } from "./util/errors.js";
 import { VERSION } from "./version.js";
@@ -212,10 +212,8 @@ async function main(): Promise<void> {
   }
 
   const server = createMcpServer(config, services, safeLog);
-  const transport = new StdioServerTransport();
-  transport.onclose = () => void shutdown(0);
-  process.stdin.on("end", () => void shutdown(0));
-  await server.connect(transport);
+  const stdio = serveStdio(server, { log: safeLog });
+  void stdio.closed.then(() => shutdown(0));
   safeLog(`ready (stdio). Suunto, units ${config.units}, time zone ${config.timeZone}${config.readOnly ? " [read-only]" : ""}${services.activity ? "" : " [no sign-in: run suunto-mcp --login]"}`);
 }
 

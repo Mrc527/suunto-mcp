@@ -4,12 +4,11 @@
  */
 
 import express, { type Request, type Response, type Router } from "express";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import type { Icon } from "@modelcontextprotocol/sdk/types.js";
+import type { Icon, MCPServer } from "mcp-use";
 import { DEMO_NOTICE, DemoActivityStore } from "../demo/index.js";
+import { handleMcpPost } from "../mcp-transport.js";
 import { createMcpServer, createServices } from "../server.js";
 import { redactForLog, UserFacingError } from "../util/errors.js";
 import { buildSetupConfig } from "./accounts.js";
@@ -54,7 +53,7 @@ export function notKnownYet(timeZone: string): string {
  * user's saved time zone and units when they can be read; otherwise the AI app is told that they
  * are not known yet (never a made-up value).
  */
-function setupServer(ctx: WebContext, user: User, problem: SetupProblem): McpServer {
+function setupServer(ctx: WebContext, user: User, problem: SetupProblem): MCPServer {
   const message = setupMessage(ctx, user, problem);
   const stored = problem.kind === "unusable" ? undefined : ctx.store.getSuuntoSettings(user.id);
   // Nothing is ever read from the placeholder store: the guard below stops every call before it runs.
@@ -129,7 +128,7 @@ export function mcpRoutes(ctx: WebContext): Router {
       res.status(401).json({ jsonrpc: "2.0", error: { code: -32001, message: "Account not active" }, id: null });
       return;
     }
-    let server: McpServer;
+    let server: MCPServer;
     try {
       // "Needs reconnect" does not block tool calls: Suunto has refused refresh tokens by mistake
       // during outages. The user's Suunto session decides (it tries again after a cool-down) and
@@ -160,14 +159,8 @@ export function mcpRoutes(ctx: WebContext): Router {
     } catch (error) {
       server = setupServer(ctx, user, { kind: "unusable", detail: (error as Error).message });
     }
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
-    res.on("close", () => {
-      void transport.close();
-      void server.close();
-    });
     try {
-      await server.connect(transport);
-      await transport.handleRequest(req, res, req.body);
+      await handleMcpPost(server, req, res, req.body);
     } catch (error) {
       ctx.log(`MCP request failed: ${redactForLog((error as Error).message, [])}`);
       if (!res.headersSent) res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: "Internal error" }, id: null });

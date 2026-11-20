@@ -8,6 +8,7 @@ import type { AddressInfo } from "node:net";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { randomBytes } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { messagesOf } from "../../src/mcp-transport.js";
 import { todayInZone } from "../../src/util/dates.js";
 import { buildUserConfig } from "../../src/web/accounts.js";
 import { SecretBox } from "../../src/web/crypto.js";
@@ -485,6 +486,30 @@ describe("OAuth and MCP", () => {
       });
     expect((await post(6 * 1024 * 1024)).status).toBe(200);
     expect((await post(9 * 1024 * 1024)).status).toBe(413);
+  });
+
+  it("serves /mcp through mcp-use, and refuses oversized tool input, large batches and GET", async () => {
+    const auth = { authorization: `Bearer ${oauth.savedTokens!.access_token}`, "content-type": "application/json", accept: "application/json, text/event-stream" };
+    const post = (body: unknown) => fetch(`${base}/mcp`, { method: "POST", headers: auth, body: JSON.stringify(body) });
+    const list = await post({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+    expect(list.status).toBe(200);
+    expect(list.headers.get("content-type")).toBe("text/event-stream");
+    expect(list.headers.get("access-control-allow-origin")).toBe("*");
+    const [answer] = (await messagesOf(list)) as Array<{ id: number; result: { tools: Array<{ name: string }> } }>;
+    expect(answer!.id).toBe(1);
+    expect(answer!.result.tools.map((t) => t.name)).toContain("suunto_account_info");
+
+    const oversized = await post({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "suunto_list_workouts", arguments: { sports: Array(10_001).fill("x") } } });
+    expect(await oversized.json()).toMatchObject({ id: 2, result: { isError: true, content: [{ text: expect.stringMatching(/maximum of 10000 elements/) }] } });
+
+    const batch = await post(Array.from({ length: 21 }, (_, i) => ({ jsonrpc: "2.0", id: i, method: "ping" })));
+    expect(batch.status).toBe(400);
+
+    for (const method of ["GET", "DELETE"]) {
+      const res = await fetch(`${base}/mcp`, { method, headers: { authorization: auth.authorization, accept: "text/event-stream" } });
+      expect(res.status, method).toBe(405);
+      expect(res.headers.get("allow")).toBe("POST");
+    }
   });
 
   it("hides the write tools when the user turns on read-only", async () => {

@@ -2,8 +2,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { dirname } from "node:path";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { Icon } from "@modelcontextprotocol/sdk/types.js";
+import { MCPServer, type Icon } from "mcp-use";
 import { z } from "zod";
 import { CachedBackend, type CacheBudget } from "./activity/cache.js";
 import { ActivityService, SCAN_MAX_CALLS, type ServiceOptions } from "./activity/service.js";
@@ -22,6 +21,13 @@ import { ConfigError, describeError, redact, UserFacingError } from "./util/erro
 import { escapeHtml } from "./util/text.js";
 import { VERSION } from "./version.js";
 import { ICON_PNG } from "./web/brand-assets.js";
+
+declare global {
+  // mcp-use's switch for its usage events (sent to PostHog, with an id file in .mcp-use/).
+  var __MCP_USE_ANONYMIZED_TELEMETRY__: boolean | undefined;
+}
+// Off: this server keeps what users do with their Suunto data to itself.
+globalThis.__MCP_USE_ANONYMIZED_TELEMETRY__ = false;
 
 /** Without a web server (single-user mode) the icon goes inline. */
 const INLINE_ICONS: Icon[] = [{ src: `data:image/png;base64,${ICON_PNG[48]!.toString("base64")}`, mimeType: "image/png", sizes: ["48x48"] }];
@@ -693,26 +699,26 @@ export async function accountInfo(config: AppConfig, services: Services, check: 
   };
 }
 
-export function createMcpServer(config: AppConfig, services: Services, log: (m: string) => void, hooks: McpServerHooks = {}): McpServer {
-  const server = new McpServer(
-    {
-      name: "suunto-mcp",
-      title: SERVER_TITLE,
-      version: VERSION,
-      description: SERVER_DESCRIPTION,
-      icons: hooks.icons ?? INLINE_ICONS,
-      ...(hooks.websiteUrl ? { websiteUrl: hooks.websiteUrl } : {}),
-    },
-    {
-      instructions:
-        buildInstructions(config) +
-        (services.activity ? "" : `\n${NOT_CONNECTED_INSTRUCTION}`) +
-        (hooks.extraInstructions ? `\n${hooks.extraInstructions}` : ""),
-      // Without a Suunto sign-in the prompts could not use their tools: there are none then.
-      capabilities: { tools: {}, ...(services.activity ? { prompts: {} } : {}) },
-      maxToolInputElements: 10_000,
-    },
-  );
+/**
+ * The MCP server of one account. It is cheap to build (registration only): web mode builds one per
+ * request. Tool argument size is checked by the transports (src/mcp-transport.ts).
+ */
+export function createMcpServer(config: AppConfig, services: Services, log: (m: string) => void, hooks: McpServerHooks = {}): MCPServer {
+  const server = new MCPServer({
+    name: "suunto-mcp",
+    title: SERVER_TITLE,
+    version: VERSION,
+    description: SERVER_DESCRIPTION,
+    icons: hooks.icons ?? INLINE_ICONS,
+    ...(hooks.websiteUrl ? { websiteUrl: hooks.websiteUrl } : {}),
+    instructions:
+      buildInstructions(config) +
+      (services.activity ? "" : `\n${NOT_CONNECTED_INSTRUCTION}`) +
+      (hooks.extraInstructions ? `\n${hooks.extraInstructions}` : ""),
+    // stdout carries the stdio protocol: no request log. No skills/ directory is served.
+    logging: { enabled: false },
+    skills: false,
+  });
   const ctx: ToolContext = {
     server,
     config,
@@ -736,6 +742,8 @@ export function createMcpServer(config: AppConfig, services: Services, log: (m: 
     async (args) => accountInfo(config, services, args.check === true, hooks.accountInfo),
   );
 
+  // Without a Suunto sign-in the prompts could not use their tools: there are none then (mcp-use
+  // still declares the prompts capability, with an empty list).
   if (services.activity) {
     registerActivityTools(ctx, services.activity);
     registerPrompts(server, config);
@@ -836,18 +844,18 @@ export function recoveryDays(input: string | undefined): number {
   return 7;
 }
 
-function registerPrompts(server: McpServer, config: AppConfig): void {
-  server.registerPrompt(
-    "training_review",
+function registerPrompts(server: MCPServer, config: AppConfig): void {
+  server.prompt(
     {
+      name: "training_review",
       title: "Training review",
       description: "A review of the workouts of a period, with sleep, from the Suunto data",
-      argsSchema: {
+      schema: z.object({
         period: z
           .string()
           .optional()
           .describe('The period: "this week", "last week", "this month", "last month", "last 30 days", a year such as 2025, or your own words (default: the last 4 weeks)'),
-      },
+      }),
     },
     ({ period }) => {
       const today = todayInZone(config.timeZone);
@@ -875,12 +883,12 @@ function registerPrompts(server: McpServer, config: AppConfig): void {
     },
   );
 
-  server.registerPrompt(
-    "sleep_and_recovery",
+  server.prompt(
     {
+      name: "sleep_and_recovery",
       title: "Sleep and recovery",
       description: "How I slept and recovered in the last days, with my daily activity, from the Suunto data",
-      argsSchema: { days: z.string().optional().describe('How many days to look back, 1 to 28, for example "10" or "3 weeks" (default 7)') },
+      schema: z.object({ days: z.string().optional().describe('How many days to look back, 1 to 28, for example "10" or "3 weeks" (default 7)') }),
     },
     ({ days }) => {
       const today = todayInZone(config.timeZone);
