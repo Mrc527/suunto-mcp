@@ -143,6 +143,9 @@ describe("splitCancels", () => {
     expect(splitCancels([ping, cancel(2), cancel("x"), cancel({ bad: true })])).toEqual({ body: [ping], cancelled: [2, "x"] });
     expect(splitCancels(cancel(2))).toEqual({ body: cancel(2), cancelled: [] });
     expect(splitCancels(ping)).toEqual({ body: ping, cancelled: [] });
+    // A request (with an id) that names the cancel method is not a cancel.
+    const asRequest = { jsonrpc: "2.0", id: 5, method: "notifications/cancelled", params: { requestId: 2 } };
+    expect(splitCancels([ping, asRequest])).toEqual({ body: [ping, asRequest], cancelled: [] });
   });
 });
 
@@ -323,6 +326,16 @@ describe("serveStdio", () => {
     s.end();
     await s.closed;
     expect(s.messages().map((m) => m.id).sort()).toEqual([1, 2, 3]);
+  });
+
+  it("answers a request that names the cancel method, alone or in a batch", async () => {
+    const s = stdioSession(demoServer());
+    s.send({ jsonrpc: "2.0", id: 5, method: "notifications/cancelled", params: { requestId: 2 } });
+    s.send([{ jsonrpc: "2.0", id: 6, method: "notifications/cancelled", params: { requestId: 2 } }]);
+    s.end();
+    await s.closed;
+    const byId = new Map(s.messages().map((m) => [m.id, m]));
+    for (const id of [5, 6]) expect(byId.get(id)?.error, String(id)).toMatchObject({ code: -32601 });
   });
 
   it("aborts an earlier request named by a cancel inside a batch", async () => {

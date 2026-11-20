@@ -89,7 +89,8 @@ export function splitCancels(body: unknown): { body: unknown; cancelled: Array<s
   if (!Array.isArray(body)) return { body, cancelled: [] };
   const cancelled: Array<string | number> = [];
   const rest = body.filter((m) => {
-    if (!isObject(m) || m.method !== "notifications/cancelled") return true;
+    // With an id it is a request (answered Method not found), not a cancel.
+    if (!isObject(m) || m.method !== "notifications/cancelled" || m.id !== undefined) return true;
     const target = isObject(m.params) ? m.params.requestId : undefined;
     if (isRequestId(target)) cancelled.push(target);
     return false;
@@ -280,7 +281,7 @@ export function serveStdio(server: MCPServer, options: StdioOptions): StdioConne
     if (isObject(body)) {
       // Answers to server requests: this server sends none.
       if (body.method === undefined && ("result" in body || "error" in body)) return;
-      if (body.method === "notifications/cancelled") {
+      if (body.method === "notifications/cancelled" && body.id === undefined) {
         const target = isObject(body.params) ? body.params.requestId : undefined;
         if (isRequestId(target)) inflight.get(JSON.stringify(target))?.abort();
         return;
