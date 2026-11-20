@@ -220,6 +220,18 @@ describe("serveStdio", () => {
     expect(fake.requests).toHaveLength(0);
   });
 
+  it("answers a tool call whose name is too deep a list with an error, without a crash", async () => {
+    const s = stdioSession(demoServer());
+    s.send(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":${"[".repeat(100_000)}${"]".repeat(100_000)},"arguments":{"list":${JSON.stringify(tooMany())}}}}`);
+    s.send({ jsonrpc: "2.0", id: 2, method: "ping" });
+    await s.waitFor(2);
+    const byId = new Map(s.messages().map((m) => [m.id, m]));
+    // Too deep to pass on as JSON: an internal error for that request, and the bridge goes on.
+    expect(byId.get(1)!.error).toEqual({ code: -32603, message: "Internal error" });
+    expect(byId.get(2)!.result).toEqual({});
+    expect(s.logs).toEqual([expect.stringMatching(/^stdio request failed: Maximum call stack size exceeded/)]);
+  });
+
   it("answers a line that is not JSON with a parse error and goes on", async () => {
     const s = stdioSession(demoServer());
     s.send("{not json");
@@ -304,11 +316,14 @@ describe("serveStdio", () => {
     s.send({ jsonrpc: "2.0", id: 1, method: "tools/列表", params: { _meta: meta } });
     s.send({ jsonrpc: "2.0", id: 2, method: "tools/list\r\nx: y", params: { _meta: meta } });
     s.send({ jsonrpc: "2.0", method: "notifications/x y", params: { _meta: meta } });
+    // Not a text at all, and too deep for String(): still an answer, not a crash.
+    s.send(`{"jsonrpc":"2.0","id":3,"method":${"[".repeat(100_000)}${"]".repeat(100_000)},"params":{"_meta":${JSON.stringify(meta)}}}`);
     s.end();
     await s.closed;
     expect(s.messages()).toEqual([
       { jsonrpc: "2.0", id: 1, error: { code: -32601, message: "Method not found" } },
       { jsonrpc: "2.0", id: 2, error: { code: -32601, message: "Method not found" } },
+      { jsonrpc: "2.0", id: 3, error: { code: -32601, message: "Method not found" } },
     ]);
     expect(fake.requests).toHaveLength(0);
     expect(s.logs).toEqual([]);

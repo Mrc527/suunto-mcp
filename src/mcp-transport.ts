@@ -49,8 +49,10 @@ export function countInputElements(value: unknown, max: number): number {
 function oversizedToolCall(message: unknown): string | undefined {
   if (!isObject(message) || message.method !== "tools/call" || !isObject(message.params)) return undefined;
   const { name, arguments: args } = message.params;
+  // No tool has another name (mcp-use refuses the request); String() of a deep array would throw.
+  if (typeof name !== "string") return undefined;
   if (countInputElements(args, MAX_TOOL_INPUT_ELEMENTS) <= MAX_TOOL_INPUT_ELEMENTS) return undefined;
-  return `Invalid arguments for tool ${String(name)}: arguments contain more than the maximum of ${MAX_TOOL_INPUT_ELEMENTS} elements`;
+  return `Invalid arguments for tool ${name}: arguments contain more than the maximum of ${MAX_TOOL_INPUT_ELEMENTS} elements`;
 }
 
 /**
@@ -296,10 +298,11 @@ export function serveStdio(server: MCPServer, options: StdioOptions): StdioConne
     // values are an unknown version or method.
     const version = envelopeVersion(body);
     if (version !== undefined) {
-      const method = String((body as JsonObject).method);
+      // Not String(): that of a deeply nested array would overflow the stack.
+      const method = (body as JsonObject).method;
       const error = !HEADER_VALUE.test(version)
         ? { code: -32022, message: "Unsupported protocol version" }
-        : !HEADER_VALUE.test(method)
+        : typeof method !== "string" || !HEADER_VALUE.test(method)
           ? { code: -32601, message: "Method not found" }
           : undefined;
       if (error) {
