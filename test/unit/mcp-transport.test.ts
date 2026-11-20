@@ -129,6 +129,13 @@ describe("refusal", () => {
   });
 });
 
+describe("refusal of subscriptions/listen", () => {
+  it("answers Method not found to a listen request and nothing to a listen notification", () => {
+    expect(refusal({ jsonrpc: "2.0", id: 4, method: "subscriptions/listen", params: {} })).toEqual({ jsonrpc: "2.0", id: 4, error: { code: -32601, message: "Method not found" } });
+    expect(refusal({ jsonrpc: "2.0", method: "subscriptions/listen" })).toEqual([]);
+  });
+});
+
 describe("messagesOf", () => {
   it("reads a JSON answer, an empty answer and an SSE stream", async () => {
     expect(await messagesOf(Response.json({ jsonrpc: "2.0", id: 1, result: {} }))).toEqual([{ jsonrpc: "2.0", id: 1, result: {} }]);
@@ -239,6 +246,59 @@ describe("serveStdio", () => {
       expect(r.headers.get("accept")).toBe("application/json, text/event-stream");
       expect(r.headers.get("content-type")).toBe("application/json");
     }
+  });
+
+  it("sends the protocol version a 2026-07-28 request names in _meta, without initialize", async () => {
+    const meta = { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { name: "t", version: "1" }, "io.modelcontextprotocol/clientCapabilities": {} };
+    const fake = fakeServer((_req, body) => sse({ jsonrpc: "2.0", id: (body as { id: number }).id, result: {} }));
+    const f = stdioSession(fake.server);
+    f.send({ jsonrpc: "2.0", id: 1, method: "tools/list", params: { _meta: meta } });
+    f.send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "suunto_get_workout", arguments: {}, _meta: meta } });
+    await f.waitFor(2);
+    const headers = (id: number) => fake.requests.find((r) => (r.body as { id: number }).id === id)!.headers;
+    expect(headers(1).get("mcp-protocol-version")).toBe("2026-07-28");
+    expect(headers(1).get("mcp-method")).toBe("tools/list");
+    expect(headers(1).get("mcp-name")).toBeNull();
+    expect(headers(2).get("mcp-method")).toBe("tools/call");
+    expect(headers(2).get("mcp-name")).toBe(`=?base64?${Buffer.from("suunto_get_workout").toString("base64")}?=`);
+
+    // The real server answers them: list, a call, a prompt with a non-ASCII name argument.
+    const s = stdioSession(demoServer());
+    s.send({ jsonrpc: "2.0", id: 3, method: "tools/list", params: { _meta: meta } });
+    s.send({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "suunto_list_workouts", arguments: { limit: 1 }, _meta: meta } });
+    s.send({ jsonrpc: "2.0", id: 5, method: "prompts/get", params: { name: "training_review", arguments: { period: "année 2025" }, _meta: meta } });
+    await s.waitFor(3);
+    const byId = new Map(s.messages().map((m) => [m.id, m]));
+    for (const id of [3, 4, 5]) expect(byId.get(id)!.error, String(id)).toBeUndefined();
+    expect((byId.get(3)!.result as { tools: Array<{ name: string }> }).tools.map((t) => t.name)).toContain("suunto_list_workouts");
+    expect((byId.get(4)!.result as { isError?: boolean }).isError).toBeFalsy();
+    expect(JSON.stringify(byId.get(5)!.result)).toMatch(/année 2025/);
+  });
+
+  it("answers a modern listen request at once and still exits when the input ends", async () => {
+    const meta = { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { name: "t", version: "1" }, "io.modelcontextprotocol/clientCapabilities": {} };
+    const s = stdioSession(demoServer());
+    s.send({ jsonrpc: "2.0", id: "l", method: "subscriptions/listen", params: { notifications: { toolsListChanged: true }, _meta: meta } });
+    s.end();
+    await s.closed;
+    expect(s.messages()).toEqual([{ jsonrpc: "2.0", id: "l", error: { code: -32601, message: "Method not found" } }]);
+  });
+
+  it("answers Method not found to a modern request whose method cannot be a header value", async () => {
+    const meta = { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { name: "t", version: "1" }, "io.modelcontextprotocol/clientCapabilities": {} };
+    const fake = fakeServer(() => sse({}));
+    const s = stdioSession(fake.server);
+    s.send({ jsonrpc: "2.0", id: 1, method: "tools/列表", params: { _meta: meta } });
+    s.send({ jsonrpc: "2.0", id: 2, method: "tools/list\r\nx: y", params: { _meta: meta } });
+    s.send({ jsonrpc: "2.0", method: "notifications/x y", params: { _meta: meta } });
+    s.end();
+    await s.closed;
+    expect(s.messages()).toEqual([
+      { jsonrpc: "2.0", id: 1, error: { code: -32601, message: "Method not found" } },
+      { jsonrpc: "2.0", id: 2, error: { code: -32601, message: "Method not found" } },
+    ]);
+    expect(fake.requests).toHaveLength(0);
+    expect(s.logs).toEqual([]);
   });
 
   it("passes batches on and writes the answer", async () => {
@@ -380,9 +440,84 @@ describe("handleMcpPost and readBody", () => {
     expect(fake.requests[0]!.body).toEqual({ jsonrpc: "2.0", id: 1, method: "ping" });
   });
 
+  it("never hands an unparsed body to mcp-use: 415 for other content types, 400 for empty JSON", async () => {
+    const fake = fakeServer(() => sse({}));
+    http = createServer((req, res) => void handleMcpPost(fake.server, req, res, undefined));
+    await new Promise<void>((r) => http!.listen(0, "127.0.0.1", () => r()));
+    const base = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
+    const plain = await fetch(base, { method: "POST", headers: { "content-type": "text/plain", accept: "application/json, text/event-stream" }, body: "x".repeat(2 * 1024 * 1024) });
+    expect(plain.status).toBe(415);
+    expect(await plain.json()).toMatchObject({ jsonrpc: "2.0", id: null, error: { code: -32000, message: expect.stringMatching(/Content-Type must be application\/json/) } });
+    const empty = await fetch(base, { method: "POST", headers: { "content-type": "application/json; charset=utf-8", accept: "application/json, text/event-stream" } });
+    expect(empty.status).toBe(400);
+    expect(await empty.json()).toMatchObject({ error: { code: -32700 } });
+    expect(fake.requests).toHaveLength(0);
+  });
+
+  it("answers a modern listen request at once instead of holding the connection open", async () => {
+    const base = await serve(demoServer());
+    const meta = { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { name: "t", version: "1" }, "io.modelcontextprotocol/clientCapabilities": {} };
+    const res = await fetch(base, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": "2026-07-28", "mcp-method": "subscriptions/listen" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 7, method: "subscriptions/listen", params: { notifications: { toolsListChanged: true }, _meta: meta } }),
+      signal: AbortSignal.timeout(5000),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ jsonrpc: "2.0", id: 7, error: { code: -32601, message: "Method not found" } });
+  });
+
   it("reads bodies up to the limit and refuses larger ones", async () => {
     const base = await serve(demoServer(), 64);
     expect((await post(base, { jsonrpc: "2.0", id: 1, method: "ping" })).status).toBe(200);
     expect((await post(base, { jsonrpc: "2.0", id: 1, method: "ping", params: { pad: "x".repeat(100) } })).status).toBe(413);
+  });
+});
+
+describe("the stdio process", () => {
+  it("writes nothing but JSON-RPC answers to stdout (no request log from mcp-use)", async () => {
+    const { spawn } = await import("node:child_process");
+    const child = spawn(process.execPath, ["--import", "tsx", "src/index.ts"], {
+      cwd: new URL("../..", import.meta.url).pathname,
+      // Invented credentials; Suunto points at a closed local port, so every call fails fast.
+      env: { PATH: process.env.PATH ?? "", NODE_ENV: "test", ...ENV, SUUNTO_OAUTH_URL: "http://127.0.0.1:1/", SUUNTO_API_URL: "http://127.0.0.1:1/" },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    child.stdout.on("data", (c: Buffer) => (stdout += c.toString("utf8")));
+    const requests = [
+      INIT,
+      { jsonrpc: "2.0", method: "notifications/initialized" },
+      { jsonrpc: "2.0", id: 2, method: "tools/list" },
+      { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "suunto_account_info", arguments: {} } },
+      { jsonrpc: "2.0", id: 4, method: "prompts/list" },
+      { jsonrpc: "2.0", id: 5, method: "ping" },
+    ];
+    child.stdin.end(requests.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const code = await new Promise<number | null>((resolve) => child.on("close", resolve));
+    expect(code).toBe(0);
+    const lines = stdout.split("\n").filter((l) => l !== "");
+    expect(lines).toHaveLength(5);
+    for (const line of lines) expect(JSON.parse(line)).toMatchObject({ jsonrpc: "2.0", id: expect.any(Number) });
+  });
+
+  it("does not serve a skills/ directory found in the working directory", async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { connectClient } = await import("../helpers/mcp-client.js");
+    const dir = mkdtempSync(join(tmpdir(), "suunto-mcp-skills-"));
+    mkdirSync(join(dir, "skills", "demo"), { recursive: true });
+    writeFileSync(join(dir, "skills", "demo", "SKILL.md"), "---\nname: demo\ndescription: invented\n---\nInvented skill.\n");
+    const cwd = process.cwd();
+    process.chdir(dir);
+    try {
+      const client = await connectClient(demoServer());
+      expect((await client.listResources()).resources).toEqual([]);
+      await client.close();
+    } finally {
+      process.chdir(cwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

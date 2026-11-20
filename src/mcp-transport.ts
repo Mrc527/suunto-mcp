@@ -54,12 +54,18 @@ function oversizedToolCall(message: unknown): string | undefined {
 }
 
 /**
- * The answer to a body that must not reach mcp-use, or undefined when it may.
+ * The answer to a body that must not reach mcp-use, or undefined when it may; [] means "answer
+ * nothing".
  *
  * A single oversized tool call gets a tool error, like the MCP SDK gives for invalid arguments.
- * A batch holding one gets an error for each of its requests.
+ * A batch holding one gets an error for each of its requests. subscriptions/listen is refused.
  */
 export function refusal(body: unknown): unknown {
+  // A 2026-07-28 listen stream would stay open for good (each request has its own mcp-use
+  // handler, so its subscription cap never applies) and this server sends no notifications.
+  if (isObject(body) && body.method === "subscriptions/listen") {
+    return isRequestId(body.id) ? { jsonrpc: "2.0", id: body.id, error: { code: -32601, message: "Method not found" } } : [];
+  }
   if (!Array.isArray(body)) {
     const text = oversizedToolCall(body);
     if (text === undefined) return undefined;
@@ -83,6 +89,19 @@ export function refusal(body: unknown): unknown {
  * The request is always served as POST /mcp, whatever path it came in on.
  */
 export async function handleMcpPost(server: MCPServer, req: IncomingMessage, res: ServerResponse, body: unknown): Promise<void> {
+  // Without a parsed body mcp-use would read the raw stream with no size limit.
+  if (body === undefined) {
+    const json = /^application\/json\b/i.test(req.headers["content-type"] ?? "");
+    res.writeHead(json ? 400 : 415, { "content-type": "application/json" });
+    res.end(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: null,
+        error: json ? { code: -32700, message: "Parse error: Invalid JSON" } : { code: -32000, message: "Unsupported Media Type: Content-Type must be application/json" },
+      }),
+    );
+    return;
+  }
   const refused = refusal(body);
   if (refused !== undefined) {
     // A batch of notifications only has nothing to answer.
@@ -95,7 +114,9 @@ export async function handleMcpPost(server: MCPServer, req: IncomingMessage, res
     return;
   }
   const handler = toNodeHandler(server);
-  await handler({ method: "POST", url: MCP_PATH, headers: req.headers, [Symbol.asyncIterator]: () => req[Symbol.asyncIterator]() }, res, body);
+  // The body is always the parsed one: the request stream is never handed over.
+  const noStream = (async function* (): AsyncGenerator<Uint8Array> {})();
+  await handler({ method: "POST", url: MCP_PATH, headers: req.headers, [Symbol.asyncIterator]: () => noStream }, res, body);
 }
 
 /** Reads a request body of at most maxBytes; undefined when it is larger. */
@@ -146,6 +167,34 @@ export async function messagesOf(response: Response): Promise<unknown[]> {
   return messages;
 }
 
+/** The protocol version a modern (2026-07-28) request declares in its _meta envelope. */
+function envelopeVersion(message: unknown): string | undefined {
+  if (!isObject(message) || !isObject(message.params) || !isObject(message.params._meta)) return undefined;
+  const version = message.params._meta["io.modelcontextprotocol/protocolVersion"];
+  return typeof version === "string" ? version : undefined;
+}
+
+/** The body field the Mcp-Name header mirrors, per method (SEP-2243). */
+const NAME_SOURCE: Record<string, string> = {
+  "tools/call": "name",
+  "prompts/get": "name",
+  "resources/read": "uri",
+  "tasks/get": "taskId",
+  "tasks/update": "taskId",
+  "tasks/cancel": "taskId",
+};
+
+/** The standard headers of a modern request; Mcp-Name always in the Base64 form, which takes any text. */
+function modernHeaders(message: JsonObject, version: string): Record<string, string> {
+  const headers: Record<string, string> = { "mcp-protocol-version": version };
+  if (typeof message.method !== "string") return headers;
+  headers["mcp-method"] = message.method;
+  const field = Object.hasOwn(NAME_SOURCE, message.method) ? NAME_SOURCE[message.method] : undefined;
+  const value = field && isObject(message.params) ? message.params[field] : undefined;
+  if (typeof value === "string") headers["mcp-name"] = `=?base64?${Buffer.from(value, "utf8").toString("base64")}?=`;
+  return headers;
+}
+
 /**
  * Serves the mcp-use server over stdio: one JSON-RPC message (or batch) per line. Each request is
  * posted to the server's fetch handler; requests run concurrently and answers are written as
@@ -172,7 +221,11 @@ export function serveStdio(server: MCPServer, options: StdioOptions): StdioConne
     if (requestId !== undefined) inflight.set(requestId, controller);
     try {
       const headers: Record<string, string> = { "content-type": "application/json", accept: "application/json, text/event-stream" };
-      if (protocolVersion) headers["mcp-protocol-version"] = protocolVersion;
+      // A 2026-07-28 request names its version in _meta (no initialize) and needs the headers
+      // HTTP clients mirror from the body; older requests use the version from initialize.
+      const modern = envelopeVersion(body);
+      if (modern) Object.assign(headers, modernHeaders(body as JsonObject, modern));
+      else if (protocolVersion) headers["mcp-protocol-version"] = protocolVersion;
       const response = await server.fetch(
         new Request(`http://localhost${MCP_PATH}`, { method: "POST", headers, body: JSON.stringify(body), signal: controller.signal }),
       );
@@ -211,6 +264,12 @@ export function serveStdio(server: MCPServer, options: StdioOptions): StdioConne
     const refused = refusal(body);
     if (refused !== undefined) {
       if (!Array.isArray(refused) || refused.length > 0) write(refused);
+      return;
+    }
+    // A modern request's method goes into a header; one that cannot be a header value is no method.
+    if (envelopeVersion(body) !== undefined && !/^[\x21-\x7e]+$/.test(String((body as JsonObject).method))) {
+      const id = (body as JsonObject).id;
+      if (isRequestId(id)) write({ jsonrpc: "2.0", id, error: { code: -32601, message: "Method not found" } });
       return;
     }
     const requestId = isObject(body) && isRequestId(body.id) ? JSON.stringify(body.id) : undefined;
