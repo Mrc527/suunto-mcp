@@ -9,7 +9,7 @@ import type { MCPServer } from "mcp-use";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadConfig } from "../../src/config.js";
 import { DemoActivityStore } from "../../src/demo/activity.js";
-import { countInputElements, handleMcpPost, MAX_TOOL_INPUT_ELEMENTS, messagesOf, readBody, refusal, serveStdio } from "../../src/mcp-transport.js";
+import { countInputElements, handleMcpPost, MAX_TOOL_INPUT_ELEMENTS, messagesOf, readBody, refusal, serveStdio, splitCancels } from "../../src/mcp-transport.js";
 import { createMcpServer, createServices } from "../../src/server.js";
 
 const INIT = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } } };
@@ -133,6 +133,16 @@ describe("refusal of subscriptions/listen", () => {
   it("answers Method not found to a listen request and nothing to a listen notification", () => {
     expect(refusal({ jsonrpc: "2.0", id: 4, method: "subscriptions/listen", params: {} })).toEqual({ jsonrpc: "2.0", id: 4, error: { code: -32601, message: "Method not found" } });
     expect(refusal({ jsonrpc: "2.0", method: "subscriptions/listen" })).toEqual([]);
+  });
+});
+
+describe("splitCancels", () => {
+  it("takes notifications/cancelled out of a batch and leaves single messages alone", () => {
+    const cancel = (requestId: unknown) => ({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId } });
+    const ping = { jsonrpc: "2.0", id: 3, method: "ping" };
+    expect(splitCancels([ping, cancel(2), cancel("x"), cancel({ bad: true })])).toEqual({ body: [ping], cancelled: [2, "x"] });
+    expect(splitCancels(cancel(2))).toEqual({ body: cancel(2), cancelled: [] });
+    expect(splitCancels(ping)).toEqual({ body: ping, cancelled: [] });
   });
 });
 
@@ -301,6 +311,55 @@ describe("serveStdio", () => {
     expect(s.logs).toEqual([]);
   });
 
+  it("answers a batch that cancels one of its own requests, and closes", async () => {
+    const s = stdioSession(demoServer());
+    s.send(INIT);
+    await s.waitFor(1);
+    s.send([
+      { jsonrpc: "2.0", id: 2, method: "tools/list" },
+      { jsonrpc: "2.0", id: 3, method: "ping" },
+      { jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: 2 } },
+    ]);
+    s.end();
+    await s.closed;
+    expect(s.messages().map((m) => m.id).sort()).toEqual([1, 2, 3]);
+  });
+
+  it("aborts an earlier request named by a cancel inside a batch", async () => {
+    let aborted = false;
+    const fake = fakeServer((request, body) => {
+      if ((body as { id?: unknown }).id !== "slow") return new Response(null, { status: 202 });
+      return new Promise<Response>((_resolve, reject) => {
+        request.signal.addEventListener("abort", () => {
+          aborted = true;
+          reject(request.signal.reason as Error);
+        });
+      });
+    });
+    const s = stdioSession(fake.server);
+    s.send({ jsonrpc: "2.0", id: "slow", method: "tools/call", params: { name: "x", arguments: {} } });
+    for (let i = 0; i < 100 && fake.requests.length === 0; i++) await new Promise((r) => setTimeout(r, 5));
+    s.send([{ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: "slow" } }]);
+    s.end();
+    await s.closed;
+    expect(aborted).toBe(true);
+    expect(s.lines).toEqual([]);
+    // The batch held only the cancel: nothing of it reached the server.
+    expect(fake.requests).toHaveLength(1);
+  });
+
+  it("answers Unsupported protocol version to a modern request whose version cannot be a header value", async () => {
+    const fake = fakeServer(() => sse({}));
+    const s = stdioSession(fake.server);
+    const meta = { "io.modelcontextprotocol/protocolVersion": "版本", "io.modelcontextprotocol/clientInfo": { name: "t", version: "1" }, "io.modelcontextprotocol/clientCapabilities": {} };
+    s.send({ jsonrpc: "2.0", id: 1, method: "tools/list", params: { _meta: meta } });
+    s.end();
+    await s.closed;
+    expect(s.messages()).toEqual([{ jsonrpc: "2.0", id: 1, error: { code: -32022, message: "Unsupported protocol version" } }]);
+    expect(fake.requests).toHaveLength(0);
+    expect(s.logs).toEqual([]);
+  });
+
   it("passes batches on and writes the answer", async () => {
     const s = stdioSession(demoServer());
     s.send([
@@ -465,6 +524,25 @@ describe("handleMcpPost and readBody", () => {
     });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ jsonrpc: "2.0", id: 7, error: { code: -32601, message: "Method not found" } });
+  });
+
+  it("ends the answer to a batch that cancels one of its own requests", async () => {
+    const base = await serve(demoServer());
+    const res = await fetch(base, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": "2025-03-26" },
+      body: JSON.stringify([
+      { jsonrpc: "2.0", id: 2, method: "tools/list" },
+      { jsonrpc: "2.0", id: 3, method: "ping" },
+      { jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: 2 } },
+    ]),
+      signal: AbortSignal.timeout(5000),
+    });
+    const messages = (await messagesOf(res)) as Array<{ id: number }>;
+    expect(messages.map((m) => m.id).sort()).toEqual([2, 3]);
+    // A batch of cancels only has nothing to answer.
+    const only = await post(base, [{ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: 9 } }]);
+    expect(only.status).toBe(202);
   });
 
   it("reads bodies up to the limit and refuses larger ones", async () => {

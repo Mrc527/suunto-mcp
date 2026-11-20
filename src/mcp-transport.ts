@@ -80,6 +80,23 @@ export function refusal(body: unknown): unknown {
     .map((m) => ({ jsonrpc: "2.0", id: m.id, error: { code: -32602, message: text } }));
 }
 
+/**
+ * A batch without its notifications/cancelled, and the request ids they name. mcp-use drops the
+ * answer to a request cancelled within its own batch and then holds the batch's stream open
+ * waiting for it.
+ */
+export function splitCancels(body: unknown): { body: unknown; cancelled: Array<string | number> } {
+  if (!Array.isArray(body)) return { body, cancelled: [] };
+  const cancelled: Array<string | number> = [];
+  const rest = body.filter((m) => {
+    if (!isObject(m) || m.method !== "notifications/cancelled") return true;
+    const target = isObject(m.params) ? m.params.requestId : undefined;
+    if (isRequestId(target)) cancelled.push(target);
+    return false;
+  });
+  return { body: rest, cancelled };
+}
+
 // ---------------------------------------------------------------------------------------------
 // HTTP
 // ---------------------------------------------------------------------------------------------
@@ -113,10 +130,15 @@ export async function handleMcpPost(server: MCPServer, req: IncomingMessage, res
     res.end(JSON.stringify(refused));
     return;
   }
+  const forwarded = splitCancels(body).body;
+  if (Array.isArray(body) && body.length > 0 && Array.isArray(forwarded) && forwarded.length === 0) {
+    res.writeHead(202).end();
+    return;
+  }
   const handler = toNodeHandler(server);
   // The body is always the parsed one: the request stream is never handed over.
   const noStream = (async function* (): AsyncGenerator<Uint8Array> {})();
-  await handler({ method: "POST", url: MCP_PATH, headers: req.headers, [Symbol.asyncIterator]: () => noStream }, res, body);
+  await handler({ method: "POST", url: MCP_PATH, headers: req.headers, [Symbol.asyncIterator]: () => noStream }, res, forwarded);
 }
 
 /** Reads a request body of at most maxBytes; undefined when it is larger. */
@@ -166,6 +188,9 @@ export async function messagesOf(response: Response): Promise<unknown[]> {
   }
   return messages;
 }
+
+/** Visible ASCII: what an HTTP header value built from a request field may hold. */
+const HEADER_VALUE = /^[\x21-\x7e]+$/;
 
 /** The protocol version a modern (2026-07-28) request declares in its _meta envelope. */
 function envelopeVersion(message: unknown): string | undefined {
@@ -266,12 +291,26 @@ export function serveStdio(server: MCPServer, options: StdioOptions): StdioConne
       if (!Array.isArray(refused) || refused.length > 0) write(refused);
       return;
     }
-    // A modern request's method goes into a header; one that cannot be a header value is no method.
-    if (envelopeVersion(body) !== undefined && !/^[\x21-\x7e]+$/.test(String((body as JsonObject).method))) {
-      const id = (body as JsonObject).id;
-      if (isRequestId(id)) write({ jsonrpc: "2.0", id, error: { code: -32601, message: "Method not found" } });
-      return;
+    // A modern request's version and method go into headers; values that cannot be header
+    // values are an unknown version or method.
+    const version = envelopeVersion(body);
+    if (version !== undefined) {
+      const method = String((body as JsonObject).method);
+      const error = !HEADER_VALUE.test(version)
+        ? { code: -32022, message: "Unsupported protocol version" }
+        : !HEADER_VALUE.test(method)
+          ? { code: -32601, message: "Method not found" }
+          : undefined;
+      if (error) {
+        const id = (body as JsonObject).id;
+        if (isRequestId(id)) write({ jsonrpc: "2.0", id, error });
+        return;
+      }
     }
+    const split = splitCancels(body);
+    for (const target of split.cancelled) inflight.get(JSON.stringify(target))?.abort();
+    if (Array.isArray(body) && body.length > 0 && Array.isArray(split.body) && split.body.length === 0) return;
+    body = split.body;
     const requestId = isObject(body) && isRequestId(body.id) ? JSON.stringify(body.id) : undefined;
     const task = post(body, requestId);
     pending.add(task);
