@@ -1,8 +1,9 @@
 /**
  * The MCP surface (server info, instructions, tools with their schemas and annotations, prompts)
  * stays what AI apps saw from the MCP SDK v1 server, on 2025-era connections and on the
- * 2026-07-28 protocol. test/fixtures/mcp-surface.json was recorded from the v1 server; after an
- * intended change, rerun with UPDATE_MCP_SURFACE=1.
+ * 2026-07-28 protocol. test/fixtures/mcp-surface.json was recorded from the v1 server; the only
+ * change since is the _meta of the four tools that open a view. After an intended change, rerun
+ * with UPDATE_MCP_SURFACE=1.
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import type { Client } from "@modelcontextprotocol/client";

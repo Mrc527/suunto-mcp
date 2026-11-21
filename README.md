@@ -657,6 +657,19 @@ Notes:
 - **Not medical advice.** Heart rate, HRV, SpO2, sleep and recovery values come from the watch.
 - **Safety.** Workout names and descriptions, route and point names and GPX text are user data: the server tells the AI to never follow instructions found inside them, and to ask before adding a route or a point of interest unless you asked for exactly that.
 
+### Views
+
+In AI apps that show interactive views ([MCP Apps](https://modelcontextprotocol.io/extensions/apps): Claude, ChatGPT, VS Code and others), four tools open one next to their answer:
+
+| View | Opened by | What you can do |
+| --- | --- | --- |
+| Workouts | `suunto_list_workouts`, `suunto_get_workout` | Open a workout from the list; see its figures and heart rate zones; load its route and charts (heart rate, altitude, speed, pace, cadence, power), where the route marker follows the point you point at on the chart. |
+| Training | `suunto_workout_stats` | Totals, and a bar chart per week, month or year (with `group_by`) for distance, time, ascent, workouts or energy. |
+| Sleep | `suunto_sleep` | Deep, light, REM and awake time night by night, with heart rate, HRV and quality per night. |
+
+The answers stay the same JSON text, so apps without views (and the AI) see no difference. The route is drawn from the watch's own GPS points, without map tiles: a view never loads anything from another site. Loading a workout's route and charts is a Suunto API call, so it waits for a click. The views are built from `views/` into one self-contained page (`npm run build:views`, part of `npm run build`).
+
+
 ## Security
 
 **Web service:**
@@ -711,14 +724,14 @@ Run `node dist/index.js --check` first (local mode), or ask the AI app to check 
 
 ```bash
 npm install
-npm run build          # compile to dist/
+npm run build          # build the views and compile to dist/
 npm run dev            # run from source with tsx
 npm run typecheck
 npm test               # unit tests (integration tests are skipped)
 npm run check          # node dist/index.js --check with your local settings
 ```
 
-The unit tests use a mocked `fetch` for the Suunto client (authorize address, code exchange, refresh and token rotation, one refresh at a time, one retry after 401, a refused refresh that asks the user to connect again, 403, 404 and 429 answers, `Retry-After`, no retry of writes or of HTTP 500, sessions that take over newer stored tokens, the call limiter, deauthorize), and cover the response cache (how long each kind of answer is kept, size limits, clearing after a write), the activity service (units, every kind of Suunto data, 28-day windows, dates and time zones with daylight saving time, totals and statistics, the sport filter, downsampling, GPX checks), the MCP tool surface (tool list, annotations, read-only mode, strict arguments, redaction, and a snapshot of every tool, schema and prompt in `test/fixtures/mcp-surface.json`, on 2025-era connections and on the 2026-07-28 protocol), the HTTP checks in front of the MCP SDK handler, the stdio process, the demo data, and the web service (sign-up, sign-in, CSRF, account settings, connecting Suunto with a mock Suunto OAuth server: `state` checks, wrong user, expired `state`, refused access, reconnect, remove with deauthorize; the full OAuth flow with the SDK's OAuth client as Claude would run it, token refresh and reuse detection, client metadata documents, admin controls, security headers, translations).
+The unit tests use a mocked `fetch` for the Suunto client (authorize address, code exchange, refresh and token rotation, one refresh at a time, one retry after 401, a refused refresh that asks the user to connect again, 403, 404 and 429 answers, `Retry-After`, no retry of writes or of HTTP 500, sessions that take over newer stored tokens, the call limiter, deauthorize), and cover the response cache (how long each kind of answer is kept, size limits, clearing after a write), the activity service (units, every kind of Suunto data, 28-day windows, dates and time zones with daylight saving time, totals and statistics, the sport filter, downsampling, GPX checks), the MCP tool surface (tool list, annotations, read-only mode, strict arguments, redaction, and a snapshot of every tool, schema and prompt in `test/fixtures/mcp-surface.json`, on 2025-era connections and on the 2026-07-28 protocol), the HTTP checks in front of the MCP SDK handler, the stdio process, the views (which tools open them, the ui:// resources and the page they serve; the views rendering real demo answers in a DOM: opening a workout, loading its route and charts, the metric buttons, keyboard steps, error answers, user text kept as text; and their chart and route geometry), the demo data, and the web service (sign-up, sign-in, CSRF, account settings, connecting Suunto with a mock Suunto OAuth server: `state` checks, wrong user, expired `state`, refused access, reconnect, remove with deauthorize; the full OAuth flow with the SDK's OAuth client as Claude would run it, token refresh and reuse detection, client metadata documents, admin controls, security headers, translations).
 
 End-to-end tests run the real server against an in-process mock of the Suunto API (`test/helpers/mock-suunto.ts`: OAuth, workouts, 24/7 data, routes and points of interest): the built `dist/index.js` with `--login` (through the mock's sign-in page), `--check`, over stdio and with `--http`, sharing one token cache; the services in process (call limits, a refused refresh token); and the web service with a full "Connect Suunto" flow, an AI app connected over OAuth like Claude, and a demo account. They never talk to Suunto and need no Suunto account or keys:
 
@@ -736,6 +749,7 @@ src/
   index.ts            CLI entry point (stdio / --web / --http / --check / --login)
   config.ts           environment configuration
   server.ts           MCP server (MCP SDK v2), instructions, prompts, service wiring
+  views.ts            the interactive views (MCP Apps): ui:// resources, built from views/
   mcp-transport.ts    the MCP SDK's HTTP handler on Node, with the checks in front of it
   http.ts             Streamable HTTP transport with auth and Host/Origin checks
   tooling.ts          tool registration helpers (errors, read-only gating, annotations, redaction)
@@ -749,6 +763,8 @@ src/
                       access requests and welcome e-mails, Suunto connect flow, per-user MCP
                       endpoint and connection pool
   web/i18n/           page texts per language (en is the source)
+views/                the interactive views: TypeScript and SVG, no framework; Vite builds them
+                      into one page (dist/views/index.html)
 assets/brand/         the logo (SVG); scripts/make-icons.mjs makes the icons from it
 deploy/               Docker Compose with Caddy, nginx example
 deploy/server/        production stack and deploy script used by the CI/CD pipeline

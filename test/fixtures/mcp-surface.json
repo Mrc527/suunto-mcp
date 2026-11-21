@@ -83,6 +83,12 @@
           "destructiveHint": false,
           "idempotentHint": true,
           "openWorldHint": false
+        },
+        "_meta": {
+          "ui": {
+            "resourceUri": "ui://suunto/workouts.html"
+          },
+          "ui/resourceUri": "ui://suunto/workouts.html"
         }
       },
       {
@@ -143,6 +149,12 @@
           "destructiveHint": false,
           "idempotentHint": true,
           "openWorldHint": false
+        },
+        "_meta": {
+          "ui": {
+            "resourceUri": "ui://suunto/workouts.html"
+          },
+          "ui/resourceUri": "ui://suunto/workouts.html"
         }
       },
       {
@@ -198,6 +210,12 @@
           "destructiveHint": false,
           "idempotentHint": true,
           "openWorldHint": false
+        },
+        "_meta": {
+          "ui": {
+            "resourceUri": "ui://suunto/training.html"
+          },
+          "ui/resourceUri": "ui://suunto/training.html"
         }
       },
       {
@@ -347,6 +365,12 @@
           "destructiveHint": false,
           "idempotentHint": true,
           "openWorldHint": false
+        },
+        "_meta": {
+          "ui": {
+            "resourceUri": "ui://suunto/sleep.html"
+          },
+          "ui/resourceUri": "ui://suunto/sleep.html"
         }
       },
       {
@@ -742,6 +766,12 @@
           "destructiveHint": false,
           "idempotentHint": true,
           "openWorldHint": false
+        },
+        "_meta": {
+          "ui": {
+            "resourceUri": "ui://suunto/workouts.html"
+          },
+          "ui/resourceUri": "ui://suunto/workouts.html"
         }
       },
       {
@@ -802,6 +832,12 @@
           "destructiveHint": false,
           "idempotentHint": true,
           "openWorldHint": false
+        },
+        "_meta": {
+          "ui": {
+            "resourceUri": "ui://suunto/workouts.html"
+          },
+          "ui/resourceUri": "ui://suunto/workouts.html"
         }
       },
       {
@@ -857,6 +893,12 @@
           "destructiveHint": false,
           "idempotentHint": true,
           "openWorldHint": false
+        },
+        "_meta": {
+          "ui": {
+            "resourceUri": "ui://suunto/training.html"
+          },
+          "ui/resourceUri": "ui://suunto/training.html"
         }
       },
       {
@@ -1006,6 +1048,12 @@
           "destructiveHint": false,
           "idempotentHint": true,
           "openWorldHint": false
+        },
+        "_meta": {
+          "ui": {
+            "resourceUri": "ui://suunto/sleep.html"
+          },
+          "ui/resourceUri": "ui://suunto/sleep.html"
         }
       },
       {

@@ -3,6 +3,7 @@
  * JSON output.
  */
 
+import { registerAppTool } from "@modelcontextprotocol/ext-apps/server";
 import type { CallToolResult, McpServer, ToolAnnotations } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import type { AppConfig } from "./config.js";
@@ -31,6 +32,8 @@ export interface ToolSpec<Shape extends ZodShape> {
   idempotent?: boolean;
   /** Tool reaches a third party (for example, it sends data to someone other than the user's own account). */
   openWorld?: boolean;
+  /** The ui:// resource of the view that shows the answer (src/views.ts), in AI apps that show views. */
+  view?: string;
 }
 
 type Output<Shape extends ZodShape> = { [K in keyof Shape]: z.output<Shape[K]> };
@@ -83,16 +86,19 @@ export function registerTool<Shape extends ZodShape>(
     idempotentHint: spec.idempotent ?? spec.kind === "read",
     openWorldHint: spec.openWorld ?? false,
   };
-  ctx.server.registerTool(
-    spec.name,
-    {
-      title: spec.title,
-      description: spec.description,
-      // Strict: a mistyped argument name (e.g. "occurence") is an error instead of being ignored,
-      // which could otherwise fall back to a more destructive default.
-      inputSchema: z.strictObject(spec.inputSchema),
-      annotations,
-    },
+  const config = {
+    title: spec.title,
+    description: spec.description,
+    // Strict: a mistyped argument name (e.g. "occurence") is an error instead of being ignored,
+    // which could otherwise fall back to a more destructive default.
+    inputSchema: z.strictObject(spec.inputSchema),
+    annotations,
+  };
+  // registerAppTool adds the view's _meta (also in the older flat "ui/resourceUri" form).
+  const register = spec.view
+    ? (cb: never) => registerAppTool(ctx.server, spec.name, { ...config, _meta: { ui: { resourceUri: spec.view } } }, cb)
+    : (cb: never) => ctx.server.registerTool(spec.name, config, cb);
+  register(
     // The SDK infers argument types from the schema; the handler is re-typed to keep call sites simple.
     (async (args: Output<Shape>) => {
       const started = Date.now();

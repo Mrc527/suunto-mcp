@@ -10,6 +10,7 @@
 import type { CallToolResult } from "@modelcontextprotocol/server";
 import { POI_TYPES } from "../suunto/activities.js";
 import { rawResult, registerTool, type ToolContext, type ZodShape } from "../tooling.js";
+import { VIEWS } from "../views.js";
 import {
   activitySamplesShape,
   createPoiShape,
@@ -110,6 +111,7 @@ export function registerActivityTools(ctx: ToolContext, service: ActivityService
         units: UNITS_ARG,
       }),
       kind: "read",
+      view: VIEWS.workouts.uri,
     },
     async (args) => service.listWorkouts(args),
   );
@@ -133,6 +135,7 @@ export function registerActivityTools(ctx: ToolContext, service: ActivityService
         units: UNITS_ARG,
       }),
       kind: "read",
+      view: VIEWS.workouts.uri,
     },
     async (args) => service.getWorkout(args),
   );
@@ -154,6 +157,7 @@ export function registerActivityTools(ctx: ToolContext, service: ActivityService
         units: UNITS_ARG,
       }),
       kind: "read",
+      view: VIEWS.training.uri,
     },
     async (args) => service.workoutStats(args),
   );
@@ -227,6 +231,7 @@ export function registerActivityTools(ctx: ToolContext, service: ActivityService
         to: "Last wake-up date, YYYY-MM-DD (included); at most 92 days in all, so at most 91 days after from",
       }),
       kind: "read",
+      view: VIEWS.sleep.uri,
     },
     async (args) => service.sleep(args),
   );

@@ -20,6 +20,7 @@ import { addDays, parseDateOnly, todayInZone } from "./util/dates.js";
 import { ConfigError, describeError, redact, UserFacingError } from "./util/errors.js";
 import { escapeHtml } from "./util/text.js";
 import { VERSION } from "./version.js";
+import { registerViews } from "./views.js";
 import { ICON_PNG } from "./web/brand-assets.js";
 
 /** Without a web server (single-user mode) the icon goes inline. */
@@ -741,6 +742,7 @@ export function createMcpServer(config: AppConfig, services: Services, log: (m: 
 
   if (services.activity) {
     registerActivityTools(ctx, services.activity);
+    registerViews(server);
     registerPrompts(server, config);
   }
   return server;

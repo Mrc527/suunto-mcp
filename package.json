@@ -17,17 +17,18 @@
     "node": ">=22.13"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/postbuild.mjs",
+    "build": "npm run build:views && tsc -p tsconfig.json && node scripts/postbuild.mjs",
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
     "check": "node dist/index.js --check",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p views/tsconfig.json",
     "test": "vitest run",
     "test:unit": "vitest run test/unit",
     "test:integration": "vitest run test/integration",
     "prepublishOnly": "npm run build",
     "prepare": "npm run build",
-    "start:web": "node dist/index.js --web"
+    "start:web": "node dist/index.js --web",
+    "build:views": "vite build --config views/vite.config.ts"
   },
   "keywords": [
     "mcp",
@@ -55,6 +56,7 @@
   "homepage": "https://github.com/Mrc527/suunto-mcp#readme",
   "dependencies": {
     "@modelcontextprotocol/express": "^2.0.2",
+    "@modelcontextprotocol/ext-apps": "^2.0.4",
     "@modelcontextprotocol/node": "^2.1.2",
     "@modelcontextprotocol/server": "^2.4.0",
     "@modelcontextprotocol/server-legacy": "^2.4.0",
@@ -69,9 +71,12 @@
     "@types/node": "^26.6.6",
     "@types/nodemailer": "^8.0.2",
     "@types/smtp-server": "^3.5.13",
+    "happy-dom": "^21.0.4",
     "smtp-server": "^3.21.3",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
+    "vite": "^8.3.8",
+    "vite-plugin-singlefile": "^2.3.4",
     "vitest": "^5.1.0"
   }
 }
