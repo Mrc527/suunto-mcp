@@ -4,7 +4,7 @@
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { toNodeHandler } from "@modelcontextprotocol/node";
-import { createMcpHandler, type McpServerFactory } from "@modelcontextprotocol/server";
+import { createMcpHandler, type AuthInfo, type McpHttpHandler, type McpServerFactory } from "@modelcontextprotocol/server";
 import { redactForLog } from "./util/errors.js";
 
 type JsonObject = Record<string, unknown>;
@@ -30,9 +30,8 @@ export function createNodeMcpHandler(factory: McpServerFactory, log: (message: s
   const onerror = (error: Error) => log(`MCP request failed: ${redactForLog(error.message, [])}`);
   // JSON where the SDK allows it (2026-07-28 requests); 2025-era requests are answered as SSE.
   const handler = createMcpHandler(factory, { responseMode: "json", onerror });
-  const node = toNodeHandler(handler, { onerror });
   return {
-    post: (req, res, body) => handleMcpPost(node, req, res, body),
+    post: (req, res, body) => handleMcpPost(handler, req, res, body, onerror),
     close: () => handler.close(),
   };
 }
@@ -59,10 +58,14 @@ export function splitCancels(body: unknown): unknown {
   return body.filter((m) => !isObject(m) || m.method !== "notifications/cancelled" || m.id !== undefined);
 }
 
-type NodeHandler = ReturnType<typeof toNodeHandler>;
-
 /** Hands one parsed JSON-RPC body to the SDK handler, after the checks above. */
-export async function handleMcpPost(node: NodeHandler, req: IncomingMessage, res: ServerResponse, body: unknown): Promise<void> {
+export async function handleMcpPost(
+  handler: Pick<McpHttpHandler, "fetch">,
+  req: IncomingMessage & { auth?: AuthInfo },
+  res: ServerResponse,
+  body: unknown,
+  onerror?: (error: Error) => void,
+): Promise<void> {
   // An unparsed body (another Content-Type, or empty) would let the SDK read the stream past every
   // check here.
   if (body === undefined) {
@@ -89,7 +92,12 @@ export async function handleMcpPost(node: NodeHandler, req: IncomingMessage, res
     res.end(JSON.stringify(refused));
     return;
   }
-  await node(req, res, forwarded);
+  // Given the parsed body, the Node adapter would rebuild the request body with JSON.stringify,
+  // which overflows the stack on deeply nested arguments. The SDK reads only the parsed body it
+  // is handed, so the request goes to the adapter without one.
+  const node = toNodeHandler({ fetch: (request, options) => handler.fetch(request, { ...options, parsedBody: forwarded }) }, onerror ? { onerror } : {});
+  const { "content-length": _length, "transfer-encoding": _encoding, ...headers } = req.headers;
+  await node({ method: "POST", url: req.url, headers, ...(req.auth ? { auth: req.auth } : {}), [Symbol.asyncIterator]: async function* () {} }, res);
 }
 
 /** Reads a request body of at most maxBytes; undefined when it is larger. */

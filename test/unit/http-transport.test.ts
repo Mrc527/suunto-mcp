@@ -136,6 +136,13 @@ describe("HTTP transport", () => {
     for (const h of ["mcp-protocol-version", "mcp-method", "mcp-name"]) expect(res.headers.get("access-control-allow-headers")).toContain(h);
   });
 
+  it("answers tool arguments nested thousands of levels deep with a tool error", async () => {
+    const deep = `${'{"a":'.repeat(9000)}1${"}".repeat(9000)}`;
+    const res = await fetch(url, { method: "POST", headers: authed, body: `{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"suunto_get_workout","arguments":{"workout_key":"0123456789abcdef01234567","deep":${deep}}}}` });
+    expect(res.status).toBe(200);
+    expect(await messagesOf(res)).toEqual([expect.objectContaining({ id: 6, result: expect.objectContaining({ isError: true }) })]);
+  });
+
   it("keeps the CORS headers of an allowed origin on the MCP answer", async () => {
     const res = await fetch(url, { method: "POST", headers: { ...authed, origin: "https://app.example.com" }, body: initBody });
     expect(res.status).toBe(200);

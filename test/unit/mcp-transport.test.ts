@@ -120,6 +120,22 @@ describe("the SDK handler behind the checks", () => {
     ]);
   });
 
+  it("answers tool arguments nested thousands of levels deep with a tool error, not a 500", async () => {
+    const url = await serve();
+    // Built as text: JSON.stringify cannot write it, which is what used to fail on the way to the SDK.
+    const deep = `${'{"a":'.repeat(9000)}1${"}".repeat(9000)}`;
+    for (const [version, extra] of [["2025-06-18", {}], ["2026-07-28", { "mcp-method": "tools/call", "mcp-name": "suunto_get_workout" }]] as const) {
+      const meta = version === "2026-07-28" ? `,"_meta":${JSON.stringify(META)}` : "";
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": version, ...extra },
+        body: `{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"suunto_get_workout","arguments":{"workout_key":"0123456789abcdef01234567","deep":${deep}}${meta}}}`,
+      });
+      expect(res.status, version).toBe(200);
+      expect(await messagesOf(res), version).toEqual([expect.objectContaining({ id: 8, result: expect.objectContaining({ isError: true }) })]);
+    }
+  });
+
   it("answers a 2026-07-28 listen request at once instead of holding the connection open", async () => {
     const url = await serve();
     const res = await post(url, { jsonrpc: "2.0", id: 7, method: "subscriptions/listen", params: { notifications: { toolsListChanged: true }, _meta: META } }, modern("subscriptions/listen"));
@@ -157,8 +173,8 @@ describe("the SDK handler behind the checks", () => {
   });
 
   it("never hands an unparsed body to the SDK: 415 for other content types, 400 for empty JSON", async () => {
-    const node = vi.fn(async () => {});
-    http = createServer((req, res) => void handleMcpPost(node, req, res, undefined));
+    const sdkFetch = vi.fn(async () => new Response(null, { status: 202 }));
+    http = createServer((req, res) => void handleMcpPost({ fetch: sdkFetch }, req, res, undefined));
     await new Promise<void>((r) => http!.listen(0, "127.0.0.1", () => r()));
     const base = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
     const plain = await fetch(base, { method: "POST", headers: { "content-type": "text/plain", accept: "application/json, text/event-stream" }, body: "x".repeat(2 * 1024 * 1024) });
@@ -167,7 +183,7 @@ describe("the SDK handler behind the checks", () => {
     const empty = await fetch(base, { method: "POST", headers: { "content-type": "application/json; charset=utf-8", accept: "application/json, text/event-stream" } });
     expect(empty.status).toBe(400);
     expect(await empty.json()).toMatchObject({ error: { code: -32700 } });
-    expect(node).not.toHaveBeenCalled();
+    expect(sdkFetch).not.toHaveBeenCalled();
   });
 
   it("reads bodies up to the limit and refuses larger ones", async () => {
