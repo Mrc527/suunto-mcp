@@ -1,8 +1,6 @@
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { CachedBackend } from "../../src/activity/cache.js";
 import { ActivityService } from "../../src/activity/service.js";
@@ -26,6 +24,7 @@ import {
 import { SuuntoApi } from "../../src/suunto/api.js";
 import { CallLimiter } from "../../src/suunto/limiter.js";
 import { redact } from "../../src/util/errors.js";
+import { connectClient } from "../helpers/mcp-client.js";
 import { startMockSuunto, type MockSuunto } from "../helpers/mock-suunto.js";
 
 // Invented test data only.
@@ -126,9 +125,7 @@ function fakeBackend(opts: { failWith?: string; listFailWith?: string } = {}): A
 
 async function connectWith(config: AppConfig, services: Services, hooks: McpServerHooks = {}, log: (m: string) => void = () => {}) {
   const server = createMcpServer(config, services, log, hooks);
-  const client = new Client({ name: "test", version: "1.0.0" });
-  const [ct, st] = InMemoryTransport.createLinkedPair();
-  await Promise.all([client.connect(ct), server.connect(st)]);
+  const client = await connectClient(server, "test");
   return client;
 }
 

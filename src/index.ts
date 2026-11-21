@@ -9,7 +9,7 @@
  *   suunto-mcp --login      # sign in to Suunto once and save the tokens to SUUNTO_TOKEN_CACHE
  */
 
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { serveStdio, StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { describeConfig, loadConfig, loadLoginConfig, type AppConfig, type CliOverrides } from "./config.js";
 import { startHttpServer } from "./http.js";
 import { accountInfo, closeServices, createMcpServer, createServices, runLogin } from "./server.js";
@@ -211,11 +211,16 @@ async function main(): Promise<void> {
     return;
   }
 
-  const server = createMcpServer(config, services, safeLog);
-  const transport = new StdioServerTransport();
-  transport.onclose = () => void shutdown(0);
-  process.stdin.on("end", () => void shutdown(0));
-  await server.connect(transport);
+  // Shut down when the connection ends (stdin closed, stdout broken, or the pinned server closed
+  // it), not on a server's onclose: serveStdio also closes the server/discover probe it discards
+  // when the client then falls back to initialize.
+  class ExitOnCloseTransport extends StdioServerTransport {
+    override async close(): Promise<void> {
+      await super.close();
+      void shutdown(0);
+    }
+  }
+  serveStdio(() => createMcpServer(config, services, safeLog), { transport: new ExitOnCloseTransport() });
   safeLog(`ready (stdio). Suunto, units ${config.units}, time zone ${config.timeZone}${config.readOnly ? " [read-only]" : ""}${services.activity ? "" : " [no sign-in: run suunto-mcp --login]"}`);
 }
 

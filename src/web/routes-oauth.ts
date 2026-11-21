@@ -5,11 +5,7 @@
 import express, { type NextFunction, type Request, type Response, type Router } from "express";
 import { ipKeyGenerator } from "express-rate-limit";
 import { BlockList, isIP } from "node:net";
-import { InvalidRequestError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
-import { authorizationHandler } from "@modelcontextprotocol/sdk/server/auth/handlers/authorize.js";
-import { clientRegistrationHandler } from "@modelcontextprotocol/sdk/server/auth/handlers/register.js";
-import { revocationHandler } from "@modelcontextprotocol/sdk/server/auth/handlers/revoke.js";
-import { tokenHandler } from "@modelcontextprotocol/sdk/server/auth/handlers/token.js";
+import { authorizationHandler, clientRegistrationHandler, InvalidRequestError, revocationHandler, tokenHandler } from "@modelcontextprotocol/server-legacy/auth";
 import { page, type WebContext } from "./context.js";
 import { ASSET_VERSION, escapeHtml as escapeAttr, html } from "./html.js";
 import { HTML_LANG, locale, t, th } from "./i18n/index.js";

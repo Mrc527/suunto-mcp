@@ -1,8 +1,5 @@
 /** Test helpers: a cookie-jar browser and an OAuth client that behaves like Claude. */
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { OAuthClientInformationMixed, OAuthClientMetadata, OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js";
+import { Client, StreamableHTTPClientTransport, type OAuthClientInformationMixed, type OAuthClientMetadata, type OAuthClientProvider, type OAuthTokens } from "@modelcontextprotocol/client";
 import { expect } from "vitest";
 
 let base = "";

@@ -16,15 +16,14 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Stream } from "node:stream";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadConfig } from "../../src/config.js";
 import { closeServices, createMcpServer, createServices, type Services } from "../../src/server.js";
 import { CallLimiter } from "../../src/suunto/limiter.js";
 import { addDays, todayInZone } from "../../src/util/dates.js";
+import { connectClient } from "../helpers/mcp-client.js";
 import { MOCK_CLIENT_ID, MOCK_CLIENT_SECRET, MOCK_SUBSCRIPTION_KEY, MOCK_USERNAME, startMockSuunto, type MockSuunto } from "../helpers/mock-suunto.js";
 
 const enabled = process.env.SUUNTO_MCP_IT === "1";
@@ -466,10 +465,7 @@ describe.skipIf(!enabled)("against a mock Suunto API", () => {
       const services = createServices(config, { log: (line) => void logs.push(line), limiter: new CallLimiter({ perMinute: 0 }) });
       opened.push(services);
       const server = createMcpServer(config, services, (line) => void logs.push(line));
-      const client = new Client({ name: "it", version: "1.0.0" });
-      const [ct, st] = InMemoryTransport.createLinkedPair();
-      await Promise.all([client.connect(ct), server.connect(st)]);
-      return client;
+      return connectClient(server, "it");
     }
 
     it("serves a repeated read from memory, and reports Suunto's call limits without a refresh", async () => {

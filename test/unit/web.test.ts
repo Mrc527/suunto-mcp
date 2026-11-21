@@ -5,7 +5,7 @@
  */
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { Client } from "@modelcontextprotocol/client";
 import { randomBytes } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { todayInZone } from "../../src/util/dates.js";
@@ -15,6 +15,7 @@ import { createWebApp, type WebApp } from "../../src/web/server.js";
 import { DEFAULT_SETTINGS, type SuuntoAccountSettings } from "../../src/web/store.js";
 import { MOCK_CLIENT_ID, MOCK_CLIENT_SECRET, MOCK_SUBSCRIPTION_KEY, MOCK_USERNAME, startMockSuunto, type MockSuunto } from "../helpers/mock-suunto.js";
 import { Browser, connectMcp, connectSuunto, setBase, TestOAuthClient } from "../helpers/web-client.js";
+import { messagesOf } from "../helpers/mcp-client.js";
 
 /** A stored Suunto connection (invented test data; never connected for real). */
 const suuntoSettings: SuuntoAccountSettings = {
@@ -476,6 +477,49 @@ describe("OAuth and MCP", () => {
     expect(mock.state.violations).toEqual([]);
   });
 
+  it("serves 2026-07-28 requests with each token's own account, and refuses a bad token", async () => {
+    const adminBrowser = new Browser();
+    expect((await adminBrowser.login("admin@example.com", PASSWORD)).status).toBe(303);
+    const adminOauth = new TestOAuthClient(adminBrowser);
+    await (await connectMcp(adminOauth)).close();
+    const meta = { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { name: "t", version: "1" }, "io.modelcontextprotocol/clientCapabilities": {} };
+    const call = (token: string) =>
+      fetch(`${base}/mcp`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          "mcp-protocol-version": "2026-07-28",
+          "mcp-method": "tools/call",
+          "mcp-name": "suunto_account_info",
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "suunto_account_info", arguments: {}, _meta: meta } }),
+      });
+    const resultOf = async (res: Response) => {
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toMatch(/^application\/json/);
+      return ((await res.json()) as { result: { isError?: boolean; content: Array<{ text: string }> } }).result;
+    };
+    // The user has a Suunto connection; the administrator has none.
+    const mine = await resultOf(await call(oauth.savedTokens!.access_token));
+    expect(mine.isError).toBeFalsy();
+    expect(JSON.parse(mine.content[0]!.text)).toMatchObject({ username: MOCK_USERNAME, connected: true });
+    const admins = await resultOf(await call(adminOauth.savedTokens!.access_token));
+    expect(admins.isError).toBe(true);
+    expect(admins.content[0]!.text).toContain("admin@example.com");
+    expect(admins.content[0]!.text).not.toContain(MOCK_USERNAME);
+
+    const bad = await call("not-a-token");
+    expect(bad.status).toBe(401);
+    expect(bad.headers.get("www-authenticate")).toContain(`resource_metadata="${base}/.well-known/oauth-protected-resource/mcp"`);
+
+    // Browsers ask first: the headers 2026-07-28 requests carry must be allowed.
+    const preflight = await fetch(`${base}/mcp`, { method: "OPTIONS", headers: { origin: "https://claude.ai", "access-control-request-method": "POST", "access-control-request-headers": "mcp-method, mcp-name" } });
+    expect(preflight.status).toBe(204);
+    for (const h of ["mcp-protocol-version", "mcp-method", "mcp-name", "authorization"]) expect(preflight.headers.get("access-control-allow-headers")).toContain(h);
+  });
+
   it("accepts tool calls big enough for a 5 MB GPX file, and refuses larger ones", async () => {
     const post = (bytes: number) =>
       fetch(`${base}/mcp`, {
@@ -485,6 +529,34 @@ describe("OAuth and MCP", () => {
       });
     expect((await post(6 * 1024 * 1024)).status).toBe(200);
     expect((await post(9 * 1024 * 1024)).status).toBe(413);
+  });
+
+  it("serves /mcp through the SDK handler, and refuses oversized tool input, large batches and GET", async () => {
+    const auth = { authorization: `Bearer ${oauth.savedTokens!.access_token}`, "content-type": "application/json", accept: "application/json, text/event-stream" };
+    const post = (body: unknown) => fetch(`${base}/mcp`, { method: "POST", headers: auth, body: JSON.stringify(body) });
+    const list = await post({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+    expect(list.status).toBe(200);
+    expect(list.headers.get("content-type")).toBe("text/event-stream");
+    expect(list.headers.get("access-control-allow-origin")).toBe("*");
+    const [answer] = (await messagesOf(list)) as Array<{ id: number; result: { tools: Array<{ name: string }> } }>;
+    expect(answer!.id).toBe(1);
+    expect(answer!.result.tools.map((t) => t.name)).toContain("suunto_account_info");
+
+    const oversized = await post({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "suunto_list_workouts", arguments: { sports: Array(10_001).fill("x") } } });
+    expect(await messagesOf(oversized)).toEqual([expect.objectContaining({ id: 2, result: expect.objectContaining({ isError: true, content: [expect.objectContaining({ text: expect.stringMatching(/maximum of 10000 elements/) })] }) })]);
+
+    const batch = await post(Array.from({ length: 21 }, (_, i) => ({ jsonrpc: "2.0", id: i, method: "ping" })));
+    expect(batch.status).toBe(400);
+
+    // A body express.json does not parse is refused (mcp-transport.test.ts checks the SDK never reads it).
+    const plain = await fetch(`${base}/mcp`, { method: "POST", headers: { ...auth, "content-type": "text/plain" }, body: "x".repeat(1024 * 1024) });
+    expect(plain.status).toBe(415);
+
+    for (const method of ["GET", "DELETE"]) {
+      const res = await fetch(`${base}/mcp`, { method, headers: { authorization: auth.authorization, accept: "text/event-stream" } });
+      expect(res.status, method).toBe(405);
+      expect(res.headers.get("allow")).toBe("POST");
+    }
   });
 
   it("hides the write tools when the user turns on read-only", async () => {

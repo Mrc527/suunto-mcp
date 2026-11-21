@@ -2,8 +2,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { dirname } from "node:path";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { Icon } from "@modelcontextprotocol/sdk/types.js";
+import { McpServer, type Icon } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { CachedBackend, type CacheBudget } from "./activity/cache.js";
 import { ActivityService, SCAN_MAX_CALLS, type ServiceOptions } from "./activity/service.js";
@@ -21,6 +20,7 @@ import { addDays, parseDateOnly, todayInZone } from "./util/dates.js";
 import { ConfigError, describeError, redact, UserFacingError } from "./util/errors.js";
 import { escapeHtml } from "./util/text.js";
 import { VERSION } from "./version.js";
+import { registerViews } from "./views.js";
 import { ICON_PNG } from "./web/brand-assets.js";
 
 /** Without a web server (single-user mode) the icon goes inline. */
@@ -693,6 +693,10 @@ export async function accountInfo(config: AppConfig, services: Services, check: 
   };
 }
 
+/** Largest number of array elements plus object members in one tool call's arguments. */
+export const MAX_TOOL_INPUT_ELEMENTS = 10_000;
+
+/** The MCP server of one account. Cheap to build (registration only): HTTP builds one per request. */
 export function createMcpServer(config: AppConfig, services: Services, log: (m: string) => void, hooks: McpServerHooks = {}): McpServer {
   const server = new McpServer(
     {
@@ -710,7 +714,7 @@ export function createMcpServer(config: AppConfig, services: Services, log: (m: 
         (hooks.extraInstructions ? `\n${hooks.extraInstructions}` : ""),
       // Without a Suunto sign-in the prompts could not use their tools: there are none then.
       capabilities: { tools: {}, ...(services.activity ? { prompts: {} } : {}) },
-      maxToolInputElements: 10_000,
+      maxToolInputElements: MAX_TOOL_INPUT_ELEMENTS,
     },
   );
   const ctx: ToolContext = {
@@ -738,6 +742,7 @@ export function createMcpServer(config: AppConfig, services: Services, log: (m: 
 
   if (services.activity) {
     registerActivityTools(ctx, services.activity);
+    registerViews(server);
     registerPrompts(server, config);
   }
   return server;
@@ -842,12 +847,12 @@ function registerPrompts(server: McpServer, config: AppConfig): void {
     {
       title: "Training review",
       description: "A review of the workouts of a period, with sleep, from the Suunto data",
-      argsSchema: {
+      argsSchema: z.object({
         period: z
           .string()
           .optional()
           .describe('The period: "this week", "last week", "this month", "last month", "last 30 days", a year such as 2025, or your own words (default: the last 4 weeks)'),
-      },
+      }),
     },
     ({ period }) => {
       const today = todayInZone(config.timeZone);
@@ -880,7 +885,7 @@ function registerPrompts(server: McpServer, config: AppConfig): void {
     {
       title: "Sleep and recovery",
       description: "How I slept and recovered in the last days, with my daily activity, from the Suunto data",
-      argsSchema: { days: z.string().optional().describe('How many days to look back, 1 to 28, for example "10" or "3 weeks" (default 7)') },
+      argsSchema: z.object({ days: z.string().optional().describe('How many days to look back, 1 to 28, for example "10" or "3 weeks" (default 7)') }),
     },
     ({ days }) => {
       const today = todayInZone(config.timeZone);

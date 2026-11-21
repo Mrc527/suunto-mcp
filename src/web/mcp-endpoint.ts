@@ -4,12 +4,10 @@
  */
 
 import express, { type Request, type Response, type Router } from "express";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
-import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import type { Icon } from "@modelcontextprotocol/sdk/types.js";
+import { requireBearerAuth } from "@modelcontextprotocol/express";
+import type { AuthInfo, Icon, McpServer } from "@modelcontextprotocol/server";
 import { DEMO_NOTICE, DemoActivityStore } from "../demo/index.js";
+import { createNodeMcpHandler } from "../mcp-transport.js";
 import { createMcpServer, createServices } from "../server.js";
 import { redactForLog, UserFacingError } from "../util/errors.js";
 import { buildSetupConfig } from "./accounts.js";
@@ -79,13 +77,50 @@ function cors(req: Request, res: Response, next: () => void): void {
   // Bearer tokens (no cookies) authenticate this endpoint, so any origin may call it.
   res.setHeader("access-control-allow-origin", "*");
   res.setHeader("access-control-allow-methods", "POST, GET, DELETE, OPTIONS");
-  res.setHeader("access-control-allow-headers", "authorization, content-type, mcp-protocol-version, mcp-session-id, last-event-id");
+  // 2026-07-28 requests mirror their method and name into Mcp-Method and Mcp-Name.
+  res.setHeader("access-control-allow-headers", "authorization, content-type, mcp-protocol-version, mcp-method, mcp-name, mcp-session-id, last-event-id");
   res.setHeader("access-control-expose-headers", "www-authenticate, mcp-session-id");
   if (req.method === "OPTIONS") {
     res.status(204).end();
     return;
   }
   next();
+}
+
+/** The MCP server for the account an access token belongs to, with that account's settings. */
+function serverFor(ctx: WebContext, auth: AuthInfo | undefined): McpServer {
+  const user = auth ? ctx.store.getUser(String(auth.extra?.userId ?? "")) : undefined;
+  // The route answered 401 for these already; the account was disabled in between.
+  if (!auth || !user || user.disabled) throw new Error("Account not active");
+  try {
+    // "Needs reconnect" does not block tool calls: Suunto has refused refresh tokens by mistake
+    // during outages. The user's Suunto session decides (it tries again after a cool-down) and
+    // answers "Your Suunto connection expired. Connect Suunto again at <url>/account."
+    const userCtx = ctx.pool.get(user);
+    if (!userCtx) return setupServer(ctx, user, ctx.suuntoKeys ? { kind: "not_connected" } : { kind: "not_configured" });
+    const accountUrl = `${issuerOf(ctx.publicUrl)}/account`;
+    // Running tool calls, so a shutdown waits a moment for them (a token refresh saves its tokens).
+    const running: (() => void)[] = [];
+    return createMcpServer(userCtx.config, userCtx.services, ctx.log, {
+      ...branding(ctx),
+      beforeToolCall: () => void running.push(ctx.pool.begin()),
+      onToolCall: (tool, ok, ms) => {
+        running.pop()?.();
+        try {
+          ctx.live.publish(user.id, ctx.store.logActivity(user.id, tool, ok, ms, auth.clientId));
+        } catch {
+          // Activity logging must never break a tool call.
+        }
+      },
+      extraInstructions: user.demo
+        ? `${DEMO_NOTICE}\nAccount settings (read-only switch) are managed at ${accountUrl}.`
+        : `Account settings (Suunto connection, units, time zone, read-only) are managed at ${accountUrl}.` +
+          (user.suuntoNeedsReconnect ? `\nSuunto refused the stored sign-in of this account: if tool calls fail, ask the user to connect Suunto again at ${accountUrl}.` : ""),
+      ...(user.demo ? { accountInfo: { demo_account: DEMO_NOTICE } } : {}),
+    });
+  } catch (error) {
+    return setupServer(ctx, user, { kind: "unusable", detail: (error as Error).message });
+  }
 }
 
 /** JSON-RPC messages accepted in one batch. */
@@ -110,6 +145,8 @@ export function mcpRoutes(ctx: WebContext): Router {
   });
 
   r.use("/mcp", cors);
+  // The SDK builds a server per request, for the account of the token that requireBearerAuth checked.
+  const mcp = createNodeMcpHandler(({ authInfo }) => serverFor(ctx, authInfo), ctx.log);
 
   // Parsing here lets the batch size be checked. 8 MB: a GPX file of up to 5 MB (suunto_import_route)
   // must fit after JSON escaping.
@@ -129,45 +166,8 @@ export function mcpRoutes(ctx: WebContext): Router {
       res.status(401).json({ jsonrpc: "2.0", error: { code: -32001, message: "Account not active" }, id: null });
       return;
     }
-    let server: McpServer;
     try {
-      // "Needs reconnect" does not block tool calls: Suunto has refused refresh tokens by mistake
-      // during outages. The user's Suunto session decides (it tries again after a cool-down) and
-      // answers "Your Suunto connection expired. Connect Suunto again at <url>/account."
-      const userCtx = ctx.pool.get(user);
-      const accountUrl = `${issuerOf(ctx.publicUrl)}/account`;
-      // Running tool calls, so a shutdown waits a moment for them (a token refresh saves its tokens).
-      const running: (() => void)[] = [];
-      server = userCtx
-        ? createMcpServer(userCtx.config, userCtx.services, ctx.log, {
-            ...branding(ctx),
-            beforeToolCall: () => void running.push(ctx.pool.begin()),
-            onToolCall: (tool, ok, ms) => {
-              running.pop()?.();
-              try {
-                ctx.live.publish(user.id, ctx.store.logActivity(user.id, tool, ok, ms, auth.clientId));
-              } catch {
-                // Activity logging must never break a tool call.
-              }
-            },
-            extraInstructions: user.demo
-              ? `${DEMO_NOTICE}\nAccount settings (read-only switch) are managed at ${accountUrl}.`
-              : `Account settings (Suunto connection, units, time zone, read-only) are managed at ${accountUrl}.` +
-                (user.suuntoNeedsReconnect ? `\nSuunto refused the stored sign-in of this account: if tool calls fail, ask the user to connect Suunto again at ${accountUrl}.` : ""),
-            ...(user.demo ? { accountInfo: { demo_account: DEMO_NOTICE } } : {}),
-          })
-        : setupServer(ctx, user, ctx.suuntoKeys ? { kind: "not_connected" } : { kind: "not_configured" });
-    } catch (error) {
-      server = setupServer(ctx, user, { kind: "unusable", detail: (error as Error).message });
-    }
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
-    res.on("close", () => {
-      void transport.close();
-      void server.close();
-    });
-    try {
-      await server.connect(transport);
-      await transport.handleRequest(req, res, req.body);
+      await mcp.post(req, res, req.body);
     } catch (error) {
       ctx.log(`MCP request failed: ${redactForLog((error as Error).message, [])}`);
       if (!res.headersSent) res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: "Internal error" }, id: null });

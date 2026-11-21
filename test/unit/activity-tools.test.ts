@@ -1,6 +1,4 @@
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer } from "@modelcontextprotocol/server";
 import { describe, expect, it } from "vitest";
 import { ActivityService } from "../../src/activity/service.js";
 import { registerActivityTools } from "../../src/activity/tools.js";
@@ -8,6 +6,7 @@ import type { ActivityBackend, WireWorkout } from "../../src/activity/types.js";
 import type { AppConfig } from "../../src/config.js";
 import { CallLimiter } from "../../src/suunto/limiter.js";
 import type { ToolContext } from "../../src/tooling.js";
+import { connectClient } from "../helpers/mcp-client.js";
 
 // Invented test data only.
 const NOW = Date.parse("2026-11-10T09:00:00Z");
@@ -131,9 +130,7 @@ async function connect(opts: { readOnly?: boolean; backend?: ActivityBackend } =
   const ctx: ToolContext = { server, config, log: (m) => logs.push(m) };
   const service = new ActivityService(backend, { readOnly: opts.readOnly ?? false, units: "metric", timeZone: "Europe/Zurich", now: () => NOW });
   registerActivityTools(ctx, service);
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: "test-client", version: "0.0.0" });
-  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  const client = await connectClient(server, "test-client");
   return { client, logs };
 }
 

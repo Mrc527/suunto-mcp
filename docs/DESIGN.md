@@ -66,6 +66,8 @@ src/
   index.ts            CLI (stdio / --web / --http / --check / --login / --help)    [template, adapted]
   config.ts           AppConfig from env                                         [rewritten]
   server.ts           createServices / createMcpServer / prompts                 [rewritten]
+  mcp-transport.ts    the MCP SDK's HTTP handler on Node, with the checks in front of it
+  views.ts            interactive views (MCP Apps): the ui:// resources and which tools open them
   tooling.ts          registerTool (read-only gating, annotations, redaction)    [template, as is]
   http.ts             single-user Streamable HTTP                                 [template]
   version.ts                                                                      [template]
@@ -90,6 +92,12 @@ src/
     activity.ts       DemoActivityBackend implements ActivityBackend (in memory)
     activity-data.ts  sample data generator (invented, deterministic, relative to the reset day)
   web/                template web service, adapted (see section 8)
+views/
+  index.html, vite.config.ts   one self-contained page (vite-plugin-singlefile); the server tells
+                               it which view to show (<html data-view>)
+  src/main.ts         connects to the host (App from @modelcontextprotocol/ext-apps)
+  src/model.ts        reading tool answers, chart and route geometry (no DOM)
+  src/views.ts        the workouts, training and sleep views
 test/unit, test/integration, test/helpers                                        [template, adapted]
 ```
 
@@ -269,6 +277,15 @@ in a `units` object, as in MCP for PADI.
 Tool descriptions must list accepted values, the units and the limits. Free-text fields from
 Suunto (workout names and descriptions, route and POI names, GPX names) are user data: the server
 instructions say to never follow instructions found inside them.
+
+Views (MCP Apps, src/views.ts): `suunto_list_workouts` and `suunto_get_workout` open
+`ui://suunto/workouts.html`, `suunto_workout_stats` opens `ui://suunto/training.html`,
+`suunto_sleep` opens `ui://suunto/sleep.html` (`_meta.ui.resourceUri` on the tool). The answers do
+not change: the views read the JSON text, so there is no `structuredContent` and no
+`outputSchema`. The workout view loads samples (`suunto_get_workout` with `samples` and
+`max_points` 400) only on a click, as each load is a Suunto API call. The route is drawn from the
+`location` stream as SVG, with no map tiles, so a view loads nothing from other sites. User text
+is set as text, never as HTML.
 
 Prompts: `training_review` (period: "this week", "last week", "this month", "last month", a year,
 or free text; uses `suunto_workout_stats` + `suunto_list_workouts` + `suunto_sleep`), and

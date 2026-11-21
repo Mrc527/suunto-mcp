@@ -1,11 +1,11 @@
 import { request, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadConfig } from "../../src/config.js";
 import { MAX_REQUEST_BODY_BYTES, startHttpServer } from "../../src/http.js";
 import { closeServices, createMcpServer, createServices, type Services } from "../../src/server.js";
+import { messagesOf } from "../helpers/mcp-client.js";
 
 const TOKEN = "test-token-0123456789";
 let server: Server;
@@ -23,6 +23,7 @@ beforeAll(async () => {
       SUUNTO_OAUTH_URL: "http://127.0.0.1:1",
       SUUNTO_API_URL: "http://127.0.0.1:1",
       MCP_HTTP_TOKEN: TOKEN,
+      MCP_HTTP_ALLOWED_ORIGINS: "https://app.example.com",
     },
     { transport: "http", port: 0, host: "127.0.0.1" },
   );
@@ -102,5 +103,51 @@ describe("HTTP transport", () => {
     expect(health.status).toBe(200);
     const get = await fetch(url, { headers: { authorization: `Bearer ${TOKEN}`, accept: "text/event-stream" } });
     expect(get.status).toBe(405);
+  });
+
+  const authed = { ...headers, authorization: `Bearer ${TOKEN}` };
+
+  it("serves MCP on /mcp and on /", async () => {
+    for (const target of [url, url.replace(/\/mcp$/, "/")]) {
+      const res = await fetch(target, { method: "POST", headers: authed, body: initBody });
+      expect(res.status, target).toBe(200);
+      const [init] = (await messagesOf(res)) as Array<{ id: number; result: { serverInfo: { name: string } } }>;
+      expect(init!.id).toBe(1);
+      expect(init!.result.serverInfo.name).toBe("suunto-mcp");
+    }
+  });
+
+  it("refuses a body that is not JSON with a parse error", async () => {
+    const bad = await fetch(url, { method: "POST", headers: authed, body: "{oops" });
+    expect(bad.status).toBe(400);
+    expect(await bad.json()).toMatchObject({ jsonrpc: "2.0", id: null, error: { code: -32700 } });
+  });
+
+  it("refuses a tool call with more than 10000 argument elements before it is validated", async () => {
+    const body = JSON.stringify({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "suunto_list_workouts", arguments: { sports: Array(10_001).fill("x") } } });
+    const res = await fetch(url, { method: "POST", headers: authed, body });
+    expect(res.status).toBe(200);
+    expect(await messagesOf(res)).toEqual([expect.objectContaining({ id: 5, result: expect.objectContaining({ isError: true, content: [expect.objectContaining({ text: expect.stringMatching(/more than the maximum of 10000 elements/) })] }) })]);
+  });
+
+  it("allows the headers of 2026-07-28 requests from an allowed origin", async () => {
+    const res = await fetch(url, { method: "OPTIONS", headers: { origin: "https://app.example.com", "access-control-request-method": "POST", "access-control-request-headers": "mcp-method, mcp-name" } });
+    expect(res.status).toBe(204);
+    for (const h of ["mcp-protocol-version", "mcp-method", "mcp-name"]) expect(res.headers.get("access-control-allow-headers")).toContain(h);
+  });
+
+  it("answers tool arguments nested thousands of levels deep with a tool error", async () => {
+    const deep = `${'{"a":'.repeat(9000)}1${"}".repeat(9000)}`;
+    const res = await fetch(url, { method: "POST", headers: authed, body: `{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"suunto_get_workout","arguments":{"workout_key":"0123456789abcdef01234567","deep":${deep}}}}` });
+    expect(res.status).toBe(200);
+    expect(await messagesOf(res)).toEqual([expect.objectContaining({ id: 6, result: expect.objectContaining({ isError: true }) })]);
+  });
+
+  it("keeps the CORS headers of an allowed origin on the MCP answer", async () => {
+    const res = await fetch(url, { method: "POST", headers: { ...authed, origin: "https://app.example.com" }, body: initBody });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("access-control-allow-origin")).toBe("https://app.example.com");
+    expect(res.headers.get("vary")).toBe("Origin");
+    await res.text();
   });
 });
