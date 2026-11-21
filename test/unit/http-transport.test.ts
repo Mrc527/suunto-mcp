@@ -1,12 +1,11 @@
 import { request, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadConfig } from "../../src/config.js";
 import { MAX_REQUEST_BODY_BYTES, startHttpServer } from "../../src/http.js";
-import { messagesOf } from "../../src/mcp-transport.js";
 import { closeServices, createMcpServer, createServices, type Services } from "../../src/server.js";
+import { messagesOf } from "../helpers/mcp-client.js";
 
 const TOKEN = "test-token-0123456789";
 let server: Server;
@@ -108,7 +107,7 @@ describe("HTTP transport", () => {
 
   const authed = { ...headers, authorization: `Bearer ${TOKEN}` };
 
-  it("serves MCP through mcp-use on /mcp and on /", async () => {
+  it("serves MCP on /mcp and on /", async () => {
     for (const target of [url, url.replace(/\/mcp$/, "/")]) {
       const res = await fetch(target, { method: "POST", headers: authed, body: initBody });
       expect(res.status, target).toBe(200);
@@ -128,10 +127,10 @@ describe("HTTP transport", () => {
     const body = JSON.stringify({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "suunto_list_workouts", arguments: { sports: Array(10_001).fill("x") } } });
     const res = await fetch(url, { method: "POST", headers: authed, body });
     expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ id: 5, result: { isError: true, content: [{ text: expect.stringMatching(/more than the maximum of 10000 elements/) }] } });
+    expect(await messagesOf(res)).toEqual([expect.objectContaining({ id: 5, result: expect.objectContaining({ isError: true, content: [expect.objectContaining({ text: expect.stringMatching(/more than the maximum of 10000 elements/) })] }) })]);
   });
 
-  it("keeps the CORS headers of an allowed origin on the mcp-use answer", async () => {
+  it("keeps the CORS headers of an allowed origin on the MCP answer", async () => {
     const res = await fetch(url, { method: "POST", headers: { ...authed, origin: "https://app.example.com" }, body: initBody });
     expect(res.status).toBe(200);
     expect(res.headers.get("access-control-allow-origin")).toBe("https://app.example.com");

@@ -1,4 +1,4 @@
-import { MCPServer } from "mcp-use";
+import { McpServer } from "@modelcontextprotocol/server";
 import { describe, expect, it } from "vitest";
 import { ActivityService } from "../../src/activity/service.js";
 import { registerActivityTools } from "../../src/activity/tools.js";
@@ -124,7 +124,7 @@ function fakeBackend(fit = Buffer.from([0x0e, 0x10, 0x2e, 0x46, 0x49, 0x54])): A
 
 async function connect(opts: { readOnly?: boolean; backend?: ActivityBackend } = {}) {
   const backend = opts.backend ?? fakeBackend();
-  const server = new MCPServer({ name: "suunto-mcp-test", version: "0.0.0", logging: { enabled: false }, skills: false });
+  const server = new McpServer({ name: "suunto-mcp-test", version: "0.0.0" });
   const config = { readOnly: opts.readOnly ?? false, secrets: [SECRET] } as unknown as AppConfig;
   const logs: string[] = [];
   const ctx: ToolContext = { server, config, log: (m) => logs.push(m) };

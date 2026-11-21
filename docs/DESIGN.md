@@ -65,8 +65,8 @@ warning and the redirect URI to register. Tools of a real account then answer wi
 src/
   index.ts            CLI (stdio / --web / --http / --check / --login / --help)    [template, adapted]
   config.ts           AppConfig from env                                         [rewritten]
-  server.ts           createServices / createMcpServer (mcp-use) / prompts       [rewritten]
-  mcp-transport.ts    stdio bridge and HTTP hand-off to mcp-use, argument size limit
+  server.ts           createServices / createMcpServer / prompts                 [rewritten]
+  mcp-transport.ts    the MCP SDK's HTTP handler on Node, with the checks in front of it
   tooling.ts          registerTool (read-only gating, annotations, redaction)    [template, as is]
   http.ts             single-user Streamable HTTP                                 [template]
   version.ts                                                                      [template]

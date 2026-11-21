@@ -7,7 +7,7 @@
  * file as an embedded resource).
  */
 
-import type { CallToolResult } from "mcp-use";
+import type { CallToolResult } from "@modelcontextprotocol/server";
 import { POI_TYPES } from "../suunto/activities.js";
 import { rawResult, registerTool, type ToolContext, type ZodShape } from "../tooling.js";
 import {

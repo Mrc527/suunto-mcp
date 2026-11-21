@@ -15,7 +15,8 @@ import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { isIP, type LookupFunction } from "node:net";
 import type { Response } from "express";
-import type { OAuthRegisteredClientsStore } from "@modelcontextprotocol/sdk/server/auth/clients.js";
+import { OAuthError, OAuthErrorCode, type AuthInfo, type OAuthClientInformationFull, type OAuthTokenRevocationRequest, type OAuthTokens } from "@modelcontextprotocol/server";
+// The SDK's OAuth Authorization Server helpers, kept as a frozen copy in server-legacy.
 import {
   AccessDeniedError,
   InvalidClientError,
@@ -24,13 +25,16 @@ import {
   InvalidRequestError,
   InvalidScopeError,
   InvalidTargetError,
-  InvalidTokenError,
-} from "@modelcontextprotocol/sdk/server/auth/errors.js";
-import type { AuthorizationParams, OAuthServerProvider } from "@modelcontextprotocol/sdk/server/auth/provider.js";
-import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
-import type { OAuthClientInformationFull, OAuthTokenRevocationRequest, OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js";
+  type AuthorizationParams,
+  type OAuthRegisteredClientsStore,
+  type OAuthServerProvider,
+} from "@modelcontextprotocol/server-legacy/auth";
 import { sha256 } from "./crypto.js";
 import type { Store } from "./store.js";
+
+function invalidToken(message: string): OAuthError {
+  return new OAuthError(OAuthErrorCode.InvalidToken, message);
+}
 
 export const SCOPE = "suunto";
 
@@ -534,12 +538,13 @@ export class OAuthProvider implements OAuthServerProvider {
     };
   }
 
+  // Only the bearer check (@modelcontextprotocol/express) calls this, and it knows the v2 OAuthError only.
   async verifyAccessToken(token: string): Promise<AuthInfo> {
     const record = this.store.getToken(token);
-    if (!record || record.kind !== "access" || record.revoked) throw new InvalidTokenError("Invalid access token");
-    if (record.expiresAt < Date.now()) throw new InvalidTokenError("Access token expired");
+    if (!record || record.kind !== "access" || record.revoked) throw invalidToken("Invalid access token");
+    if (record.expiresAt < Date.now()) throw invalidToken("Access token expired");
     const user = this.store.getUser(record.userId);
-    if (!user || user.disabled) throw new InvalidTokenError("The account is not active");
+    if (!user || user.disabled) throw invalidToken("The account is not active");
     this.store.touchToken(record.tokenHash);
     return {
       token,

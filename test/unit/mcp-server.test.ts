@@ -179,9 +179,8 @@ describe("MCP server", () => {
     expect(info).not.toHaveProperty("username");
     const checked = JSON.parse(textOf(await client.callTool({ name: "suunto_account_info", arguments: { check: true } })));
     expect(checked.check).toMatchObject({ ok: false, error: expect.stringMatching(/No Suunto sign-in/) });
-    // No prompts that would ask for tools that are not there, and the instructions say why. mcp-use
-    // always declares the prompts capability, so the list is empty rather than missing.
-    expect((await client.listPrompts()).prompts).toEqual([]);
+    // No prompts that would ask for tools that are not there, and the instructions say why.
+    expect(client.getServerCapabilities()?.prompts).toBeUndefined();
     expect(client.getInstructions()).toMatch(/Suunto is not connected yet, so only suunto_account_info is available now/);
   });
 

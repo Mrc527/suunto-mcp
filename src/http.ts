@@ -1,5 +1,5 @@
 /**
- * Streamable HTTP transport (stateless, served by mcp-use). Lets remote MCP clients connect over HTTP.
+ * Streamable HTTP transport (stateless). Lets remote MCP clients connect over HTTP.
  *
  * Security:
  * - Optional (required for non-loopback binds) bearer token, compared in constant time.
@@ -9,9 +9,9 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { timingSafeEqual, createHash } from "node:crypto";
-import type { MCPServer } from "mcp-use";
+import type { McpServer } from "@modelcontextprotocol/server";
 import { isLoopback, type HttpSettings } from "./config.js";
-import { handleMcpPost, readBody } from "./mcp-transport.js";
+import { createNodeMcpHandler, readBody } from "./mcp-transport.js";
 
 /**
  * Largest request body accepted. A tool call can carry a GPX file of up to 5 MB (suunto_import_route),
@@ -22,7 +22,7 @@ export const MAX_REQUEST_BODY_BYTES = 8 * 1024 * 1024;
 export interface HttpServerOptions {
   settings: HttpSettings;
   /** Creates a fresh MCP server for each request (stateless mode). */
-  createMcpServer: () => MCPServer;
+  createMcpServer: () => McpServer;
   log: (message: string) => void;
 }
 
@@ -66,6 +66,7 @@ export function isAllowedHost(hostHeader: string | undefined, settings: HttpSett
 
 export function startHttpServer(options: HttpServerOptions): Promise<Server> {
   const { settings, log } = options;
+  const mcp = createNodeMcpHandler(() => options.createMcpServer());
 
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -129,13 +130,15 @@ export function startHttpServer(options: HttpServerOptions): Promise<Server> {
         return;
       }
       for (const [k, v] of Object.entries(corsHeaders)) res.setHeader(k, v);
-      await handleMcpPost(options.createMcpServer(), req, res, body);
+      await mcp.post(req, res, body);
     } catch (error) {
       log(`HTTP request failed: ${(error as Error).message}`);
       if (!res.headersSent) jsonRpcError(res, 500, "Internal server error");
       else res.end();
     }
   });
+
+  server.on("close", () => void mcp.close());
 
   return new Promise((resolve, reject) => {
     server.once("error", reject);

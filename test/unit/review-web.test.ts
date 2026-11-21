@@ -13,7 +13,7 @@
  */
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { Client } from "@modelcontextprotocol/client";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { en } from "../../src/web/i18n/en/index.js";
 import { CATALOGS, type MessageKey } from "../../src/web/i18n/index.js";

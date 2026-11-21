@@ -6,7 +6,7 @@
  */
 
 import express, { type Router } from "express";
-import type { Icon } from "mcp-use";
+import type { Icon } from "@modelcontextprotocol/server";
 import { FAVICON_ICO, ICON_PNG, LOGO_SMALL_SVG, LOGO_SVG } from "./brand-assets.js";
 
 const CACHE = "public, max-age=86400";

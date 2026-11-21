@@ -4,7 +4,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { OAuthClientInformationFull } from "@modelcontextprotocol/sdk/shared/auth.js";
+import type { OAuthClientInformationFull } from "@modelcontextprotocol/server";
 import type { UnitChoice } from "../activity/types.js";
 import type { StoredSuuntoTokens } from "../suunto/oauth.js";
 import { randomToken, SecretBox, sha256 } from "./crypto.js";

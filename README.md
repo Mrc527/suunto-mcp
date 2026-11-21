@@ -82,7 +82,7 @@ docker compose up -d
 
 [Caddy](https://caddyserver.com) obtains the certificate. Open `https://DOMAIN`, sign in with the admin account, and you are done. Data (the SQLite database and the encryption key) lives in the `data` volume: **back it up**.
 
-**Without Docker** (Node.js 22.22.2 or newer):
+**Without Docker** (Node.js 22.13 or newer):
 
 ```bash
 npm install && npm run build
@@ -448,7 +448,7 @@ To stay within Suunto's call limits, each real account has a small cache of rece
 Local mode runs the server on your own computer for one Suunto account. It needs the keys of **your own app in the Suunto API Zone** (see [Suunto API Zone setup](#suunto-api-zone-setup)). Suunto gives API access to partners (companies and organizations), not for personal use. If you have no partner app, use the [hosted service](https://suunto.mcp.visin.ch) instead.
 
 1. **Prepare your API Zone app.** You need the client id, the client secret and the subscription key. For the one-time sign-in, register a loopback address as the redirect URI of the app, by default `http://localhost:8723/callback` (set `SUUNTO_REDIRECT_URI` to use another one; it must be an `http` address on `localhost` or `127.0.0.1` and match the registered one exactly).
-2. **Build the server** (Node.js 22.22.2 or newer):
+2. **Build the server** (Node.js 22.13 or newer):
 
    ```bash
    git clone https://github.com/Mrc527/suunto-mcp.git
@@ -718,7 +718,7 @@ npm test               # unit tests (integration tests are skipped)
 npm run check          # node dist/index.js --check with your local settings
 ```
 
-The unit tests use a mocked `fetch` for the Suunto client (authorize address, code exchange, refresh and token rotation, one refresh at a time, one retry after 401, a refused refresh that asks the user to connect again, 403, 404 and 429 answers, `Retry-After`, no retry of writes or of HTTP 500, sessions that take over newer stored tokens, the call limiter, deauthorize), and cover the response cache (how long each kind of answer is kept, size limits, clearing after a write), the activity service (units, every kind of Suunto data, 28-day windows, dates and time zones with daylight saving time, totals and statistics, the sport filter, downsampling, GPX checks), the MCP tool surface (tool list, annotations, read-only mode, strict arguments, redaction, and a snapshot of every tool, schema and prompt in `test/fixtures/mcp-surface.json`), the stdio bridge and HTTP hand-off to mcp-use, the demo data, and the web service (sign-up, sign-in, CSRF, account settings, connecting Suunto with a mock Suunto OAuth server: `state` checks, wrong user, expired `state`, refused access, reconnect, remove with deauthorize; the full OAuth flow with the SDK's OAuth client as Claude would run it, token refresh and reuse detection, client metadata documents, admin controls, security headers, translations).
+The unit tests use a mocked `fetch` for the Suunto client (authorize address, code exchange, refresh and token rotation, one refresh at a time, one retry after 401, a refused refresh that asks the user to connect again, 403, 404 and 429 answers, `Retry-After`, no retry of writes or of HTTP 500, sessions that take over newer stored tokens, the call limiter, deauthorize), and cover the response cache (how long each kind of answer is kept, size limits, clearing after a write), the activity service (units, every kind of Suunto data, 28-day windows, dates and time zones with daylight saving time, totals and statistics, the sport filter, downsampling, GPX checks), the MCP tool surface (tool list, annotations, read-only mode, strict arguments, redaction, and a snapshot of every tool, schema and prompt in `test/fixtures/mcp-surface.json`, on 2025-era connections and on the 2026-07-28 protocol), the HTTP checks in front of the MCP SDK handler, the stdio process, the demo data, and the web service (sign-up, sign-in, CSRF, account settings, connecting Suunto with a mock Suunto OAuth server: `state` checks, wrong user, expired `state`, refused access, reconnect, remove with deauthorize; the full OAuth flow with the SDK's OAuth client as Claude would run it, token refresh and reuse detection, client metadata documents, admin controls, security headers, translations).
 
 End-to-end tests run the real server against an in-process mock of the Suunto API (`test/helpers/mock-suunto.ts`: OAuth, workouts, 24/7 data, routes and points of interest): the built `dist/index.js` with `--login` (through the mock's sign-in page), `--check`, over stdio and with `--http`, sharing one token cache; the services in process (call limits, a refused refresh token); and the web service with a full "Connect Suunto" flow, an AI app connected over OAuth like Claude, and a demo account. They never talk to Suunto and need no Suunto account or keys:
 
@@ -735,8 +735,8 @@ Project layout:
 src/
   index.ts            CLI entry point (stdio / --web / --http / --check / --login)
   config.ts           environment configuration
-  server.ts           MCP server (mcp-use), instructions, prompts, service wiring
-  mcp-transport.ts    stdio bridge and HTTP hand-off to mcp-use, tool argument size limit
+  server.ts           MCP server (MCP SDK v2), instructions, prompts, service wiring
+  mcp-transport.ts    the MCP SDK's HTTP handler on Node, with the checks in front of it
   http.ts             Streamable HTTP transport with auth and Host/Origin checks
   tooling.ts          tool registration helpers (errors, read-only gating, annotations, redaction)
   suunto/             Suunto client: endpoints, OAuth, token session, HTTP, API, activity ids

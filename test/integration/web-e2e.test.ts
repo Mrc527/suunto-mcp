@@ -8,7 +8,7 @@
  */
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { Client } from "@modelcontextprotocol/client";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DEMO_USERNAME, DemoRegistry } from "../../src/demo/index.js";
 import { addDays, todayInZone } from "../../src/util/dates.js";
