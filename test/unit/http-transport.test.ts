@@ -130,6 +130,12 @@ describe("HTTP transport", () => {
     expect(await messagesOf(res)).toEqual([expect.objectContaining({ id: 5, result: expect.objectContaining({ isError: true, content: [expect.objectContaining({ text: expect.stringMatching(/more than the maximum of 10000 elements/) })] }) })]);
   });
 
+  it("allows the headers of 2026-07-28 requests from an allowed origin", async () => {
+    const res = await fetch(url, { method: "OPTIONS", headers: { origin: "https://app.example.com", "access-control-request-method": "POST", "access-control-request-headers": "mcp-method, mcp-name" } });
+    expect(res.status).toBe(204);
+    for (const h of ["mcp-protocol-version", "mcp-method", "mcp-name"]) expect(res.headers.get("access-control-allow-headers")).toContain(h);
+  });
+
   it("keeps the CORS headers of an allowed origin on the MCP answer", async () => {
     const res = await fetch(url, { method: "POST", headers: { ...authed, origin: "https://app.example.com" }, body: initBody });
     expect(res.status).toBe(200);

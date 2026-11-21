@@ -77,7 +77,8 @@ function cors(req: Request, res: Response, next: () => void): void {
   // Bearer tokens (no cookies) authenticate this endpoint, so any origin may call it.
   res.setHeader("access-control-allow-origin", "*");
   res.setHeader("access-control-allow-methods", "POST, GET, DELETE, OPTIONS");
-  res.setHeader("access-control-allow-headers", "authorization, content-type, mcp-protocol-version, mcp-session-id, last-event-id");
+  // 2026-07-28 requests mirror their method and name into Mcp-Method and Mcp-Name.
+  res.setHeader("access-control-allow-headers", "authorization, content-type, mcp-protocol-version, mcp-method, mcp-name, mcp-session-id, last-event-id");
   res.setHeader("access-control-expose-headers", "www-authenticate, mcp-session-id");
   if (req.method === "OPTIONS") {
     res.status(204).end();
@@ -145,7 +146,7 @@ export function mcpRoutes(ctx: WebContext): Router {
 
   r.use("/mcp", cors);
   // The SDK builds a server per request, for the account of the token that requireBearerAuth checked.
-  const mcp = createNodeMcpHandler(({ authInfo }) => serverFor(ctx, authInfo));
+  const mcp = createNodeMcpHandler(({ authInfo }) => serverFor(ctx, authInfo), ctx.log);
 
   // Parsing here lets the batch size be checked. 8 MB: a GPX file of up to 5 MB (suunto_import_route)
   // must fit after JSON escaping.

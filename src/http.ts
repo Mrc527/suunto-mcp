@@ -66,7 +66,7 @@ export function isAllowedHost(hostHeader: string | undefined, settings: HttpSett
 
 export function startHttpServer(options: HttpServerOptions): Promise<Server> {
   const { settings, log } = options;
-  const mcp = createNodeMcpHandler(() => options.createMcpServer());
+  const mcp = createNodeMcpHandler(() => options.createMcpServer(), log);
 
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -75,7 +75,7 @@ export function startHttpServer(options: HttpServerOptions): Promise<Server> {
     if (origin && settings.allowedOrigins.includes(origin)) {
       corsHeaders["access-control-allow-origin"] = origin;
       corsHeaders["access-control-allow-headers"] =
-        "authorization, content-type, mcp-session-id, mcp-protocol-version, last-event-id";
+        "authorization, content-type, mcp-session-id, mcp-protocol-version, mcp-method, mcp-name, last-event-id";
       corsHeaders["access-control-allow-methods"] = "POST, GET, DELETE, OPTIONS";
       corsHeaders["access-control-expose-headers"] = "mcp-session-id";
       corsHeaders["vary"] = "Origin";

@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadConfig } from "../../src/config.js";
 import { DemoActivityStore } from "../../src/demo/activity.js";
 import { MAX_REQUEST_BODY_BYTES } from "../../src/http.js";
+import type { McpServerFactory } from "@modelcontextprotocol/server";
 import { createNodeMcpHandler, handleMcpPost, readBody, refusal, splitCancels } from "../../src/mcp-transport.js";
 import { createMcpServer, createServices, MAX_TOOL_INPUT_ELEMENTS } from "../../src/server.js";
 import { messagesOf } from "../helpers/mcp-client.js";
@@ -61,8 +62,9 @@ describe("the SDK handler behind the checks", () => {
   });
 
   /** A local server that parses the body like src/http.ts and hands it to createNodeMcpHandler. */
-  async function serve(factory = demoFactory()): Promise<string> {
-    const mcp = createNodeMcpHandler(factory);
+  const logs: string[] = [];
+  async function serve(factory: McpServerFactory = demoFactory()): Promise<string> {
+    const mcp = createNodeMcpHandler(factory, (m) => logs.push(m));
     http = createServer(async (req, res) => {
       const raw = await readBody(req, MAX_REQUEST_BODY_BYTES);
       if (raw === undefined) {
@@ -133,6 +135,19 @@ describe("the SDK handler behind the checks", () => {
     const only = await post(url, [cancel(9)]);
     expect(only.status).toBe(202);
     expect(await only.text()).toBe("");
+  });
+
+  it("logs a failure to build the server, without the secrets in it, and answers 500", async () => {
+    logs.length = 0;
+    const url = await serve(() => {
+      throw new Error("could not build the server for diver.test@example.com with Bearer abc.def.ghi");
+    });
+    const res = await post(url, INIT);
+    expect(res.status).toBe(500);
+    expect(logs.length).toBeGreaterThan(0);
+    expect(logs.join("\n")).toMatch(/^MCP request failed: could not build the server/);
+    expect(logs.join("\n")).not.toContain("diver.test@example.com");
+    expect(logs.join("\n")).not.toContain("abc.def.ghi");
   });
 
   it("answers an unknown tool with -32602", async () => {

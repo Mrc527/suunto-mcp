@@ -5,6 +5,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { toNodeHandler } from "@modelcontextprotocol/node";
 import { createMcpHandler, type McpServerFactory } from "@modelcontextprotocol/server";
+import { redactForLog } from "./util/errors.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -24,10 +25,12 @@ export interface NodeMcpHandler {
 }
 
 /** The SDK handler for a server factory (a fresh server per request), mounted on Node. */
-export function createNodeMcpHandler(factory: McpServerFactory): NodeMcpHandler {
+export function createNodeMcpHandler(factory: McpServerFactory, log: (message: string) => void): NodeMcpHandler {
+  // The SDK answers a failure with 500 and nothing else; the log says why (without secrets).
+  const onerror = (error: Error) => log(`MCP request failed: ${redactForLog(error.message, [])}`);
   // JSON where the SDK allows it (2026-07-28 requests); 2025-era requests are answered as SSE.
-  const handler = createMcpHandler(factory, { responseMode: "json" });
-  const node = toNodeHandler(handler);
+  const handler = createMcpHandler(factory, { responseMode: "json", onerror });
+  const node = toNodeHandler(handler, { onerror });
   return {
     post: (req, res, body) => handleMcpPost(node, req, res, body),
     close: () => handler.close(),
