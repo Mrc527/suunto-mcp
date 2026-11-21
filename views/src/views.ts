@@ -24,7 +24,11 @@ import {
   streamPoints,
   type ToolResultLike,
   barAt,
+  clock,
+  napCount,
+  paceText,
   shortKey,
+  unitChoice,
 } from "./model.js";
 
 export type CallTool = (name: string, args: Record<string, unknown>) => Promise<ToolResultLike>;
@@ -52,6 +56,12 @@ function onBarHover(plot: SVGSVGElement, n: number, describe: (i: number) => voi
 
 function units(data: Obj): Obj {
   return isObject(data.units) ? data.units : {};
+}
+
+/** The units of the answer, for the calls the view makes: a workout opens in the list's units. */
+function unitsArg(data: Obj): { units?: "metric" | "imperial" } {
+  const choice = unitChoice(units(data));
+  return choice ? { units: choice } : {};
 }
 
 function unitOf(data: Obj, key: string, fallback: string): string {
@@ -91,7 +101,7 @@ function renderWorkoutList(root: HTMLElement, data: Obj, callTool: CallTool): vo
     button.addEventListener("click", () => {
       if (!key) return;
       root.replaceChildren(message("Loading the workout…"));
-      void callTool("suunto_get_workout", { workout_key: key })
+      void callTool("suunto_get_workout", { workout_key: key, ...unitsArg(data) })
         .then((result) => {
           const read = readResult(result);
           if (!read.ok) {
@@ -124,7 +134,8 @@ function renderWorkout(root: HTMLElement, data: Obj, callTool: CallTool, onBack?
   const figures: Array<[string, string]> = [];
   if (num(data.distance) !== undefined) figures.push(["Distance", `${fmt(num(data.distance), 2)} ${dist}`]);
   figures.push(["Duration", duration(num(data.duration_s))]);
-  if (str(data.avg_pace) && num(data.distance)) figures.push(["Pace", `${str(data.avg_pace)} ${pace}`]);
+  // Swims give their pace with its own unit ("1:58 /100 m").
+  if (str(data.avg_pace) && num(data.distance)) figures.push(["Pace", str(data.avg_pace)!.includes("/") ? str(data.avg_pace)! : `${str(data.avg_pace)} ${pace}`]);
   else if (num(data.avg_speed) !== undefined) figures.push(["Speed", `${fmt(num(data.avg_speed))} ${speed}`]);
   if (num(data.ascent) !== undefined) figures.push(["Ascent", `${fmt(num(data.ascent), 0)} ${elev}`]);
   if (num(data.avg_hr) !== undefined) figures.push(["Avg HR", `${num(data.avg_hr)} bpm`]);
@@ -135,8 +146,10 @@ function renderWorkout(root: HTMLElement, data: Obj, callTool: CallTool, onBack?
   if (zones) root.append(zones);
 
   const samples = isObject(data.samples) ? data.samples : undefined;
-  if (samples && (locationPoints(samples.location).length > 1 || CHART_STREAMS.some((s) => streamPoints(samples[s]).length > 1))) {
-    root.append(...routeAndCharts(data, samples));
+  if (samples) {
+    // Loaded already: never offer the (costly) load again, even when nothing is drawable.
+    const parts = routeAndCharts(data, samples);
+    root.append(...(parts.length > 0 ? parts : [message("No route or chart data for this workout.")]));
     return;
   }
   const available = Array.isArray(data.available_data) ? data.available_data.filter((s): s is string => typeof s === "string") : [];
@@ -149,7 +162,7 @@ function renderWorkout(root: HTMLElement, data: Obj, callTool: CallTool, onBack?
   load.addEventListener("click", () => {
     load.disabled = true;
     load.textContent = "Loading…";
-    void callTool("suunto_get_workout", { workout_key: key, samples: wanted, max_points: VIEW_MAX_POINTS })
+    void callTool("suunto_get_workout", { workout_key: key, samples: wanted, max_points: VIEW_MAX_POINTS, ...unitsArg(data) })
       .then((result) => {
         const read = readResult(result);
         if (!read.ok) {
@@ -175,7 +188,7 @@ function heartRateZones(data: Obj): HTMLElement | undefined {
       { class: "zone" },
       el("span", { class: "zone-name" }, `Zone ${num(z.zone) ?? "?"}`),
       el("span", { class: "zone-bar" }, el("span", { class: `zone-fill z${num(z.zone) ?? 0}`, style: `width:${(share * 100).toFixed(1)}%` })),
-      el("span", { class: "zone-time" }, duration(num(z.time_s), true)),
+      el("span", { class: "zone-time" }, clock(num(z.time_s))),
     );
   });
   return el("section", { class: "zones", "aria-label": "Time in heart rate zones" }, el("h3", {}, "Heart rate zones"), ...rows);
@@ -244,8 +257,8 @@ function routeAndCharts(data: Obj, samples: Obj): HTMLElement[] {
       dot.setAttribute("cy", y.toFixed(1));
       cursor.setAttribute("visibility", "visible");
       dot.setAttribute("visibility", "visible");
-      const value = name === "pace" ? duration(p.v * 60, true) : fmt(p.v);
-      detail.textContent = `${duration(p.t, true)} · ${value} ${unit}`;
+      const value = name === "pace" ? paceText(p.v) : fmt(p.v);
+      detail.textContent = `${clock(p.t)} · ${value} ${unit}`;
       if (projected.length > 1) {
         const q = projected[nearestByT(projected, p.t)]!;
         marker.setAttribute("cx", q.x.toFixed(1));
@@ -265,7 +278,7 @@ function routeAndCharts(data: Obj, samples: Obj): HTMLElement[] {
       show(points[index]!.t);
       e.preventDefault();
     });
-    const summary = isObject(stream) ? [["min", stream.min], ["avg", stream.avg], ["max", stream.max]].filter(([, v]) => num(v) !== undefined).map(([k, v]) => `${k} ${name === "pace" ? duration((v as number) * 60, true) : fmt(v as number)}`).join(" · ") : "";
+    const summary = isObject(stream) ? [["min", stream.min], ["avg", stream.avg], ["max", stream.max]].filter(([, v]) => num(v) !== undefined).map(([k, v]) => `${k} ${name === "pace" ? paceText(v as number) : fmt(v as number)}`).join(" · ") : "";
     chart.replaceChildren(el("h3", {}, `${STREAM_LABELS[name]} (${unit})`), plot, el("p", { class: "sub" }, summary), detail);
     detail.textContent = " ";
   };
@@ -345,7 +358,8 @@ export function renderSleep(root: HTMLElement, data: Obj): void {
   const avg = isObject(data.averages) ? data.averages : {};
   root.replaceChildren(el("h2", {}, "Sleep"), el("p", { class: "sub" }, [str(data.from), str(data.to)].filter(Boolean).join(" – ")));
   if (nights.length === 0) {
-    root.append(message("No sleep in this range."));
+    const naps = napCount(data);
+    root.append(message(naps > 0 ? `Only naps in this range: ${naps}.` : "No sleep in this range."));
     return;
   }
   const figures: Array<[string, string]> = [["Nights", String(nights.length)], ["Avg sleep", duration(num(avg.duration_s))]];
@@ -358,7 +372,7 @@ export function renderSleep(root: HTMLElement, data: Obj): void {
 
   const W = 600;
   const H = 200;
-  const max = Math.max(1, ...nights.map((n) => n.deep + n.light + n.rem + n.awake));
+  const max = Math.max(1, ...nights.map((n) => Math.max(n.total, n.deep + n.light + n.rem + n.awake)));
   const slot = W / nights.length;
   const detail = el("p", { class: "detail", "aria-live": "polite" }, " ");
   const describe = (i: number) => {
@@ -366,10 +380,7 @@ export function renderSleep(root: HTMLElement, data: Obj): void {
     const s = n.night;
     detail.textContent = [
       n.date,
-      `deep ${duration(n.deep)}`,
-      `light ${duration(n.light)}`,
-      `REM ${duration(n.rem)}`,
-      `awake ${duration(n.awake)}`,
+      ...(n.stages ? [`deep ${duration(n.deep)}`, `light ${duration(n.light)}`, `REM ${duration(n.rem)}`, `awake ${duration(n.awake)}`] : [`${duration(n.total)}, no sleep stages`]),
       num(s.hr_avg) !== undefined ? `HR ${num(s.hr_avg)} bpm` : undefined,
       num(s.hrv_avg_ms) !== undefined ? `HRV ${num(s.hrv_avg_ms)} ms` : undefined,
       num(s.quality_score) !== undefined ? `quality ${num(s.quality_score)}` : undefined,
@@ -379,12 +390,13 @@ export function renderSleep(root: HTMLElement, data: Obj): void {
   };
   const groups = nights.map((n, i) => {
     let y = H;
-    const parts = (["deep", "light", "rem", "awake"] as const).map((stage) => {
-      const h = (n[stage] / max) * (H - 4);
+    const bar = (seconds: number, cls: string) => {
+      const h = (seconds / max) * (H - 4);
       y -= h;
-      return svg("rect", { x: (i * slot + slot * 0.15).toFixed(1), y: y.toFixed(1), width: (slot * 0.7).toFixed(1), height: h.toFixed(1), class: `stage ${stage}` });
-    });
-    const g = svg("g", { tabindex: 0, class: "night" }, ...parts, svg("title", {}, document.createTextNode(`${n.date}: ${duration(n.deep + n.light + n.rem + n.awake)}`)));
+      return svg("rect", { x: (i * slot + slot * 0.15).toFixed(1), y: y.toFixed(1), width: (slot * 0.7).toFixed(1), height: h.toFixed(1), class: `stage ${cls}` });
+    };
+    const parts = n.stages ? (["deep", "light", "rem", "awake"] as const).map((stage) => bar(n[stage], stage)) : [bar(n.total, "unknown")];
+    const g = svg("g", { tabindex: 0, class: "night" }, ...parts, svg("title", {}, document.createTextNode(`${n.date}: ${duration(n.total)}`)));
     g.addEventListener("focus", () => describe(i));
     return g;
   });
@@ -397,7 +409,12 @@ export function renderSleep(root: HTMLElement, data: Obj): void {
       el("h3", {}, "Sleep stages per night"),
       plot,
       axis(nights.map((n) => n.date)),
-      el("p", { class: "legend" }, ...(["deep", "light", "rem", "awake"] as const).map((s) => el("span", { class: `key ${s}` }, s === "rem" ? "REM" : s[0]!.toUpperCase() + s.slice(1)))),
+      el(
+        "p",
+        { class: "legend" },
+        ...(["deep", "light", "rem", "awake"] as const).map((s) => el("span", { class: `key ${s}` }, s === "rem" ? "REM" : s[0]!.toUpperCase() + s.slice(1))),
+        nights.some((n) => !n.stages) ? el("span", { class: "key unknown" }, "No stages") : undefined,
+      ),
       detail,
     ),
   );

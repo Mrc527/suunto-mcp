@@ -2,19 +2,23 @@
 import { describe, expect, it } from "vitest";
 import {
   barAt,
+  clock,
   duration,
   fmt,
   linePath,
   localDateTime,
   locationPoints,
+  napCount,
   nearestByT,
   niceRange,
+  paceText,
   projectTrack,
   readResult,
   shortKey,
   sleepBars,
   statsSeries,
   streamPoints,
+  unitChoice,
 } from "../../views/src/model.js";
 
 describe("readResult", () => {
@@ -52,6 +56,27 @@ describe("formatting", () => {
     expect(localDateTime("2026-11-19T07:07:48+01:00")).toBe("2026-11-19 07:07");
     expect(localDateTime("2026-11-19")).toBe("2026-11-19");
     expect(localDateTime(undefined)).toBe("–");
+  });
+
+  it("writes elapsed and zone times as m:ss, h:mm:ss from an hour on", () => {
+    expect(clock(20)).toBe("0:20");
+    expect(clock(2477)).toBe("41:17");
+    expect(clock(4800)).toBe("1:20:00");
+    expect(clock(3725.4)).toBe("1:02:05");
+    expect(clock(undefined)).toBe("–");
+  });
+
+  it("writes paces as m:ss without rolling minutes into hours", () => {
+    expect(paceText(5.6833)).toBe("5:41");
+    expect(paceText(99.5)).toBe("99:30");
+    expect(paceText(4.999)).toBe("5:00");
+    expect(paceText(undefined)).toBe("–");
+  });
+
+  it("knows the units of an answer, for the calls the view makes", () => {
+    expect(unitChoice({ distance: "mi" })).toBe("imperial");
+    expect(unitChoice({ distance: "km" })).toBe("metric");
+    expect(unitChoice({})).toBeUndefined();
   });
 
   it("shortens axis labels", () => {
@@ -123,6 +148,19 @@ describe("sleep and statistics", () => {
       ["2026-11-02", 100, 500, 200, 200],
     ]);
     expect(sleepBars({})).toEqual([]);
+  });
+
+  it("does not call a night without stages awake, and counts naps", () => {
+    const data = {
+      sleeps: [
+        { date: "2026-11-03", is_nap: false, duration_s: 27000 },
+        { date: "2026-11-03", is_nap: true, duration_s: 1200 },
+        { date: "2026-11-04", is_nap: true, duration_s: 900 },
+      ],
+    };
+    expect(sleepBars(data).map((b) => [b.stages, b.awake, b.total])).toEqual([[false, 0, 27000]]);
+    expect(napCount(data)).toBe(2);
+    expect(napCount({})).toBe(0);
   });
 
   it("reads one metric per period", () => {

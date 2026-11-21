@@ -246,6 +246,9 @@ svg {
 .stage.awake {
   fill: var(--awake);
 }
+.stage.unknown {
+  fill: var(--fg-muted);
+}
 .night:hover,
 .night:focus {
   opacity: 0.8;
@@ -284,4 +287,7 @@ svg {
 }
 .key.awake::before {
   background: var(--awake);
+}
+.key.unknown::before {
+  background: var(--fg-muted);
 }

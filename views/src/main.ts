@@ -23,6 +23,9 @@ app.ontoolinput = () => {
 app.ontoolresult = (result) => {
   renderView(view, result, root, (name, args) => app.callServerTool({ name, arguments: args }));
 };
+app.ontoolcancelled = () => {
+  root.replaceChildren(message("The tool call was cancelled."));
+};
 app.onhostcontextchanged = applyContext;
 app.onteardown = async () => ({});
 

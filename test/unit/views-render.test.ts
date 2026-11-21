@@ -54,7 +54,8 @@ describe("workouts view", () => {
 
     rows[0]!.click();
     await until(() => root.querySelector("h2")?.textContent !== "Workouts" && !text().includes("Loading"));
-    expect(host.calls).toEqual([{ name: "suunto_get_workout", args: { workout_key: first.workout_key } }]);
+    // In the units of the list's answer.
+    expect(host.calls).toEqual([{ name: "suunto_get_workout", args: { workout_key: first.workout_key, units: "metric" } }]);
     expect(root.querySelector("h2")!.textContent).toBe(first.name ?? first.sport);
     expect(text()).toContain("Duration");
     expect(root.querySelectorAll(".zone")).toHaveLength(5);
@@ -77,7 +78,7 @@ describe("workouts view", () => {
     await until(() => root.querySelector(".route path.track") !== null);
     expect(host.calls[0]).toEqual({
       name: "suunto_get_workout",
-      args: { workout_key: run.workout_key, samples: expect.arrayContaining(["heart_rate", "altitude", "location"]), max_points: 400 },
+      args: { workout_key: run.workout_key, samples: expect.arrayContaining(["heart_rate", "altitude", "location"]), max_points: 400, units: "metric" },
     });
     expect(root.querySelector(".route path.track")!.getAttribute("d")).toMatch(/^M[\d.]+,[\d.]+(L[\d.]+,[\d.]+)+$/);
     expect(root.querySelector(".chart h3")!.textContent).toBe("Heart rate (bpm)");
@@ -121,6 +122,76 @@ describe("workouts view", () => {
     root.querySelector<HTMLButtonElement>("button.workout-row")!.click();
     await until(() => root.querySelector(".message.error") !== null);
     expect(root.querySelector(".message.error")!.textContent).toBe("Could not load the workout: host gone");
+  });
+
+  it("opens a workout and loads its samples in the units of the answer", async () => {
+    const host = demoHost();
+    const list = await host.service.listWorkouts({ limit: 20, units: "imperial" });
+    expect((list as { units: { distance: string } }).units.distance).toBe("mi");
+    renderView("workouts", answer(list), root, host.callTool);
+    expect(root.querySelector(".workout-row")!.textContent).toContain(" mi");
+    const runIndex = (list as { workouts: Array<{ sport: string }> }).workouts.findIndex((w) => w.sport === "Running");
+    root.querySelectorAll<HTMLButtonElement>("button.workout-row")[runIndex]!.click();
+    await until(() => root.querySelector("button.primary") !== null);
+    expect(host.calls[0]!.args.units).toBe("imperial");
+    expect(root.querySelector(".tiles")!.textContent).toContain(" mi");
+    root.querySelector<HTMLButtonElement>("button.primary")!.click();
+    await until(() => root.querySelector(".chart") !== null);
+    expect(host.calls[1]!.args.units).toBe("imperial");
+  });
+
+  it("shows a swim's pace with its own unit", async () => {
+    const host = demoHost();
+    const list = (await host.service.listWorkouts({ limit: 100, sport: "swim" })) as { workouts: Array<{ workout_key: string }> };
+    expect(list.workouts.length).toBeGreaterThan(0);
+    const swim = (await host.service.getWorkout({ workout_key: list.workouts[0]!.workout_key })) as { avg_pace?: string };
+    renderView("workouts", answer(swim), root, host.callTool);
+    const pace = [...root.querySelectorAll(".tile")].find((t) => t.querySelector("dt")!.textContent === "Pace");
+    if (swim.avg_pace) {
+      expect(pace!.querySelector("dd")!.textContent).toBe(swim.avg_pace);
+      expect(pace!.textContent).not.toContain("min/km");
+    }
+  });
+
+  it("does not offer the load again when the loaded samples have nothing to draw", () => {
+    const host = demoHost();
+    renderView(
+      "workouts",
+      answer({
+        workout_key: "c".repeat(24),
+        sport: "Running",
+        duration_s: 600,
+        available_data: ["heart_rate", "location"],
+        samples: { heart_rate: { unit: "bpm", points: [] }, location: { points: [{ t: 0, lat: 46.9, lon: 8.4 }] } },
+        units: {},
+      }),
+      root,
+      host.callTool,
+    );
+    expect(root.querySelector("button.primary")).toBeNull();
+    expect(root.querySelector(".message")!.textContent).toBe("No route or chart data for this workout.");
+  });
+
+  it("shows long paces and long zone times without turning minutes into hours", () => {
+    const pace = { unit: "min/km", min: 4.5, avg: 6, max: 99.5, points: [{ t: 0, v: 5 }, { t: 3700, v: 99.5 }] };
+    renderView(
+      "workouts",
+      answer({
+        workout_key: "d".repeat(24),
+        sport: "Hiking",
+        duration_s: 4800,
+        intensity: { heart_rate_zones: [{ zone: 1, time_s: 4800 }, { zone: 2, time_s: 60 }] },
+        samples: { pace },
+        units: {},
+      }),
+      root,
+      demoHost().callTool,
+    );
+    expect([...root.querySelectorAll(".zone-time")].map((z) => z.textContent)).toEqual(["1:20:00", "1:00"]);
+    expect(root.querySelector(".chart .sub")!.textContent).toBe("min 4:30 · avg 6:00 · max 99:30");
+    const plot = root.querySelector<SVGSVGElement>(".chart svg")!;
+    plot.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight" }));
+    expect(root.querySelector(".chart .detail")!.textContent).toBe("1:01:40 · 99:30 min/km");
   });
 
   it("shows user text as text, never as HTML", () => {
@@ -180,6 +251,21 @@ describe("sleep view", () => {
     expect(root.querySelectorAll(".chart rect.stage")).toHaveLength(nights * 4);
     root.querySelector<SVGGElement>(".chart g.night")!.dispatchEvent(new FocusEvent("focus"));
     expect(root.querySelector(".chart .detail")!.textContent).toMatch(/^\d{4}-\d{2}-\d{2} · deep \d+:\d{2} · light \d+:\d{2} · REM \d+:\d{2} · awake \d+:\d{2}/);
+  });
+
+  it("draws a night without sleep stages as one neutral bar, not as awake", () => {
+    renderView("sleep", answer({ sleeps: [{ date: "2026-11-03", is_nap: false, duration_s: 27000 }], averages: { duration_s: 27000 } }), root, demoHost().callTool);
+    expect(root.querySelectorAll(".chart rect.stage")).toHaveLength(1);
+    expect(root.querySelector(".chart rect.stage.unknown")).not.toBeNull();
+    expect(root.querySelector(".chart rect.stage.awake")).toBeNull();
+    root.querySelector<SVGGElement>(".chart g.night")!.dispatchEvent(new FocusEvent("focus"));
+    expect(root.querySelector(".chart .detail")!.textContent).toBe("2026-11-03 · 7:30, no sleep stages");
+    expect(root.querySelector(".legend")!.textContent).toContain("No stages");
+  });
+
+  it("says when a range holds only naps", () => {
+    renderView("sleep", answer({ sleeps: [{ date: "2026-11-03", is_nap: true, duration_s: 1200 }, { date: "2026-11-04", is_nap: true, duration_s: 900 }] }), root, demoHost().callTool);
+    expect(text()).toContain("Only naps in this range: 2.");
   });
 
   it("says so when there is no sleep", () => {

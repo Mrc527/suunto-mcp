@@ -58,6 +58,30 @@ export function duration(seconds: number | undefined, withSeconds = false): stri
   return `${h}:${String(m).padStart(2, "0")}`;
 }
 
+/** Seconds as m:ss, or h:mm:ss from an hour on (elapsed time, time in a zone). */
+export function clock(seconds: number | undefined): string {
+  if (seconds === undefined || seconds < 0) return "–";
+  const s = Math.round(seconds);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = String(s % 60).padStart(2, "0");
+  return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${sec}` : `${m}:${sec}`;
+}
+
+/** A pace in decimal minutes as m:ss, minutes never rolled into hours (99.5 is 99:30). */
+export function paceText(minutes: number | undefined): string {
+  if (minutes === undefined || minutes < 0) return "–";
+  const total = Math.round(minutes * 60);
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
+
+/** metric or imperial, from the units of an answer (for calls the view makes itself). */
+export function unitChoice(units: Obj): "metric" | "imperial" | undefined {
+  if (units.distance === "mi") return "imperial";
+  if (units.distance === "km") return "metric";
+  return undefined;
+}
+
 /** A number for display, with at most the given decimals and no trailing zeros. */
 export function fmt(value: number | undefined, decimals = 1): string {
   if (value === undefined) return "–";
@@ -182,10 +206,13 @@ export function linePath(points: readonly Point[], width: number, height: number
 
 export interface SleepBar {
   date: string;
+  /** False when the watch gave no sleep stages: only the total is known. */
+  stages: boolean;
   deep: number;
   light: number;
   rem: number;
   awake: number;
+  total: number;
   night: Obj;
 }
 
@@ -195,13 +222,21 @@ export function sleepBars(data: Obj): SleepBar[] {
   return sleeps
     .filter((s) => s.is_nap !== true)
     .map((s) => {
+      const stages = [s.deep_s, s.light_s, s.rem_s].some((v) => num(v) !== undefined);
       const deep = num(s.deep_s) ?? 0;
       const light = num(s.light_s) ?? 0;
       const rem = num(s.rem_s) ?? 0;
       const total = num(s.duration_s) ?? deep + light + rem;
-      return { date: str(s.date) ?? "", deep, light, rem, awake: Math.max(0, total - deep - light - rem), night: s };
+      // Without stages the time awake is unknown, not the whole night.
+      const awake = stages ? Math.max(0, total - deep - light - rem) : 0;
+      return { date: str(s.date) ?? "", stages, deep, light, rem, awake, total, night: s };
     })
     .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+/** The naps of a sleep answer. */
+export function napCount(data: Obj): number {
+  return Array.isArray(data.sleeps) ? data.sleeps.filter((s) => isObject(s) && s.is_nap === true).length : 0;
 }
 
 export type StatsMetric = "total_distance" | "total_duration_s" | "total_ascent" | "count" | "total_energy_kcal";
