@@ -5,6 +5,7 @@ import {
   clock,
   duration,
   fmt,
+  lapTable,
   linePath,
   localDateTime,
   locationPoints,
@@ -18,6 +19,7 @@ import {
   sleepBars,
   statsSeries,
   streamPoints,
+  workoutFacts,
   unitChoice,
 } from "../../views/src/model.js";
 
@@ -131,6 +133,8 @@ describe("streams", () => {
     expect(niceRange([5, 5])).toEqual({ min: expect.closeTo(3.84), max: expect.closeTo(6.16) });
     expect(linePath([], 100, 50)).toBe("");
     expect(linePath([{ t: 0, v: 0 }, { t: 10, v: 10 }], 100, 50, { min: 0, max: 10 })).toBe("M0.0,50.0L100.0,0.0");
+    // A second line on the same time axis: from second 5 to 10 of a 0-20 s chart.
+    expect(linePath([{ t: 5, v: 0 }, { t: 10, v: 10 }], 100, 50, { min: 0, max: 10 }, { t0: 0, t1: 20 })).toBe("M25.0,50.0L50.0,0.0");
   });
 });
 
@@ -180,5 +184,76 @@ describe("sleep and statistics", () => {
     expect(barAt(1, 4)).toBe(3);
     expect(barAt(-0.2, 4)).toBe(0);
     expect(barAt(1.5, 4)).toBe(3);
+  });
+});
+
+describe("workout facts", () => {
+  const metric = { distance: "km", elevation: "m", speed: "km/h", pace: "min/km", temperature: "°C" };
+  const facts = (data: Record<string, unknown>) => Object.fromEntries(workoutFacts(data).map((s) => [s.title, Object.fromEntries(s.items)]));
+
+  it("shows a dive's data in its units, and leaves out what is not there", () => {
+    const dive = { max_depth: 40.3, avg_depth: 25.5, dive_time_s: 2666.5, max_depth_temperature: 47.6, gases_used: ["EAN32", "", 7], dive_mode: "Nitrox", algorithm: "Buhlmann 16 GF", min_gf: 30, max_gf: 70, surface_time_s: 0 };
+    expect(facts({ units: { ...metric, elevation: "ft", temperature: "°F" }, dive, summary: { pte: 1.5, feeling: 5 }, recovery_time_h: 6 })).toEqual({
+      Dive: { "Max depth": "40.3 ft", "Avg depth": "25.5 ft", "Dive time": "44:27", "Temp. at max depth": "47.6 °F", Gas: "EAN32", Mode: "Nitrox", Algorithm: "Buhlmann 16 GF 30/70" },
+      Effort: { "Training effect": "1.5", "Recovery time": "6 h", Feeling: "5 of 5" },
+    });
+    expect(facts({ units: metric, dive: { surface_time_s: 6240, algorithm: "Buhlmann 16 GF" } }).Dive).toEqual({ Algorithm: "Buhlmann 16 GF", "Surface interval": "1:44:00" });
+  });
+
+  it("shows a swim's strokes, and no top speed for it", () => {
+    expect(facts({ units: metric, swimming: { avg_swolf: 40, avg_stroke_rate: 28, pool_length: 25 }, max_speed: 4.1 })).toEqual({ Swim: { SWOLF: "40", "Stroke rate": "28 /min", "Pool length": "25 m" } });
+  });
+
+  it("shows movement, effort and weather for a ride", () => {
+    const ride = {
+      units: metric,
+      max_speed: 52.4,
+      descent: 812,
+      max_altitude: 1204.6,
+      avg_cadence: 80,
+      summary: { pte: 3.2, peak_epoc: 61.7, feeling: 4, avg_power_w: 125, max_power_w: 215, avg_cadence_rpm: 84 },
+      fitness: { vo2_max: 50.5 },
+      weather: { temperature: 7.3, humidity: 77, wind_speed: 4.3 },
+      recovery_time_h: 29,
+    };
+    expect(facts(ride)).toEqual({
+      Details: { "Max speed": "52.4 km/h", Descent: "812 m", "Max altitude": "1,205 m", "Avg cadence": "84 rpm", "Avg power": "125 W", "Max power": "215 W" },
+      Effort: { "Training effect": "3.2", "Peak EPOC": "61.7", "Recovery time": "29 h", Feeling: "4 of 5", VO2max: "50.5" },
+      Conditions: { "Air temperature": "7.3 °C", Wind: "4.3 km/h", Humidity: "77 %" },
+    });
+  });
+
+  it("has no sections for a workout without these data, and ignores a feeling outside 1-5", () => {
+    expect(workoutFacts({ units: metric, summary: { feeling: 9 } })).toEqual([]);
+    expect(workoutFacts({})).toEqual([]);
+  });
+});
+
+describe("lap table", () => {
+  const units = { distance: "km", elevation: "m", speed: "km/h", pace: "min/km" };
+
+  it("keeps the columns some lap has, with a dash where one lap has nothing", () => {
+    const laps = [
+      { lap: 1, duration_s: 300, distance: 1, avg_pace: "5:00", avg_speed: 12, avg_hr: 140, ascent: 12 },
+      { lap: 2, duration_s: 290, distance: 1, avg_pace: "4:50", avg_speed: 12.4, avg_hr: 151 },
+    ];
+    // Pace wins over speed: they say the same.
+    expect(lapTable({ units, laps })).toEqual({
+      head: ["Lap", "Time", "Distance", "Pace", "Avg HR", "Ascent"],
+      rows: [
+        ["1", "5:00", "1 km", "5:00 min/km", "140", "12 m"],
+        ["2", "4:50", "1 km", "4:50 min/km", "151", "–"],
+      ],
+    });
+  });
+
+  it("uses speed when no lap has a pace, and keeps a swim's own pace unit", () => {
+    expect(lapTable({ units, laps: [{ lap: 1, avg_speed: 30 }, { lap: 2, avg_speed: 28.5 }] })!.head).toEqual(["Lap", "Speed"]);
+    expect(lapTable({ units, laps: [{ lap: 1, avg_pace: "1:58 /100 m" }, { lap: 2, avg_pace: "2:01 /100 m" }] })!.rows.map((r) => r[1])).toEqual(["1:58 /100 m", "2:01 /100 m"]);
+  });
+
+  it("has no table for fewer than two laps", () => {
+    expect(lapTable({ units, laps: [{ lap: 1, duration_s: 300 }] })).toBeUndefined();
+    expect(lapTable({ units })).toBeUndefined();
   });
 });

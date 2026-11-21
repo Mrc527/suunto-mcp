@@ -13,6 +13,7 @@
   --light: light-dark(#5c6bc0, #9fa8da);
   --rem: light-dark(#26a69a, #4db6ac);
   --awake: light-dark(#ffb74d, #ffcc80);
+  --temp: light-dark(#ef6c00, #ffa726);
   --radius: var(--border-radius-md, 10px);
   font-family: var(--font-sans, system-ui, -apple-system, "Segoe UI", sans-serif);
 }
@@ -217,6 +218,46 @@ svg {
 }
 .line.altitude {
   stroke: var(--alt);
+}
+.line.depth {
+  stroke: var(--deep);
+}
+.line.temperature {
+  stroke: var(--temp);
+}
+.line.overlay {
+  stroke-width: 1.5;
+  stroke-dasharray: 5 4;
+}
+.facts {
+  margin-top: 16px;
+}
+.laps-wrap {
+  margin-top: 16px;
+}
+.laps-wrap .scroll {
+  overflow-x: auto;
+}
+table.laps {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+  font-variant-numeric: tabular-nums;
+}
+table.laps th,
+table.laps td {
+  padding: 4px 8px;
+  text-align: right;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+table.laps th {
+  color: var(--fg-muted);
+  font-weight: 500;
+}
+table.laps th:first-child,
+table.laps td:first-child {
+  text-align: left;
 }
 .cursor {
   stroke: var(--fg-muted);

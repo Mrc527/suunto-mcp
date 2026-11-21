@@ -96,6 +96,90 @@ describe("workouts view", () => {
     expect(root.querySelector(".route .marker")!.getAttribute("visibility")).toBe("visible");
   });
 
+  it("charts a dive's depth as a profile: the surface on top, deeper further down", async () => {
+    const host = demoHost();
+    const list = (await host.service.listWorkouts({ limit: 100 })) as { workouts: Array<{ workout_key: string; sport: string }> };
+    const dive = list.workouts.find((w) => w.sport === "Scuba diving")!;
+    renderView("workouts", answer(await host.service.getWorkout({ workout_key: dive.workout_key })), root, host.callTool);
+    // No GPS track under water: charts only.
+    const load = root.querySelector<HTMLButtonElement>("button.primary")!;
+    expect(load.textContent).toBe("Show charts");
+
+    load.click();
+    await until(() => root.querySelector(".chart path.line") !== null);
+    expect(host.calls[0]!.args.samples).toEqual(["depth", "heart_rate", "temperature"]);
+    expect(root.querySelector(".route")).toBeNull();
+    // The dive opens on its depth, with the water temperature drawn over it.
+    expect(root.querySelector(".chart h3")!.textContent).toBe("Depth (m) and water temperature (°C)");
+    expect([...root.querySelectorAll(".toggles button")].map((b) => b.textContent)).toEqual(["Depth", "Heart rate", "Water temperature"]);
+    expect(root.querySelector(".chart path.line.temperature.overlay")!.getAttribute("d")).toMatch(/^M0\.0,[\d.]+(L[\d.]+,[\d.]+)+$/);
+    const ys = [...root.querySelector(".chart path.line.depth")!.getAttribute("d")!.matchAll(/[ML][\d.]+,([\d.]+)/g)].map((m) => Number(m[1]));
+    // The dive starts and ends at the surface (0 m): the top edge. Its deepest point is near the bottom.
+    expect(ys[0]).toBe(0);
+    expect(ys[ys.length - 1]).toBe(0);
+    expect(Math.max(...ys)).toBeGreaterThan(160 * 0.85);
+    expect(root.querySelector(".chart .sub")!.textContent).toMatch(/^min 0 · avg [\d.]+ · max [\d.]+ · water [\d.]+ to [\d.]+ °C$/);
+
+    const plot = root.querySelector<SVGSVGElement>(".chart svg")!;
+    plot.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight" }));
+    expect(root.querySelector(".chart .detail")!.textContent).toMatch(/^\d+:\d{2} · [\d.]+ m · [\d.]+ °C$/);
+
+    // The dive's own figures.
+    const diveFacts = root.querySelector('section.facts[aria-label="Dive"]')!;
+    const facts = Object.fromEntries([...diveFacts.querySelectorAll(".tile")].map((t) => [t.querySelector("dt")!.textContent, t.querySelector("dd")!.textContent]));
+    expect(facts["Max depth"]).toMatch(/^[\d.]+ m$/);
+    expect(facts.Gas).toBe("Air");
+    expect(facts.Algorithm).toMatch(/GF \d+\/\d+$/);
+
+    // The water temperature on its own: no second line.
+    [...root.querySelectorAll<HTMLButtonElement>(".toggles button")].find((b) => b.textContent === "Water temperature")!.click();
+    expect(root.querySelector(".chart h3")!.textContent).toBe("Water temperature (°C)");
+    expect(root.querySelector(".chart path.overlay")).toBeNull();
+  });
+
+  it("shows each main sport's own figures, and the watch's temperature as a chart", async () => {
+    const host = demoHost();
+    const list = (await host.service.listWorkouts({ limit: 100 })) as { workouts: Array<{ workout_key: string; sport: string }> };
+    const sections = async (sport: string) => {
+      const w = list.workouts.find((x) => x.sport === sport)!;
+      renderView("workouts", answer(await host.service.getWorkout({ workout_key: w.workout_key })), root, host.callTool);
+      return Object.fromEntries([...root.querySelectorAll("section.facts")].map((sec) => [sec.getAttribute("aria-label"), [...sec.querySelectorAll("dt")].map((d) => d.textContent)]));
+    };
+    const run = await sections("Running");
+    expect(run.Details).toEqual(expect.arrayContaining(["Steps", "Avg cadence", "Descent"]));
+    expect(run.Effort).toEqual(expect.arrayContaining(["Training effect", "Recovery time", "VO2max"]));
+    expect(run.Conditions).toEqual(["Air temperature", "Wind", "Humidity"]);
+    root.querySelector<HTMLButtonElement>("button.primary")!.click();
+    await until(() => root.querySelector(".chart path.line") !== null);
+    expect([...root.querySelectorAll(".toggles button")].map((b) => b.textContent)).toContain("Temperature");
+
+    expect((await sections("Cycling")).Details).toEqual(expect.arrayContaining(["Max speed", "Avg power", "Max power"]));
+    const swim = await sections("Swimming");
+    expect(swim.Swim).toEqual(["SWOLF", "Stroke rate", "Pool length"]);
+    expect(swim.Details ?? []).not.toContain("Max speed");
+    expect(Object.keys(await sections("Gym"))).toEqual(["Effort"]);
+  });
+
+  it("shows the laps as a table", () => {
+    const workout = {
+      workout_key: "w-invented",
+      sport: "Running",
+      duration_s: 590,
+      units: { distance: "km", elevation: "m", speed: "km/h", pace: "min/km" },
+      laps: [
+        { lap: 1, duration_s: 300, distance: 1, avg_pace: "5:00", avg_hr: 140 },
+        { lap: 2, duration_s: 290, distance: 1, avg_pace: "4:50", avg_hr: 151 },
+      ],
+    };
+    renderView("workouts", answer(workout), root, demoHost().callTool);
+    const table = root.querySelector('section[aria-label="Laps"] table.laps')!;
+    expect([...table.querySelectorAll("th")].map((th) => th.textContent)).toEqual(["Lap", "Time", "Distance", "Pace", "Avg HR"]);
+    expect([...table.querySelectorAll("tbody tr")].map((tr) => [...tr.querySelectorAll("td")].map((td) => td.textContent))).toEqual([
+      ["1", "5:00", "1 km", "5:00 min/km", "140"],
+      ["2", "4:50", "1 km", "4:50 min/km", "151"],
+    ]);
+  });
+
   it("renders a workout that already has its samples at once, without a tool call", async () => {
     const host = demoHost();
     const list = (await host.service.listWorkouts({ limit: 20 })) as { workouts: Array<{ workout_key: string; sport: string }> };

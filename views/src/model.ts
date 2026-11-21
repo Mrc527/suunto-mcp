@@ -189,11 +189,19 @@ export function niceRange(values: readonly number[]): Scale {
   return { min: min - pad, max: max + pad };
 }
 
-/** SVG path data of a line through the points, in a width x height box. */
-export function linePath(points: readonly Point[], width: number, height: number, range = niceRange(points.map((p) => p.v))): string {
+/**
+ * SVG path data of a line through the points, in a width x height box. span sets the times at the
+ * left and right edges, so a second line drawn over a chart shares its time axis.
+ */
+export function linePath(
+  points: readonly Point[],
+  width: number,
+  height: number,
+  range = niceRange(points.map((p) => p.v)),
+  span = { t0: points[0]?.t ?? 0, t1: points[points.length - 1]?.t ?? 0 },
+): string {
   if (points.length === 0) return "";
-  const t0 = points[0]!.t;
-  const t1 = points[points.length - 1]!.t;
+  const { t0, t1 } = span;
   const spanT = t1 - t0 || 1;
   return points
     .map((p, i) => {
@@ -263,4 +271,112 @@ export function shortKey(key: string): string {
 /** The bar under a pointer at fraction x (0-1) of the chart width, for n bars. */
 export function barAt(x: number, n: number): number {
   return Math.min(n - 1, Math.max(0, Math.floor(x * n)));
+}
+
+export interface FactSection {
+  title: string;
+  items: Array<[label: string, value: string]>;
+}
+
+/**
+ * The figures of a workout beyond the headline ones, in sections by the data the answer holds (a
+ * dive, a swim, movement, effort, weather). Sections with nothing in them are left out.
+ */
+export function workoutFacts(data: Obj): FactSection[] {
+  const u = isObject(data.units) ? data.units : {};
+  const elev = str(u.elevation) ?? "m";
+  const temp = str(u.temperature) ?? "°C";
+  const speed = str(u.speed) ?? "km/h";
+  const summary = isObject(data.summary) ? data.summary : {};
+  const fitness = isObject(data.fitness) ? data.fitness : {};
+  const weather = isObject(data.weather) ? data.weather : {};
+  const dive = isObject(data.dive) ? data.dive : undefined;
+  const swim = isObject(data.swimming) ? data.swimming : undefined;
+  const section = (title: string) => ({ title, items: [] as Array<[string, string]> });
+  const put = (s: FactSection, label: string, value: unknown, show: (n: number) => string | undefined) => {
+    const n = num(value);
+    const text = n === undefined ? undefined : show(n);
+    if (text !== undefined) s.items.push([label, text]);
+  };
+
+  const diving = section("Dive");
+  if (dive) {
+    put(diving, "Max depth", dive.max_depth, (n) => `${fmt(n)} ${elev}`);
+    put(diving, "Avg depth", dive.avg_depth, (n) => `${fmt(n)} ${elev}`);
+    put(diving, "Dive time", dive.dive_time_s, (n) => clock(n));
+    put(diving, "Temp. at max depth", dive.max_depth_temperature, (n) => `${fmt(n)} ${temp}`);
+    const gases = Array.isArray(dive.gases_used) ? dive.gases_used.filter((g): g is string => typeof g === "string" && g !== "") : [];
+    if (gases.length > 0) diving.items.push(["Gas", gases.join(", ")]);
+    if (str(dive.dive_mode)) diving.items.push(["Mode", str(dive.dive_mode)!]);
+    if (str(dive.algorithm)) {
+      const gf = num(dive.min_gf) !== undefined && num(dive.max_gf) !== undefined ? ` ${num(dive.min_gf)}/${num(dive.max_gf)}` : "";
+      diving.items.push(["Algorithm", `${str(dive.algorithm)}${gf}`]);
+    }
+    // 0 is the first dive of the day: no interval before it.
+    put(diving, "Surface interval", dive.surface_time_s, (n) => (n > 0 ? clock(n) : undefined));
+  }
+
+  const swimming = section("Swim");
+  if (swim) {
+    put(swimming, "SWOLF", swim.avg_swolf, (n) => fmt(n, 0));
+    put(swimming, "Stroke rate", swim.avg_stroke_rate, (n) => `${fmt(n, 0)} /min`);
+    put(swimming, "Pool length", swim.pool_length, (n) => `${fmt(n, 0)} ${elev}`);
+  }
+
+  const details = section("Details");
+  // A swim's or a dive's top speed says little.
+  if (!swim && !dive) put(details, "Max speed", data.max_speed, (n) => `${fmt(n)} ${speed}`);
+  put(details, "Descent", data.descent, (n) => `${fmt(n, 0)} ${elev}`);
+  put(details, "Max altitude", data.max_altitude, (n) => `${fmt(n, 0)} ${elev}`);
+  put(details, "Steps", data.steps, (n) => fmt(n, 0));
+  put(details, "Avg cadence", summary.avg_cadence_rpm ?? data.avg_cadence, (n) => `${fmt(n, 0)} rpm`);
+  put(details, "Avg power", summary.avg_power_w, (n) => `${fmt(n, 0)} W`);
+  put(details, "Max power", summary.max_power_w, (n) => `${fmt(n, 0)} W`);
+
+  const effort = section("Effort");
+  put(effort, "Training effect", summary.pte, (n) => fmt(n));
+  put(effort, "Peak EPOC", summary.peak_epoc, (n) => fmt(n));
+  put(effort, "Recovery time", data.recovery_time_h, (n) => `${fmt(n)} h`);
+  // 1 (worst) to 5 (best); Suunto does not document names for the steps.
+  put(effort, "Feeling", summary.feeling, (n) => (Number.isInteger(n) && n >= 1 && n <= 5 ? `${n} of 5` : undefined));
+  put(effort, "VO2max", fitness.vo2_max, (n) => fmt(n));
+
+  const conditions = section("Conditions");
+  put(conditions, "Air temperature", weather.temperature, (n) => `${fmt(n)} ${temp}`);
+  put(conditions, "Wind", weather.wind_speed, (n) => `${fmt(n)} ${speed}`);
+  put(conditions, "Humidity", weather.humidity, (n) => `${fmt(n, 0)} %`);
+
+  return [diving, swimming, details, effort, conditions].filter((s) => s.items.length > 0);
+}
+
+/** A workout's laps as table rows, with only the columns some lap has; undefined under two laps. */
+export function lapTable(data: Obj): { head: string[]; rows: string[][] } | undefined {
+  const laps = Array.isArray(data.laps) ? data.laps.filter(isObject) : [];
+  if (laps.length < 2) return undefined;
+  const u = isObject(data.units) ? data.units : {};
+  const dist = str(u.distance) ?? "km";
+  const elev = str(u.elevation) ?? "m";
+  const pace = str(u.pace) ?? "min/km";
+  const speed = str(u.speed) ?? "km/h";
+  const n = (v: unknown, show: (x: number) => string) => (num(v) === undefined ? undefined : show(num(v)!));
+  const columns: Array<[string, (lap: Obj) => string | undefined]> = [
+    ["Lap", (l) => n(l.lap, (x) => String(x))],
+    ["Time", (l) => n(l.duration_s, clock)],
+    ["Distance", (l) => n(l.distance, (x) => `${fmt(x, 2)} ${dist}`)],
+    // Swims give their pace with its own unit ("1:58 /100 m").
+    ["Pace", (l) => (str(l.avg_pace) ? (str(l.avg_pace)!.includes("/") ? str(l.avg_pace) : `${str(l.avg_pace)} ${pace}`) : undefined)],
+    ["Speed", (l) => n(l.avg_speed, (x) => `${fmt(x)} ${speed}`)],
+    ["Avg HR", (l) => n(l.avg_hr, (x) => fmt(x, 0))],
+    ["Max HR", (l) => n(l.max_hr, (x) => fmt(x, 0))],
+    ["Ascent", (l) => n(l.ascent, (x) => `${fmt(x, 0)} ${elev}`)],
+  ];
+  const cells = laps.map((lap) => columns.map(([, cell]) => cell(lap)));
+  let keep = columns.map((_, c) => cells.some((row) => row[c] !== undefined));
+  // Pace and speed say the same: speed only when no lap has a pace.
+  const paceAt = columns.findIndex(([h]) => h === "Pace");
+  if (keep[paceAt]) keep = keep.map((k, c) => k && columns[c]![0] !== "Speed");
+  return {
+    head: columns.filter((_, c) => keep[c]).map(([h]) => h),
+    rows: cells.map((row) => row.filter((_, c) => keep[c]).map((v) => v ?? "–")),
+  };
 }

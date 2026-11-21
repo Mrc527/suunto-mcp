@@ -8,6 +8,7 @@ import {
   duration,
   fmt,
   isObject,
+  lapTable,
   linePath,
   localDateTime,
   locationPoints,
@@ -30,13 +31,23 @@ import {
   paceText,
   shortKey,
   unitChoice,
+  workoutFacts,
 } from "./model.js";
 
 export type CallTool = (name: string, args: Record<string, unknown>) => Promise<ToolResultLike>;
 
-/** The streams the workout view asks for, in the order of its metric buttons. */
-const CHART_STREAMS = ["heart_rate", "altitude", "speed", "pace", "cadence", "power"] as const;
-const STREAM_LABELS: Record<string, string> = { heart_rate: "Heart rate", altitude: "Altitude", speed: "Speed", pace: "Pace", cadence: "Cadence", power: "Power" };
+/** The streams the workout view asks for, in the order of its metric buttons. Depth first: a dive opens on its profile. */
+const CHART_STREAMS = ["depth", "heart_rate", "altitude", "speed", "pace", "cadence", "power", "temperature"] as const;
+const STREAM_LABELS: Record<string, string> = {
+  depth: "Depth",
+  heart_rate: "Heart rate",
+  altitude: "Altitude",
+  speed: "Speed",
+  pace: "Pace",
+  cadence: "Cadence",
+  power: "Power",
+  temperature: "Temperature",
+};
 /** Points per stream the view asks for: enough for a smooth line, small enough for the answer. */
 const VIEW_MAX_POINTS = 400;
 
@@ -145,6 +156,17 @@ function renderWorkout(root: HTMLElement, data: Obj, callTool: CallTool, onBack?
   root.replaceChildren(...head.filter((n): n is Node => n !== undefined), tiles(figures));
   const zones = heartRateZones(data);
   if (zones) root.append(zones);
+  for (const facts of workoutFacts(data)) root.append(el("section", { class: "facts", "aria-label": facts.title }, el("h3", {}, facts.title), tiles(facts.items)));
+  const laps = lapTable(data);
+  if (laps) {
+    const table = el(
+      "table",
+      { class: "laps" },
+      el("thead", {}, el("tr", {}, ...laps.head.map((h) => el("th", { scope: "col" }, h)))),
+      el("tbody", {}, ...laps.rows.map((row) => el("tr", {}, ...row.map((cell) => el("td", {}, cell))))),
+    );
+    root.append(el("section", { class: "laps-wrap", "aria-label": "Laps" }, el("h3", {}, "Laps"), el("div", { class: "scroll" }, table)));
+  }
 
   const samples = isObject(data.samples) ? data.samples : undefined;
   if (samples) {
@@ -226,6 +248,8 @@ function routeAndCharts(data: Obj, samples: Obj): HTMLElement[] {
 
   const streams = CHART_STREAMS.filter((s) => streamPoints(samples[s]).length > 1);
   if (streams.length === 0) return out;
+  // A dive computer measures the water; on land the watch's sensor reads near the wrist.
+  const labelOf = (name: string) => (name === "temperature" && isObject(data.dive) ? "Water temperature" : STREAM_LABELS[name]!);
   const CW = 600;
   const CH = 160;
   const chart = el("section", { class: "chart" });
@@ -234,20 +258,29 @@ function routeAndCharts(data: Obj, samples: Obj): HTMLElement[] {
     const stream = samples[name];
     const points = streamPoints(stream);
     const unit = isObject(stream) ? (str(stream.unit) ?? "") : "";
+    // The dive profile carries the water temperature as a second line, on its own scale.
+    const over = name === "depth" ? samples.temperature : undefined;
+    const overPoints = streamPoints(over);
+    const overUnit = isObject(over) ? (str(over.unit) ?? "") : "";
+    const hasOver = overPoints.length > 1;
     const range = niceRange(points.map((p) => p.v));
-    // Pace is better when lower: draw it upside down, like the Suunto App.
-    const flipped = name === "pace" ? { min: range.max, max: range.min } : range;
+    // Pace is better when lower: draw it upside down, like the Suunto App. Depth is a dive profile:
+    // the surface on the top edge, deeper further down.
+    const flipped =
+      name === "pace" ? { min: range.max, max: range.min } : name === "depth" ? { min: range.max, max: Math.min(0, ...points.map((p) => p.v)) } : range;
     const cursor = svg("line", { class: "cursor", y1: 0, y2: CH, visibility: "hidden" });
     const dot = svg("circle", { r: 4, class: "dot", visibility: "hidden" });
+    const t0 = points[0]!.t;
+    const t1 = points[points.length - 1]!.t;
+    const title = hasOver ? `${labelOf(name)} (${unit}) and ${labelOf("temperature").toLowerCase()} (${overUnit})` : `${labelOf(name)} (${unit})`;
     const plot = svg(
       "svg",
-      { viewBox: `0 0 ${CW} ${CH}`, preserveAspectRatio: "none", role: "img", "aria-label": `${STREAM_LABELS[name]} over time`, tabindex: 0 },
+      { viewBox: `0 0 ${CW} ${CH}`, preserveAspectRatio: "none", role: "img", "aria-label": `${title} over time`, tabindex: 0 },
+      hasOver ? svg("path", { d: linePath(overPoints, CW, CH, niceRange(overPoints.map((p) => p.v)), { t0, t1 }), class: "line temperature overlay" }) : undefined,
       svg("path", { d: linePath(points, CW, CH, flipped), class: `line ${name}` }),
       cursor,
       dot,
     );
-    const t0 = points[0]!.t;
-    const t1 = points[points.length - 1]!.t;
     const show = (t: number) => {
       const p = points[nearestByT(points, t)]!;
       const x = ((p.t - t0) / (t1 - t0 || 1)) * CW;
@@ -259,7 +292,8 @@ function routeAndCharts(data: Obj, samples: Obj): HTMLElement[] {
       cursor.setAttribute("visibility", "visible");
       dot.setAttribute("visibility", "visible");
       const value = name === "pace" ? paceText(p.v) : fmt(p.v);
-      detail.textContent = `${clock(p.t)} · ${value} ${unit}`;
+      const overText = hasOver ? ` · ${fmt(overPoints[nearestByT(overPoints, p.t)]!.v)} ${overUnit}` : "";
+      detail.textContent = `${clock(p.t)} · ${value} ${unit}${overText}`;
       if (projected.length > 1) {
         const q = projected[nearestByT(projected, p.t)]!;
         marker.setAttribute("cx", q.x.toFixed(1));
@@ -280,10 +314,11 @@ function routeAndCharts(data: Obj, samples: Obj): HTMLElement[] {
       e.preventDefault();
     });
     const summary = isObject(stream) ? [["min", stream.min], ["avg", stream.avg], ["max", stream.max]].filter(([, v]) => num(v) !== undefined).map(([k, v]) => `${k} ${name === "pace" ? paceText(v as number) : fmt(v as number)}`).join(" · ") : "";
-    chart.replaceChildren(el("h3", {}, `${STREAM_LABELS[name]} (${unit})`), plot, el("p", { class: "sub" }, summary), detail);
+    const overRange = hasOver && isObject(over) && num(over.min) !== undefined && num(over.max) !== undefined ? ` · water ${fmt(num(over.min))} to ${fmt(num(over.max))} ${overUnit}` : "";
+    chart.replaceChildren(el("h3", {}, title), plot, el("p", { class: "sub" }, summary + overRange), detail);
     detail.textContent = " ";
   };
-  out.push(toggles(streams.map((s) => [s, STREAM_LABELS[s]!] as [string, string]), streams[0]!, draw), chart);
+  out.push(toggles(streams.map((s) => [s, labelOf(s)] as [string, string]), streams[0]!, draw), chart);
   draw(streams[0]!);
   return out;
 }
