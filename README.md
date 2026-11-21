@@ -663,7 +663,7 @@ In AI apps that show interactive views ([MCP Apps](https://modelcontextprotocol.
 
 | View | Opened by | What you can do |
 | --- | --- | --- |
-| Workouts | `suunto_list_workouts`, `suunto_get_workout` | Open a workout from the list; see its figures and heart rate zones; load its route and charts (heart rate, altitude, speed, pace, cadence, power), where the route marker follows the point you point at on the chart. |
+| Workouts | `suunto_list_workouts`, `suunto_get_workout` | Open a workout from the list; see its figures and heart rate zones; load its route and charts (dive depth as a profile, heart rate, altitude, speed, pace, cadence, power), where the route marker follows the point you point at on the chart. |
 | Training | `suunto_workout_stats` | Totals, and a bar chart per week, month or year (with `group_by`) for distance, time, ascent, workouts or energy. |
 | Sleep | `suunto_sleep` | Deep, light, REM and awake time night by night, with heart rate, HRV and quality per night. |
 

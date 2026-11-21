@@ -96,6 +96,34 @@ describe("workouts view", () => {
     expect(root.querySelector(".route .marker")!.getAttribute("visibility")).toBe("visible");
   });
 
+  it("charts a dive's depth as a profile: the surface on top, deeper further down", async () => {
+    const host = demoHost();
+    const list = (await host.service.listWorkouts({ limit: 100 })) as { workouts: Array<{ workout_key: string; sport: string }> };
+    const dive = list.workouts.find((w) => w.sport === "Scuba diving")!;
+    renderView("workouts", answer(await host.service.getWorkout({ workout_key: dive.workout_key })), root, host.callTool);
+    // No GPS track under water: charts only.
+    const load = root.querySelector<HTMLButtonElement>("button.primary")!;
+    expect(load.textContent).toBe("Show charts");
+
+    load.click();
+    await until(() => root.querySelector(".chart path.line") !== null);
+    expect(host.calls[0]!.args.samples).toEqual(["depth", "heart_rate"]);
+    expect(root.querySelector(".route")).toBeNull();
+    // The dive opens on its depth.
+    expect(root.querySelector(".chart h3")!.textContent).toBe("Depth (m)");
+    expect([...root.querySelectorAll(".toggles button")].map((b) => b.textContent)).toEqual(["Depth", "Heart rate"]);
+    const ys = [...root.querySelector(".chart path.line.depth")!.getAttribute("d")!.matchAll(/[ML][\d.]+,([\d.]+)/g)].map((m) => Number(m[1]));
+    // The dive starts and ends at the surface (0 m): the top edge. Its deepest point is near the bottom.
+    expect(ys[0]).toBe(0);
+    expect(ys[ys.length - 1]).toBe(0);
+    expect(Math.max(...ys)).toBeGreaterThan(160 * 0.85);
+    expect(root.querySelector(".chart .sub")!.textContent).toMatch(/^min 0 · avg [\d.]+ · max [\d.]+$/);
+
+    const plot = root.querySelector<SVGSVGElement>(".chart svg")!;
+    plot.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight" }));
+    expect(root.querySelector(".chart .detail")!.textContent).toMatch(/^\d+:\d{2} · [\d.]+ m$/);
+  });
+
   it("renders a workout that already has its samples at once, without a tool call", async () => {
     const host = demoHost();
     const list = (await host.service.listWorkouts({ limit: 20 })) as { workouts: Array<{ workout_key: string; sport: string }> };

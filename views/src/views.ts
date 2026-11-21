@@ -34,9 +34,9 @@ import {
 
 export type CallTool = (name: string, args: Record<string, unknown>) => Promise<ToolResultLike>;
 
-/** The streams the workout view asks for, in the order of its metric buttons. */
-const CHART_STREAMS = ["heart_rate", "altitude", "speed", "pace", "cadence", "power"] as const;
-const STREAM_LABELS: Record<string, string> = { heart_rate: "Heart rate", altitude: "Altitude", speed: "Speed", pace: "Pace", cadence: "Cadence", power: "Power" };
+/** The streams the workout view asks for, in the order of its metric buttons. Depth first: a dive opens on its profile. */
+const CHART_STREAMS = ["depth", "heart_rate", "altitude", "speed", "pace", "cadence", "power"] as const;
+const STREAM_LABELS: Record<string, string> = { depth: "Depth", heart_rate: "Heart rate", altitude: "Altitude", speed: "Speed", pace: "Pace", cadence: "Cadence", power: "Power" };
 /** Points per stream the view asks for: enough for a smooth line, small enough for the answer. */
 const VIEW_MAX_POINTS = 400;
 
@@ -235,8 +235,10 @@ function routeAndCharts(data: Obj, samples: Obj): HTMLElement[] {
     const points = streamPoints(stream);
     const unit = isObject(stream) ? (str(stream.unit) ?? "") : "";
     const range = niceRange(points.map((p) => p.v));
-    // Pace is better when lower: draw it upside down, like the Suunto App.
-    const flipped = name === "pace" ? { min: range.max, max: range.min } : range;
+    // Pace is better when lower: draw it upside down, like the Suunto App. Depth is a dive profile:
+    // the surface on the top edge, deeper further down.
+    const flipped =
+      name === "pace" ? { min: range.max, max: range.min } : name === "depth" ? { min: range.max, max: Math.min(0, ...points.map((p) => p.v)) } : range;
     const cursor = svg("line", { class: "cursor", y1: 0, y2: CH, visibility: "hidden" });
     const dot = svg("circle", { r: 4, class: "dot", visibility: "hidden" });
     const plot = svg(

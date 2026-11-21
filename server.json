@@ -3,7 +3,7 @@
   "name": "ch.visin.mcp/suunto",
   "title": "MCP for Suunto",
   "description": "Independent, not by Suunto: read your Suunto workouts, sleep and recovery, and add routes.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "websiteUrl": "https://suunto.mcp.visin.ch",
   "icons": [
     {
