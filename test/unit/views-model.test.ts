@@ -159,6 +159,8 @@ describe("sleep and statistics", () => {
       ],
     };
     expect(sleepBars(data).map((b) => [b.stages, b.awake, b.total])).toEqual([[false, 0, 27000]]);
+    // Only some stages: the rest is unknown, not awake.
+    expect(sleepBars({ sleeps: [{ date: "2026-11-05", duration_s: 28800, deep_s: 3600 }] }).map((b) => [b.stages, b.awake])).toEqual([[false, 0]]);
     expect(napCount(data)).toBe(2);
     expect(napCount({})).toBe(0);
   });

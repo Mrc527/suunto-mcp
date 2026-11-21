@@ -18,6 +18,7 @@ import {
   projectTrack,
   readResult,
   sleepBars,
+  type SleepBar,
   type StatsMetric,
   statsSeries,
   str,
@@ -353,6 +354,14 @@ export function renderTraining(root: HTMLElement, data: Obj): void {
 // Sleep
 // ---------------------------------------------------------------------------------------------
 
+/** The readout of a night without all three stages: the total and the stages that are known. */
+function partialStages(n: SleepBar): string[] {
+  const known = ([["deep", n.night.deep_s], ["light", n.night.light_s], ["REM", n.night.rem_s]] as const)
+    .filter(([, v]) => num(v) !== undefined)
+    .map(([k, v]) => `${k} ${duration(v as number)}`);
+  return known.length === 0 ? [`${duration(n.total)}, no sleep stages`] : [duration(n.total), ...known, "other stages unknown"];
+}
+
 export function renderSleep(root: HTMLElement, data: Obj): void {
   const nights = sleepBars(data);
   const avg = isObject(data.averages) ? data.averages : {};
@@ -380,7 +389,7 @@ export function renderSleep(root: HTMLElement, data: Obj): void {
     const s = n.night;
     detail.textContent = [
       n.date,
-      ...(n.stages ? [`deep ${duration(n.deep)}`, `light ${duration(n.light)}`, `REM ${duration(n.rem)}`, `awake ${duration(n.awake)}`] : [`${duration(n.total)}, no sleep stages`]),
+      ...(n.stages ? [`deep ${duration(n.deep)}`, `light ${duration(n.light)}`, `REM ${duration(n.rem)}`, `awake ${duration(n.awake)}`] : partialStages(n)),
       num(s.hr_avg) !== undefined ? `HR ${num(s.hr_avg)} bpm` : undefined,
       num(s.hrv_avg_ms) !== undefined ? `HRV ${num(s.hrv_avg_ms)} ms` : undefined,
       num(s.quality_score) !== undefined ? `quality ${num(s.quality_score)}` : undefined,

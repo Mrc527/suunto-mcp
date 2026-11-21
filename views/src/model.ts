@@ -206,7 +206,7 @@ export function linePath(points: readonly Point[], width: number, height: number
 
 export interface SleepBar {
   date: string;
-  /** False when the watch gave no sleep stages: only the total is known. */
+  /** False unless the watch gave all three stages: the time awake is then unknown. */
   stages: boolean;
   deep: number;
   light: number;
@@ -222,7 +222,7 @@ export function sleepBars(data: Obj): SleepBar[] {
   return sleeps
     .filter((s) => s.is_nap !== true)
     .map((s) => {
-      const stages = [s.deep_s, s.light_s, s.rem_s].some((v) => num(v) !== undefined);
+      const stages = [s.deep_s, s.light_s, s.rem_s].every((v) => num(v) !== undefined);
       const deep = num(s.deep_s) ?? 0;
       const light = num(s.light_s) ?? 0;
       const rem = num(s.rem_s) ?? 0;

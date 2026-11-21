@@ -263,6 +263,14 @@ describe("sleep view", () => {
     expect(root.querySelector(".legend")!.textContent).toContain("No stages");
   });
 
+  it("draws a night with only some stages as one neutral bar, and names the known ones", () => {
+    renderView("sleep", answer({ sleeps: [{ date: "2026-11-05", is_nap: false, duration_s: 28800, deep_s: 3600 }] }), root, demoHost().callTool);
+    expect(root.querySelector(".chart rect.stage.awake")).toBeNull();
+    expect(root.querySelectorAll(".chart rect.stage.unknown")).toHaveLength(1);
+    root.querySelector<SVGGElement>(".chart g.night")!.dispatchEvent(new FocusEvent("focus"));
+    expect(root.querySelector(".chart .detail")!.textContent).toBe("2026-11-05 · 8:00 · deep 1:00 · other stages unknown");
+  });
+
   it("says when a range holds only naps", () => {
     renderView("sleep", answer({ sleeps: [{ date: "2026-11-03", is_nap: true, duration_s: 1200 }, { date: "2026-11-04", is_nap: true, duration_s: 900 }] }), root, demoHost().callTool);
     expect(text()).toContain("Only naps in this range: 2.");
